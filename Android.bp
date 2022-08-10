@@ -1,0 +1,11 @@
+python_library_host {
+    name: "bumble",
+    srcs: [
+        "bumble/*.py",
+        "bumble/profiles/*.py",
+        "bumble/transport/*.py",
+    ],
+    libs: [
+        "py-cryptography",
+    ],
+}
