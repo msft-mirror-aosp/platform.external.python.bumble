@@ -32,6 +32,7 @@ from bumble.core import UUID, AdvertisingData
 from bumble.device import Device, Connection, Peer
 from bumble.utils import AsyncRunner
 from bumble.transport import open_transport_or_link
+from bumble.gatt import Characteristic
 
 from prompt_toolkit import Application
 from prompt_toolkit.history import FileHistory
@@ -121,6 +122,8 @@ class ConsoleApp:
                 },
                 'read': LiveCompleter(self.known_attributes),
                 'write': LiveCompleter(self.known_attributes),
+                'subscribe': LiveCompleter(self.known_attributes),
+                'unsubscribe': LiveCompleter(self.known_attributes),
                 'quit': None,
                 'exit': None
             })
@@ -330,9 +333,27 @@ class ConsoleApp:
 
         await self.show_attributes(attributes)
 
+    def find_characteristic(self, param):
+        parts = param.split('.')
+        if len(parts) == 2:
+            service_uuid = UUID(parts[0]) if parts[0] != '*' else None
+            characteristic_uuid = UUID(parts[1])
+            for service in self.connected_peer.services:
+                if service_uuid is None or service.uuid == service_uuid:
+                    for characteristic in service.characteristics:
+                        if characteristic.uuid == characteristic_uuid:
+                            return characteristic
+        elif len(parts) == 1:
+            if parts[0].startswith('#'):
+                attribute_handle = int(f'{parts[0][1:]}', 16)
+                for service in self.connected_peer.services:
+                    for characteristic in service.characteristics:
+                        if characteristic.handle == attribute_handle:
+                            return characteristic
+
     async def command(self, command):
         try:
-            (keyword, *params) = command.strip().split(' ', 1)
+            (keyword, *params) = command.strip().split(' ')
             keyword = keyword.replace('-', '_').lower()
             handler = getattr(self, f'do_{keyword}', None)
             if handler:
@@ -441,26 +462,73 @@ class ConsoleApp:
             self.show_error('invalid syntax', 'expected read <attribute>')
             return
 
-        parts = params[0].split('.')
-        if len(parts) == 2:
-            service_uuid = UUID(parts[0]) if parts[0] != '*' else None
-            characteristic_uuid = UUID(parts[1])
-            for service in self.connected_peer.services:
-                if service_uuid is None or service.uuid == service_uuid:
-                    for characteristic in service.characteristics:
-                        if characteristic.uuid == characteristic_uuid:
-                            value = await self.connected_peer.read_value(characteristic)
-                            self.append_to_output(f'VALUE: {value}')
-                            return
+        characteristic = self.find_characteristic(params[0])
+        if characteristic is None:
             self.show_error('no such characteristic')
-        elif len(parts) == 1:
-            if parts[0].startswith('#'):
-                attribute_handle = int(f'{parts[0][1:]}', 16)
-                value = await self.connected_peer.read_value(attribute_handle)
-                self.append_to_output(f'VALUE: {value}')
-                return
+            return
+
+        value = await characteristic.read_value()
+        self.append_to_output(f'VALUE: 0x{value.hex()}')
+
+    async def do_write(self, params):
+        if not self.connected_peer:
+            self.show_error('not connected')
+            return
+
+        if len(params) != 2:
+            self.show_error('invalid syntax', 'expected write <attribute> <value>')
+            return
+
+        if params[1].upper().startswith("0X"):
+            value = bytes.fromhex(params[1][2:])  # parse as hex string
         else:
+            try:
+                value = int(params[1])  # try as integer
+            except ValueError:
+                value = str.encode(params[1])  # must be a string
+
+        characteristic = self.find_characteristic(params[0])
+        if characteristic is None:
             self.show_error('no such characteristic')
+            return
+
+        # use write with response if supported
+        with_response = characteristic.properties & Characteristic.WRITE
+        await characteristic.write_value(value, with_response=with_response)
+
+    async def do_subscribe(self, params):
+        if not self.connected_peer:
+            self.show_error('not connected')
+            return
+
+        if len(params) != 1:
+            self.show_error('invalid syntax', 'expected subscribe <attribute>')
+            return
+
+        characteristic = self.find_characteristic(params[0])
+        if characteristic is None:
+            self.show_error('no such characteristic')
+            return
+
+        await characteristic.subscribe(
+            lambda value: self.append_to_output(f"{characteristic} VALUE: 0x{value.hex()}"),
+        )
+
+    async def do_unsubscribe(self, params):
+        if not self.connected_peer:
+            self.show_error('not connected')
+            return
+
+        if len(params) != 1:
+            self.show_error('invalid syntax', 'expected subscribe <attribute>')
+            return
+
+        characteristic = self.find_characteristic(params[0])
+        if characteristic is None:
+            self.show_error('no such characteristic')
+            return
+
+        await characteristic.unsubscribe()
 
     async def do_exit(self, params):
         self.ui.exit()

@@ -18,6 +18,7 @@
 import json
 import asyncio
 import logging
+from  contextlib import asynccontextmanager, AsyncExitStack
 
 from .hci import *
 from .host import Host
@@ -122,6 +123,9 @@ class Peer:
     async def subscribe(self, characteristic, subscriber=None):
         return await self.gatt_client.subscribe(characteristic, subscriber)
 
+    async def unsubscribe(self, characteristic, subscriber=None):
+        return await self.gatt_client.unsubscribe(characteristic, subscriber)
+
     async def read_value(self, attribute):
         return await self.gatt_client.read_value(attribute)
 
@@ -148,9 +152,23 @@ class Peer:
             await service.discover_characteristics()
             return self.create_service_proxy(proxy_class)
 
+    async def sustain(self, timeout=None):
+        await self.connection.sustain(timeout)
+
     # [Classic only]
     async def request_name(self):
         return await self.connection.request_remote_name()
+
+    async def __aenter__(self):
+        await self.discover_services()
+        for service in self.services:
+            await self.discover_characteristics()
+
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        pass
+
 
     def __str__(self):
         return f'{self.connection.peer_address} as {self.connection.role_name}'
@@ -232,6 +250,21 @@ class Connection(CompositeEventEmitter):
     async def encrypt(self):
         return await self.device.encrypt(self)
 
+    async def sustain(self, timeout=None):
+        """ Idles the current task waiting for a disconnect or timeout """
+
+        abort = asyncio.get_running_loop().create_future()
+        self.on('disconnection', abort.set_result)
+        self.on('disconnection_failure', abort.set_exception)
+
+        try:
+            await asyncio.wait_for(abort, timeout)
+        except asyncio.TimeoutError:
+            pass
+
+        self.remove_listener('disconnection', abort.set_result)
+        self.remove_listener('disconnection_failure', abort.set_exception)
+
     async def update_parameters(
         self,
         conn_interval_min,
@@ -250,6 +283,18 @@ class Connection(CompositeEventEmitter):
     # [Classic only]
     async def request_remote_name(self):
         return await self.device.request_remote_name(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            try:
+                await self.disconnect()
+            except HCI_StatusError as e:
+                # Invalid parameter means the connection is no longer valid
+                if e.error_code != HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR:
+                    raise
 
     def __str__(self):
         return f'Connection(handle=0x{self.handle:04X}, role={self.role_name}, address={self.peer_address})'
@@ -270,6 +315,8 @@ class DeviceConfiguration:
         self.le_simultaneous_enabled  = True
         self.classic_sc_enabled       = True
         self.classic_ssp_enabled      = True
+        self.connectable              = True
+        self.discoverable             = True
         self.advertising_data = bytes(
             AdvertisingData([(AdvertisingData.COMPLETE_LOCAL_NAME, bytes(self.name, 'utf-8'))])
         )
@@ -288,6 +335,8 @@ class DeviceConfiguration:
         self.le_simultaneous_enabled  = config.get('le_simultaneous_enabled', self.le_simultaneous_enabled)
         self.classic_sc_enabled       = config.get('classic_sc_enabled', self.classic_sc_enabled)
         self.classic_ssp_enabled      = config.get('classic_ssp_enabled', self.classic_ssp_enabled)
+        self.connectable              = config.get('connectable', self.connectable)
+        self.discoverable             = config.get('discoverable', self.discoverable)
 
         # Load or synthesize an IRK
         irk = config.get('irk')
@@ -313,6 +362,7 @@ class DeviceConfiguration:
 # (we define them outside of the Device class, because defining decorators
 #  within a class requires unnecessarily complicated acrobatics)
 # -----------------------------------------------------------------------------
+
 
 # Decorator that converts the first argument from a connection handle to a connection
 def with_connection_from_handle(function):
@@ -400,7 +450,8 @@ class Device(CompositeEventEmitter):
         self.command_timeout          = 10  # seconds
         self.gatt_server              = gatt_server.Server(self)
         self.sdp_server               = sdp.Server(self)
-        self.l2cap_channel_manager    = l2cap.ChannelManager()
+        self.l2cap_channel_manager    = l2cap.ChannelManager(
+            [l2cap.L2CAP_Information_Request.EXTENDED_FEATURE_FIXED_CHANNELS])
         self.advertisement_data       = {}
         self.scanning                 = False
         self.discovering              = False
@@ -408,8 +459,6 @@ class Device(CompositeEventEmitter):
         self.disconnecting            = False
         self.connections              = {}  # Connections, by connection handle
         self.classic_enabled          = False
-        self.discoverable             = False
-        self.connectable              = False
         self.inquiry_response         = None
         self.address_resolver         = None
 
@@ -430,6 +479,8 @@ class Device(CompositeEventEmitter):
         self.le_simultaneous_enabled  = config.le_simultaneous_enabled
         self.classic_ssp_enabled      = config.classic_ssp_enabled
         self.classic_sc_enabled       = config.classic_sc_enabled
+        self.discoverable             = config.discoverable
+        self.connectable              = config.connectable
 
         # If a name is passed, override the name from the config
         if name:
@@ -444,6 +495,10 @@ class Device(CompositeEventEmitter):
         # Setup SMP
         # TODO: allow using a public address
         self.smp_manager = smp.Manager(self, self.random_address)
+        self.l2cap_channel_manager.register_fixed_channel(
+            smp.SMP_CID, self.on_smp_pdu)
+        self.l2cap_channel_manager.register_fixed_channel(
+            smp.SMP_BR_CID, self.on_smp_pdu)
 
         # Register the SDP server with the L2CAP Channel Manager
         self.sdp_server.register(self.l2cap_channel_manager)
@@ -451,6 +506,7 @@ class Device(CompositeEventEmitter):
         # Add a GAP Service if requested
         if generic_access_service:
             self.gatt_server.add_service(GenericAccessService(self.name))
+        self.l2cap_channel_manager.register_fixed_channel(ATT_CID, self.on_gatt_pdu)
 
         # Forward some events
         setup_event_forwarding(self.gatt_server, self, 'characteristic_subscription')
@@ -528,11 +584,12 @@ class Device(CompositeEventEmitter):
             logger.debug(color(f'BD_ADDR: {response.return_parameters.bd_addr}', 'yellow'))
             self.public_address = response.return_parameters.bd_addr
 
+        if self.host.supports_command(HCI_WRITE_LE_HOST_SUPPORT_COMMAND):
+            await self.send_command(HCI_Write_LE_Host_Support_Command(
+                le_supported_host    = int(self.le_enabled),
+                simultaneous_le_host = int(self.le_simultaneous_enabled),
+            ))
 
-        await self.send_command(HCI_Write_LE_Host_Support_Command(
-            le_supported_host = int(self.le_enabled),
-            simultaneous_le_host = int(self.le_simultaneous_enabled),
-        ))
         if self.le_enabled:
             # Set the controller address
             await self.send_command(HCI_LE_Set_Random_Address_Command(
@@ -577,6 +634,8 @@ class Device(CompositeEventEmitter):
                 HCI_Write_Secure_Connections_Host_Support_Command(
                     secure_connections_host_support=int(self.classic_sc_enabled))
             )
+            await self.set_connectable(self.connectable)
+            await self.set_discoverable(self.discoverable)
 
         # Let the SMP manager know about the address
         # TODO: allow using a public address
@@ -704,7 +763,7 @@ class Device(CompositeEventEmitter):
         ))
         if response.status != HCI_Command_Status_Event.PENDING:
             self.discovering = False
-            raise RuntimeError(f'HCI_Inquiry command failed: {HCI_Constant.status_name(response.status)} ({response.status})')
+            raise HCI_StatusError(response)
 
         self.discovering = True
 
@@ -785,7 +844,7 @@ class Device(CompositeEventEmitter):
             try:
                 peer_address = Address(peer_address)
             except ValueError:
-                # If the address is not parssable, assume it is a name instead
+                # If the address is not parsable, assume it is a name instead
                 logger.debug('looking for peer by name')
                 peer_address = await self.find_peer_by_name(peer_address, transport)
 
@@ -824,15 +883,24 @@ class Device(CompositeEventEmitter):
 
         try:
             if result.status != HCI_Command_Status_Event.PENDING:
-                raise RuntimeError(f'HCI_LE_Create_Connection_Command failed: {HCI_Constant.status_name(result.status)} ({result.status})')
+                raise HCI_StatusError(result)
 
             # Wait for the connection process to complete
             self.connecting = True
             return await pending_connection
+
         finally:
             self.remove_listener('connection', pending_connection.set_result)
             self.remove_listener('connection_failure', pending_connection.set_exception)
             self.connecting = False
+
+    @asynccontextmanager
+    async def connect_as_gatt(self, peer_address):
+        async with AsyncExitStack() as stack:
+            connection = await stack.enter_async_context(await self.connect(peer_address))
+            peer = await stack.enter_async_context(Peer(connection))
+
+            yield peer
 
     @property
     def is_connecting(self):
@@ -858,7 +926,7 @@ class Device(CompositeEventEmitter):
 
         try:
             if result.status != HCI_Command_Status_Event.PENDING:
-                raise RuntimeError(f'HCI_Disconnect_Command failed: {HCI_Constant.status_name(result.status)} ({result.status})')
+                raise HCI_StatusError(result)
 
             # Wait for the disconnection process to complete
             self.disconnecting = True
@@ -1010,7 +1078,7 @@ class Device(CompositeEventEmitter):
             )
             if result.status != HCI_COMMAND_STATUS_PENDING:
                 logger.warn(f'HCI_Authentication_Requested_Command failed: {HCI_Constant.error_name(result.status)}')
-                raise HCI_Error(result.status)
+                raise HCI_StatusError(result)
 
             # Wait for the authentication to complete
             await pending_authentication
@@ -1057,7 +1125,7 @@ class Device(CompositeEventEmitter):
                     raise InvalidStateError('only centrals can start encryption')
 
                 result = await self.send_command(
-                    HCI_LE_Start_Encryption_Command(
+                    HCI_LE_Enable_Encryption_Command(
                         connection_handle     = connection.handle,
                         random_number         = rand,
                         encrypted_diversifier = ediv,
@@ -1066,8 +1134,8 @@ class Device(CompositeEventEmitter):
                 )
 
                 if result.status != HCI_COMMAND_STATUS_PENDING:
-                    logger.warn(f'HCI_LE_Start_Encryption_Command failed: {HCI_Constant.error_name(result.status)}')
-                    raise HCI_Error(result.status)
+                    logger.warn(f'HCI_LE_Enable_Encryption_Command failed: {HCI_Constant.error_name(result.status)}')
+                    raise HCI_StatusError(result)
             else:
                 result = await self.send_command(
                     HCI_Set_Connection_Encryption_Command(
@@ -1078,7 +1146,7 @@ class Device(CompositeEventEmitter):
 
                 if result.status != HCI_COMMAND_STATUS_PENDING:
                     logger.warn(f'HCI_Set_Connection_Encryption_Command failed: {HCI_Constant.error_name(result.status)}')
-                    raise HCI_Error(result.status)
+                    raise HCI_StatusError(result)
 
             # Wait for the result
             await pending_encryption
@@ -1112,7 +1180,7 @@ class Device(CompositeEventEmitter):
 
             if result.status != HCI_COMMAND_STATUS_PENDING:
                 logger.warn(f'HCI_Set_Connection_Encryption_Command failed: {HCI_Constant.error_name(result.status)}')
-                raise HCI_Error(result.status)
+                raise HCI_StatusError(result)
 
             # Wait for the result
             return await pending_name
@@ -1442,7 +1510,6 @@ class Device(CompositeEventEmitter):
     def on_pairing_failure(self, connection, reason):
         connection.emit('pairing_failure', reason)
 
-    @host_event_handler
     @with_connection_from_handle
     def on_gatt_pdu(self, connection, pdu):
         # Parse the L2CAP payload into an ATT PDU object
@@ -1461,7 +1528,6 @@ class Device(CompositeEventEmitter):
                 return
             connection.gatt_server.on_gatt_pdu(connection, att_pdu)
 
-    @host_event_handler
     @with_connection_from_handle
     def on_smp_pdu(self, connection, pdu):
         self.smp_manager.on_smp_pdu(connection, pdu)
