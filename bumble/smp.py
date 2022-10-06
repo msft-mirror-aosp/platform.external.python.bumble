@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # -----------------------------------------------------------------------------
 SMP_CID = 0x06
+SMP_BR_CID = 0x07
 
 SMP_PAIRING_REQUEST_COMMAND               = 0x01
 SMP_PAIRING_RESPONSE_COMMAND              = 0x02
@@ -152,6 +153,8 @@ SMP_CT2_AUTHREQ      = 0b00100000
 
 # Crypto salt
 SMP_CTKD_H7_LEBR_SALT = bytes.fromhex('00000000000000000000000000000000746D7031')
+SMP_CTKD_H7_BRLE_SALT = bytes.fromhex('00000000000000000000000000000000746D7032')
+
 
 # -----------------------------------------------------------------------------
 # Utils
@@ -598,6 +601,7 @@ class Session:
         self.pairing_config              = pairing_config
         self.wait_before_continuing      = None
         self.completed                   = False
+        self.ctkd_task                   = None
 
         # Decide if we're the initiator or the responder
         self.is_initiator = (connection.role == BT_CENTRAL_ROLE)
@@ -868,7 +872,7 @@ class Session:
         # distribute the long term and/or other keys over an encrypted connection
         asyncio.create_task(
             self.manager.device.host.send_command(
-                HCI_LE_Start_Encryption_Command(
+                HCI_LE_Enable_Encryption_Command(
                     connection_handle     = self.connection.handle,
                     random_number         = bytes(8),
                     encrypted_diversifier = 0,
@@ -877,10 +881,21 @@ class Session:
             )
         )
 
+    async def derive_ltk(self):
+        link_key = await self.manager.device.get_link_key(self.connection.peer_address)
+        assert link_key is not None
+        ilk = crypto.h7(
+            salt=SMP_CTKD_H7_BRLE_SALT,
+            w=link_key) if self.ct2 else crypto.h6(link_key, b'tmp2')
+        self.ltk = crypto.h6(ilk, b'brle')
+
     def distribute_keys(self):
         # Distribute the keys as required
         if self.is_initiator:
-            if not self.sc:
+            # CTKD: Derive LTK from LinkKey
+            if self.connection.transport == BT_BR_EDR_TRANSPORT and self.initiator_key_distribution & SMP_ENC_KEY_DISTRIBUTION_FLAG:
+                self.ctkd_task = asyncio.create_task(self.derive_ltk())
+            elif not self.sc:
                 # Distribute the LTK, EDIV and RAND
                 if self.initiator_key_distribution & SMP_ENC_KEY_DISTRIBUTION_FLAG:
                     self.send_command(SMP_Encryption_Information_Command(long_term_key=self.ltk))
@@ -900,7 +915,7 @@ class Session:
             csrk = bytes(16)  # FIXME: testing
             if self.initiator_key_distribution & SMP_SIGN_KEY_DISTRIBUTION_FLAG:
                 self.send_command(SMP_Signing_Information_Command(signature_key=csrk))
-            
+
             # CTKD, calculate BR/EDR link key
             if self.initiator_key_distribution & SMP_LINK_KEY_DISTRIBUTION_FLAG:
                 ilk = crypto.h7(
@@ -909,8 +924,11 @@ class Session:
                 self.link_key = crypto.h6(ilk, b'lebr')
 
         else:
+            # CTKD: Derive LTK from LinkKey
+            if self.connection.transport == BT_BR_EDR_TRANSPORT and self.responder_key_distribution & SMP_ENC_KEY_DISTRIBUTION_FLAG:
+                self.ctkd_task = asyncio.create_task(self.derive_ltk())
             # Distribute the LTK, EDIV and RAND
-            if not self.sc:
+            elif not self.sc:
                 if self.responder_key_distribution & SMP_ENC_KEY_DISTRIBUTION_FLAG:
                     self.send_command(SMP_Encryption_Information_Command(long_term_key=self.ltk))
                     self.send_command(SMP_Master_Identification_Command(ediv=self.ltk_ediv, rand=self.ltk_rand))
@@ -929,7 +947,7 @@ class Session:
             csrk = bytes(16)  # FIXME: testing
             if self.responder_key_distribution & SMP_SIGN_KEY_DISTRIBUTION_FLAG:
                 self.send_command(SMP_Signing_Information_Command(signature_key=csrk))
-            
+
             # CTKD, calculate BR/EDR link key
             if self.responder_key_distribution & SMP_LINK_KEY_DISTRIBUTION_FLAG:
                 ilk = crypto.h7(
@@ -940,7 +958,7 @@ class Session:
     def compute_peer_expected_distributions(self, key_distribution_flags):
         # Set our expectations for what to wait for in the key distribution phase
         self.peer_expected_distributions = []
-        if not self.sc:
+        if not self.sc and self.connection.transport == BT_LE_TRANSPORT:
             if (key_distribution_flags & SMP_ENC_KEY_DISTRIBUTION_FLAG != 0):
                 self.peer_expected_distributions.append(SMP_Encryption_Information_Command)
                 self.peer_expected_distributions.append(SMP_Master_Identification_Command)
@@ -963,12 +981,7 @@ class Session:
             self.peer_expected_distributions.remove(command_class)
             logger.debug(f'remaining distributions: {[c.__name__ for c in self.peer_expected_distributions]}')
             if not self.peer_expected_distributions:
-                # The initiator can now send its keys
-                if self.is_initiator:
-                    self.distribute_keys()
-
-                # Nothing left to expect, we're done
-                self.on_pairing()
+                self.on_peer_key_distribution_complete()
         else:
             logger.warn(color(f'!!! unexpected key distribution command: {command_class.__name__}', 'red'))
             self.send_pairing_failed(SMP_UNSPECIFIED_REASON_ERROR)
@@ -989,17 +1002,28 @@ class Session:
         self.connection.remove_listener('connection_encryption_key_refresh', self.on_connection_encryption_key_refresh)
         self.manager.on_session_end(self)
 
+    def on_peer_key_distribution_complete(self):
+        # The initiator can now send its keys
+        if self.is_initiator:
+            self.distribute_keys()
+
+        asyncio.create_task(self.on_pairing())
+
     def on_connection_encryption_change(self):
         if self.connection.is_encrypted:
             if self.is_responder:
                 # The responder distributes its keys first, the initiator later
                 self.distribute_keys()
 
+            # If we're not expecting key distributions from the peer, we're done
+            if not self.peer_expected_distributions:
+                self.on_peer_key_distribution_complete()
+
     def on_connection_encryption_key_refresh(self):
         # Do as if the connection had just been encrypted
         self.on_connection_encryption_change()
 
-    def on_pairing(self):
+    async def on_pairing(self):
         logger.debug('pairing complete')
 
         if self.completed:
@@ -1016,11 +1040,16 @@ class Session:
         else:
             peer_address = self.connection.peer_address
 
+        # Wait for link key fetch and key derivation
+        if self.ctkd_task is not None:
+            await self.ctkd_task
+            self.ctkd_task = None
+
         # Create an object to hold the keys
         keys = PairingKeys()
         keys.address_type = peer_address.address_type
         authenticated = self.pairing_method != self.JUST_WORKS
-        if self.sc:
+        if self.sc or self.connection.transport == BT_BR_EDR_TRANSPORT:
             keys.ltk = PairingKeys.Key(
                 value         = self.ltk,
                 authenticated = authenticated
@@ -1059,7 +1088,6 @@ class Session:
                 value         = self.link_key,
                 authenticated = authenticated
             )
-
         self.manager.on_pairing(self, peer_address, keys)
 
     def on_pairing_failure(self, reason):
@@ -1136,6 +1164,12 @@ class Session:
 
         # Respond
         self.send_pairing_response_command()
+
+        # Vol 3, Part C, 5.2.2.1.3
+        # CTKD over BR/EDR should happen after the connection has been encrypted,
+        # so when receiving pairing requests, responder should start distributing keys
+        if self.connection.transport == BT_BR_EDR_TRANSPORT and self.connection.is_encrypted and self.is_responder and accepted:
+            self.distribute_keys()
 
     def on_smp_pairing_response_command(self, command):
         if self.is_responder:
@@ -1462,7 +1496,8 @@ class Manager(EventEmitter):
 
     def send_command(self, connection, command):
         logger.debug(f'>>> Sending SMP Command on connection [0x{connection.handle:04X}] {connection.peer_address}: {command}')
-        connection.send_l2cap_pdu(SMP_CID, command.to_bytes())
+        cid = SMP_BR_CID if connection.transport == BT_BR_EDR_TRANSPORT else SMP_CID
+        connection.send_l2cap_pdu(cid, command.to_bytes())
 
     def on_smp_pdu(self, connection, pdu):
         # Look for a session with this connection, and create one if none exists
