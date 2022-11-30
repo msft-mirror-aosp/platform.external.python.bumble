@@ -91,6 +91,10 @@ class TimeoutError(Exception):
     """ Timeout Error """
 
 
+class CommandTimeoutError(Exception):
+    """ Command Timeout Error """
+
+
 class InvalidStateError(Exception):
     """ Invalid State Error """
 
@@ -99,6 +103,11 @@ class ConnectionError(BaseError):
     """ Connection Error """
     FAILURE            = 0x01
     CONNECTION_REFUSED = 0x02
+
+    def __init__(self, error_code, transport, peer_address, error_namespace='', error_name='', details=''):
+        super().__init__(error_code, error_namespace, error_name, details)
+        self.transport = transport
+        self.peer_address = peer_address
 
 
 # -----------------------------------------------------------------------------
@@ -760,17 +769,20 @@ class AdvertisingData:
     def ad_data_to_object(ad_type, ad_data):
         if ad_type in {
             AdvertisingData.COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
-            AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS
+            AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
+            AdvertisingData.LIST_OF_16_BIT_SERVICE_SOLICITATION_UUIDS
         }:
             return AdvertisingData.uuid_list_to_objects(ad_data, 2)
         elif ad_type in {
             AdvertisingData.COMPLETE_LIST_OF_32_BIT_SERVICE_CLASS_UUIDS,
-            AdvertisingData.INCOMPLETE_LIST_OF_32_BIT_SERVICE_CLASS_UUIDS
+            AdvertisingData.INCOMPLETE_LIST_OF_32_BIT_SERVICE_CLASS_UUIDS,
+            AdvertisingData.LIST_OF_32_BIT_SERVICE_SOLICITATION_UUIDS
         }:
             return AdvertisingData.uuid_list_to_objects(ad_data, 4)
         elif ad_type in {
             AdvertisingData.COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
-            AdvertisingData.INCOMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS
+            AdvertisingData.INCOMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
+            AdvertisingData.LIST_OF_128_BIT_SERVICE_SOLICITATION_UUIDS
         }:
             return AdvertisingData.uuid_list_to_objects(ad_data, 16)
         elif ad_type == AdvertisingData.SERVICE_DATA_16_BIT_UUID:
@@ -781,11 +793,24 @@ class AdvertisingData:
             return (UUID.from_bytes(ad_data[:16]), ad_data[16:])
         elif ad_type in {
             AdvertisingData.SHORTENED_LOCAL_NAME,
-            AdvertisingData.COMPLETE_LOCAL_NAME
+            AdvertisingData.COMPLETE_LOCAL_NAME,
+            AdvertisingData.URI
         }:
             return ad_data.decode("utf-8")
-        elif ad_type == AdvertisingData.TX_POWER_LEVEL:
+        elif ad_type in {
+            AdvertisingData.TX_POWER_LEVEL,
+            AdvertisingData.FLAGS
+        }:
             return ad_data[0]
+        elif ad_type in {
+            AdvertisingData.APPEARANCE,
+            AdvertisingData.ADVERTISING_INTERVAL
+        }:
+            return struct.unpack('<H', ad_data)[0]
+        elif ad_type == AdvertisingData.CLASS_OF_DEVICE:
+            return struct.unpack('<I', bytes([*ad_data, 0]))[0]
+        elif ad_type == AdvertisingData.PERIPHERAL_CONNECTION_INTERVAL_RANGE:
+            return struct.unpack('<HH', ad_data)
         elif ad_type == AdvertisingData.MANUFACTURER_SPECIFIC_DATA:
             return (struct.unpack_from('<H', ad_data, 0)[0], ad_data[2:])
         else:
@@ -802,7 +827,7 @@ class AdvertisingData:
                 self.ad_structures.append((ad_type, ad_data))
             offset += length
 
-    def get(self, type_id, return_all=False, raw=True):
+    def get(self, type_id, return_all=False, raw=False):
         '''
         Get Advertising Data Structure(s) with a given type
 
@@ -831,13 +856,17 @@ class AdvertisingData:
 # Connection Parameters
 # -----------------------------------------------------------------------------
 class ConnectionParameters:
-    def __init__(self, connection_interval, connection_latency, supervision_timeout):
+    def __init__(self, connection_interval, peripheral_latency, supervision_timeout):
         self.connection_interval = connection_interval
-        self.connection_latency  = connection_latency
+        self.peripheral_latency  = peripheral_latency
         self.supervision_timeout = supervision_timeout
 
     def __str__(self):
-        return f'ConnectionParameters(connection_interval={self.connection_interval}, connection_latency={self.connection_latency}, supervision_timeout={self.supervision_timeout}'
+        return (
+            f'ConnectionParameters(connection_interval={self.connection_interval}, '
+            f'peripheral_latency={self.peripheral_latency}, '
+            f'supervision_timeout={self.supervision_timeout}'
+        )
 
 
 # -----------------------------------------------------------------------------
