@@ -28,6 +28,7 @@ from bumble.device import Device, Peer
 from bumble.host import Host
 from bumble.gatt import (
     GATT_BATTERY_LEVEL_CHARACTERISTIC,
+    GATT_CLIENT_CHARACTERISTIC_CONFIGURATION_DESCRIPTOR,
     CharacteristicAdapter,
     DelegatedCharacteristicAdapter,
     PackedCharacteristicAdapter,
@@ -225,6 +226,37 @@ async def test_characteristic_encoding():
     await async_barrier()
     assert last_change is None
 
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_attribute_getters():
+    [client, server] = LinkedDevices().devices[:2]
+
+    characteristic_uuid = UUID('FDB159DB-036C-49E3-B3DB-6325AC750806')
+    characteristic = Characteristic(
+        characteristic_uuid,
+        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.READABLE | Characteristic.WRITEABLE,
+        bytes([123])
+    )
+
+    service_uuid = UUID('3A657F47-D34F-46B3-B1EC-698E29B6B829')
+    service = Service(service_uuid, [characteristic])
+    server.add_service(service)
+
+    service_attr = server.gatt_server.get_service_attribute(service_uuid)
+    assert service_attr
+
+    (char_decl_attr, char_value_attr) = server.gatt_server.get_characteristic_attributes(service_uuid, characteristic_uuid)
+    assert char_decl_attr and char_value_attr
+
+    desc_attr = server.gatt_server.get_descriptor_attribute(service_uuid, characteristic_uuid, GATT_CLIENT_CHARACTERISTIC_CONFIGURATION_DESCRIPTOR)
+    assert desc_attr
+
+    # assert all handles are in expected order
+    assert service_attr.handle < char_decl_attr.handle < char_value_attr.handle < desc_attr.handle == service_attr.end_group_handle
+    # assert characteristic declarations attribute is followed by characteristic value attribute
+    assert char_decl_attr.handle + 1 == char_value_attr.handle
 
 # -----------------------------------------------------------------------------
 def test_CharacteristicAdapter():
@@ -704,6 +736,55 @@ async def test_mtu_exchange():
     assert d2_client_mtu == 50
     assert d2_connection.att_mtu == 50
 
+
+# -----------------------------------------------------------------------------
+def test_char_property_to_string():
+    # single
+    assert Characteristic.property_name(0x01) == "BROADCAST"
+    assert Characteristic.property_name(Characteristic.BROADCAST) == "BROADCAST"
+
+    # double
+    assert Characteristic.properties_as_string(0x03) == "BROADCAST,READ"
+    assert Characteristic.properties_as_string(Characteristic.BROADCAST | Characteristic.READ) == "BROADCAST,READ"
+
+
+# -----------------------------------------------------------------------------
+def test_char_property_string_to_type():
+    # single
+    assert Characteristic.string_to_properties("BROADCAST") == Characteristic.BROADCAST
+
+    # double
+    assert Characteristic.string_to_properties("BROADCAST,READ") == Characteristic.BROADCAST | Characteristic.READ
+    assert Characteristic.string_to_properties("READ,BROADCAST") == Characteristic.BROADCAST | Characteristic.READ
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_server_string():
+    [_, server] = LinkedDevices().devices[:2]
+
+    characteristic = Characteristic(
+        'FDB159DB-036C-49E3-B3DB-6325AC750806',
+        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.READABLE | Characteristic.WRITEABLE,
+        bytes([123])
+    )
+
+    service = Service(
+        '3A657F47-D34F-46B3-B1EC-698E29B6B829',
+        [characteristic]
+    )
+    server.add_service(service)
+
+    assert str(server.gatt_server) == """Service(handle=0x0001, end=0x0005, uuid=UUID-16:1800 (Generic Access))
+CharacteristicDeclaration(handle=0x0002, value_handle=0x0003, uuid=UUID-16:2A00 (Device Name), properties=READ)
+Characteristic(handle=0x0003, end=0x0003, uuid=UUID-16:2A00 (Device Name), properties=READ)
+CharacteristicDeclaration(handle=0x0004, value_handle=0x0005, uuid=UUID-16:2A01 (Appearance), properties=READ)
+Characteristic(handle=0x0005, end=0x0005, uuid=UUID-16:2A01 (Appearance), properties=READ)
+Service(handle=0x0006, end=0x0009, uuid=3A657F47-D34F-46B3-B1EC-698E29B6B829)
+CharacteristicDeclaration(handle=0x0007, value_handle=0x0008, uuid=FDB159DB-036C-49E3-B3DB-6325AC750806, properties=READ,WRITE,NOTIFY)
+Characteristic(handle=0x0008, end=0x0009, uuid=FDB159DB-036C-49E3-B3DB-6325AC750806, properties=READ,WRITE,NOTIFY)
+Descriptor(handle=0x0009, type=UUID-16:2902 (Client Characteristic Configuration), value=0000)"""
 
 # -----------------------------------------------------------------------------
 async def async_main():
