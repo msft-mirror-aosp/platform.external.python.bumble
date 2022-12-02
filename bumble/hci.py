@@ -62,6 +62,18 @@ def map_class_of_device(class_of_device):
     return f'[{class_of_device:06X}] Services({",".join(DeviceClass.service_class_labels(service_classes))}),Class({DeviceClass.major_device_class_name(major_device_class)}|{DeviceClass.minor_device_class_name(major_device_class, minor_device_class)})'
 
 
+def phy_list_to_bits(phys):
+    if phys is None:
+        return 0
+    else:
+        phy_bits = 0
+        for phy in phys:
+            if phy not in HCI_LE_PHY_TYPE_TO_BIT:
+                raise ValueError('invalid PHY')
+            phy_bits |= (1 << HCI_LE_PHY_TYPE_TO_BIT[phy])
+        return phy_bits
+
+
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
@@ -81,6 +93,25 @@ HCI_VERSION_BLUETOOTH_CORE_5_1     = 10
 HCI_VERSION_BLUETOOTH_CORE_5_2     = 11
 HCI_VERSION_BLUETOOTH_CORE_5_3     = 12
 
+HCI_VERSION_NAMES = {
+    HCI_VERSION_BLUETOOTH_CORE_1_0B:    'HCI_VERSION_BLUETOOTH_CORE_1_0B',
+    HCI_VERSION_BLUETOOTH_CORE_1_1:     'HCI_VERSION_BLUETOOTH_CORE_1_1',
+    HCI_VERSION_BLUETOOTH_CORE_1_2:     'HCI_VERSION_BLUETOOTH_CORE_1_2',
+    HCI_VERSION_BLUETOOTH_CORE_2_0_EDR: 'HCI_VERSION_BLUETOOTH_CORE_2_0_EDR',
+    HCI_VERSION_BLUETOOTH_CORE_2_1_EDR: 'HCI_VERSION_BLUETOOTH_CORE_2_1_EDR',
+    HCI_VERSION_BLUETOOTH_CORE_3_0_HS:  'HCI_VERSION_BLUETOOTH_CORE_3_0_HS',
+    HCI_VERSION_BLUETOOTH_CORE_4_0:     'HCI_VERSION_BLUETOOTH_CORE_4_0',
+    HCI_VERSION_BLUETOOTH_CORE_4_1:     'HCI_VERSION_BLUETOOTH_CORE_4_1',
+    HCI_VERSION_BLUETOOTH_CORE_4_2:     'HCI_VERSION_BLUETOOTH_CORE_4_2',
+    HCI_VERSION_BLUETOOTH_CORE_5_0:     'HCI_VERSION_BLUETOOTH_CORE_5_0',
+    HCI_VERSION_BLUETOOTH_CORE_5_1:     'HCI_VERSION_BLUETOOTH_CORE_5_1',
+    HCI_VERSION_BLUETOOTH_CORE_5_2:     'HCI_VERSION_BLUETOOTH_CORE_5_2',
+    HCI_VERSION_BLUETOOTH_CORE_5_3:     'HCI_VERSION_BLUETOOTH_CORE_5_3'
+}
+
+# LMP Version
+LMP_VERSION_NAMES = HCI_VERSION_NAMES
+
 # HCI Packet types
 HCI_COMMAND_PACKET          = 0x01
 HCI_ACL_DATA_PACKET         = 0x02
@@ -88,544 +119,546 @@ HCI_SYNCHRONOUS_DATA_PACKET = 0x03
 HCI_EVENT_PACKET            = 0x04
 
 # HCI Event Codes
-HCI_INQUIRY_COMPLETE_EVENT                            = 0x01
-HCI_INQUIRY_RESULT_EVENT                              = 0x02
-HCI_CONNECTION_COMPLETE_EVENT                         = 0x03
-HCI_CONNECTION_REQUEST_EVENT                          = 0x04
-HCI_DISCONNECTION_COMPLETE_EVENT                      = 0x05
-HCI_AUTHENTICATION_COMPLETE_EVENT                     = 0x06
-HCI_REMOTE_NAME_REQUEST_COMPLETE_EVENT                = 0x07
-HCI_ENCRYPTION_CHANGE_EVENT                           = 0x08
-HCI_CHANGE_CONNECTION_LINK_KEY_COMPLETE_EVENT         = 0x09
-HCI_LINK_KEY_TYPE_CHANGED_EVENT                       = 0x0A
-HCI_READ_REMOTE_SUPPORTED_FEATURES_COMPLETE_EVENT     = 0x0B
-HCI_READ_REMOTE_VERSION_INFORMATION_COMPLETE_EVENT    = 0x0C
-HCI_QOS_SETUP_COMPLETE_EVENT                          = 0x0D
-HCI_COMMAND_COMPLETE_EVENT                            = 0x0E
-HCI_COMMAND_STATUS_EVENT                              = 0x0F
-HCI_HARDWARE_ERROR_EVENT                              = 0x10
-HCI_FLUSH_OCCURRED_EVENT                              = 0x11
-HCI_ROLE_CHANGE_EVENT                                 = 0x12
-HCI_NUMBER_OF_COMPLETED_PACKETS_EVENT                 = 0x13
-HCI_MODE_CHANGE_EVENT                                 = 0x14
-HCI_RETURN_LINK_KEYS_EVENT                            = 0x15
-HCI_PIN_CODE_REQUEST_EVENT                            = 0x16
-HCI_LINK_KEY_REQUEST_EVENT                            = 0x17
-HCI_LINK_KEY_NOTIFICATION_EVENT                       = 0x18
-HCI_LOOPBACK_COMMAND_EVENT                            = 0x19
-HCI_DATA_BUFFER_OVERFLOW_EVENT                        = 0x1A
-HCI_MAX_SLOTS_CHANGE_EVENT                            = 0x1B
-HCI_READ_CLOCK_OFFSET_COMPLETE_EVENT                  = 0x1C
-HCI_CONNECTION_PACKET_TYPE_CHANGED_EVENT              = 0x1D
-HCI_QOS_VIOLATION_EVENT                               = 0x1E
-HCI_PAGE_SCAN_REPETITION_MODE_CHANGE_EVENT            = 0x20
-HCI_FLOW_SPECIFICATION_COMPLETE_EVENT                 = 0x21
-HCI_INQUIRY_RESULT_WITH_RSSI_EVENT                    = 0x22
-HCI_READ_REMOTE_EXTENDED_FEATURES_COMPLETE_EVENT      = 0x23
-HCI_SYNCHRONOUS_CONNECTION_COMPLETE_EVENT             = 0x2C
-HCI_SYNCHRONOUS_CONNECTION_CHANGED_EVENT              = 0x2D
-HCI_SNIFF_SUBRATING_EVENT                             = 0x2E
-HCI_EXTENDED_INQUIRY_RESULT_EVENT                     = 0x2F
-HCI_ENCRYPTION_KEY_REFRESH_COMPLETE_EVENT             = 0x30
-HCI_IO_CAPABILITY_REQUEST_EVENT                       = 0x31
-HCI_IO_CAPABILITY_RESPONSE_EVENT                      = 0x32
-HCI_USER_CONFIRMATION_REQUEST_EVENT                   = 0x33
-HCI_USER_PASSKEY_REQUEST_EVENT                        = 0x34
-HCI_REMOTE_OOB_DATA_REQUEST                           = 0x35
-HCI_SIMPLE_PAIRING_COMPLETE_EVENT                     = 0x36
-HCI_LINK_SUPERVISION_TIMEOUT_CHANGED_EVENT            = 0x38
-HCI_ENHANCED_FLUSH_COMPLETE_EVENT                     = 0x39
-HCI_USER_PASSKEY_NOTIFICATION_EVENT                   = 0x3B
-HCI_KEYPRESS_NOTIFICATION_EVENT                       = 0x3C
-HCI_REMOTE_HOST_SUPPORTED_FEATURES_NOTIFICATION_EVENT = 0x3D
-HCI_LE_META_EVENT                                     = 0x3E
-HCI_NUMBER_OF_COMPLETED_DATA_BLOCKS_EVENT             = 0x48
+HCI_INQUIRY_COMPLETE_EVENT                                       = 0x01
+HCI_INQUIRY_RESULT_EVENT                                         = 0x02
+HCI_CONNECTION_COMPLETE_EVENT                                    = 0x03
+HCI_CONNECTION_REQUEST_EVENT                                     = 0x04
+HCI_DISCONNECTION_COMPLETE_EVENT                                 = 0x05
+HCI_AUTHENTICATION_COMPLETE_EVENT                                = 0x06
+HCI_REMOTE_NAME_REQUEST_COMPLETE_EVENT                           = 0x07
+HCI_ENCRYPTION_CHANGE_EVENT                                      = 0x08
+HCI_CHANGE_CONNECTION_LINK_KEY_COMPLETE_EVENT                    = 0x09
+HCI_LINK_KEY_TYPE_CHANGED_EVENT                                  = 0x0A
+HCI_READ_REMOTE_SUPPORTED_FEATURES_COMPLETE_EVENT                = 0x0B
+HCI_READ_REMOTE_VERSION_INFORMATION_COMPLETE_EVENT               = 0x0C
+HCI_QOS_SETUP_COMPLETE_EVENT                                     = 0x0D
+HCI_COMMAND_COMPLETE_EVENT                                       = 0x0E
+HCI_COMMAND_STATUS_EVENT                                         = 0x0F
+HCI_HARDWARE_ERROR_EVENT                                         = 0x10
+HCI_FLUSH_OCCURRED_EVENT                                         = 0x11
+HCI_ROLE_CHANGE_EVENT                                            = 0x12
+HCI_NUMBER_OF_COMPLETED_PACKETS_EVENT                            = 0x13
+HCI_MODE_CHANGE_EVENT                                            = 0x14
+HCI_RETURN_LINK_KEYS_EVENT                                       = 0x15
+HCI_PIN_CODE_REQUEST_EVENT                                       = 0x16
+HCI_LINK_KEY_REQUEST_EVENT                                       = 0x17
+HCI_LINK_KEY_NOTIFICATION_EVENT                                  = 0x18
+HCI_LOOPBACK_COMMAND_EVENT                                       = 0x19
+HCI_DATA_BUFFER_OVERFLOW_EVENT                                   = 0x1A
+HCI_MAX_SLOTS_CHANGE_EVENT                                       = 0x1B
+HCI_READ_CLOCK_OFFSET_COMPLETE_EVENT                             = 0x1C
+HCI_CONNECTION_PACKET_TYPE_CHANGED_EVENT                         = 0x1D
+HCI_QOS_VIOLATION_EVENT                                          = 0x1E
+HCI_PAGE_SCAN_REPETITION_MODE_CHANGE_EVENT                       = 0x20
+HCI_FLOW_SPECIFICATION_COMPLETE_EVENT                            = 0x21
+HCI_INQUIRY_RESULT_WITH_RSSI_EVENT                               = 0x22
+HCI_READ_REMOTE_EXTENDED_FEATURES_COMPLETE_EVENT                 = 0x23
+HCI_SYNCHRONOUS_CONNECTION_COMPLETE_EVENT                        = 0x2C
+HCI_SYNCHRONOUS_CONNECTION_CHANGED_EVENT                         = 0x2D
+HCI_SNIFF_SUBRATING_EVENT                                        = 0x2E
+HCI_EXTENDED_INQUIRY_RESULT_EVENT                                = 0x2F
+HCI_ENCRYPTION_KEY_REFRESH_COMPLETE_EVENT                        = 0x30
+HCI_IO_CAPABILITY_REQUEST_EVENT                                  = 0x31
+HCI_IO_CAPABILITY_RESPONSE_EVENT                                 = 0x32
+HCI_USER_CONFIRMATION_REQUEST_EVENT                              = 0x33
+HCI_USER_PASSKEY_REQUEST_EVENT                                   = 0x34
+HCI_REMOTE_OOB_DATA_REQUEST                                      = 0x35
+HCI_SIMPLE_PAIRING_COMPLETE_EVENT                                = 0x36
+HCI_LINK_SUPERVISION_TIMEOUT_CHANGED_EVENT                       = 0x38
+HCI_ENHANCED_FLUSH_COMPLETE_EVENT                                = 0x39
+HCI_USER_PASSKEY_NOTIFICATION_EVENT                              = 0x3B
+HCI_KEYPRESS_NOTIFICATION_EVENT                                  = 0x3C
+HCI_REMOTE_HOST_SUPPORTED_FEATURES_NOTIFICATION_EVENT            = 0x3D
+HCI_LE_META_EVENT                                                = 0x3E
+HCI_NUMBER_OF_COMPLETED_DATA_BLOCKS_EVENT                        = 0x48
+HCI_TRIGGERED_CLOCK_CAPTURE_EVENT                                = 0X4E
+HCI_SYNCHRONIZATION_TRAIN_COMPLETE_EVENT                         = 0X4F
+HCI_SYNCHRONIZATION_TRAIN_RECEIVED_EVENT                         = 0X50
+HCI_CONNECTIONLESS_PERIPHERAL_BROADCAST_RECEIVE_EVENT            = 0X51
+HCI_CONNECTIONLESS_PERIPHERAL_BROADCAST_TIMEOUT_EVENT            = 0X52
+HCI_TRUNCATED_PAGE_COMPLETE_EVENT                                = 0X53
+HCI_PERIPHERAL_PAGE_RESPONSE_TIMEOUT_EVENT                       = 0X54
+HCI_CONNECTIONLESS_PERIPHERAL_BROADCAST_CHANNEL_MAP_CHANGE_EVENT = 0X55
+HCI_INQUIRY_RESPONSE_NOTIFICATION_EVENT                          = 0X56
+HCI_AUTHENTICATED_PAYLOAD_TIMEOUT_EXPIRED_EVENT                  = 0X57
+HCI_SAM_STATUS_CHANGE_EVENT                                      = 0X58
 
 HCI_EVENT_NAMES = {
-    HCI_INQUIRY_COMPLETE_EVENT:                            'HCI_INQUIRY_COMPLETE_EVENT',
-    HCI_INQUIRY_RESULT_EVENT:                              'HCI_INQUIRY_RESULT_EVENT',
-    HCI_CONNECTION_COMPLETE_EVENT:                         'HCI_CONNECTION_COMPLETE_EVENT',
-    HCI_CONNECTION_REQUEST_EVENT:                          'HCI_CONNECTION_REQUEST_EVENT',
-    HCI_DISCONNECTION_COMPLETE_EVENT:                      'HCI_DISCONNECTION_COMPLETE_EVENT',
-    HCI_AUTHENTICATION_COMPLETE_EVENT:                     'HCI_AUTHENTICATION_COMPLETE_EVENT',
-    HCI_REMOTE_NAME_REQUEST_COMPLETE_EVENT:                'HCI_REMOTE_NAME_REQUEST_COMPLETE_EVENT',
-    HCI_ENCRYPTION_CHANGE_EVENT:                           'HCI_ENCRYPTION_CHANGE_EVENT',
-    HCI_CHANGE_CONNECTION_LINK_KEY_COMPLETE_EVENT:         'HCI_CHANGE_CONNECTION_LINK_KEY_COMPLETE_EVENT',
-    HCI_LINK_KEY_TYPE_CHANGED_EVENT:                       'HCI_LINK_KEY_TYPE_CHANGED_EVENT',
-    HCI_INQUIRY_RESULT_WITH_RSSI_EVENT:                    'HCI_INQUIRY_RESULT_WITH_RSSI_EVENT',
-    HCI_READ_REMOTE_SUPPORTED_FEATURES_COMPLETE_EVENT:     'HCI_READ_REMOTE_SUPPORTED_FEATURES_COMPLETE_EVENT',
-    HCI_READ_REMOTE_VERSION_INFORMATION_COMPLETE_EVENT:    'HCI_READ_REMOTE_VERSION_INFORMATION_COMPLETE_EVENT',
-    HCI_QOS_SETUP_COMPLETE_EVENT:                          'HCI_QOS_SETUP_COMPLETE_EVENT',
-    HCI_SYNCHRONOUS_CONNECTION_COMPLETE_EVENT:             'HCI_SYNCHRONOUS_CONNECTION_COMPLETE_EVENT',
-    HCI_SYNCHRONOUS_CONNECTION_CHANGED_EVENT:              'HCI_SYNCHRONOUS_CONNECTION_CHANGED_EVENT',
-    HCI_SNIFF_SUBRATING_EVENT:                             'HCI_SNIFF_SUBRATING_EVENT',
-    HCI_COMMAND_COMPLETE_EVENT:                            'HCI_COMMAND_COMPLETE_EVENT',
-    HCI_COMMAND_STATUS_EVENT:                              'HCI_COMMAND_STATUS_EVENT',
-    HCI_HARDWARE_ERROR_EVENT:                              'HCI_HARDWARE_ERROR_EVENT',
-    HCI_FLUSH_OCCURRED_EVENT:                              'HCI_FLUSH_OCCURRED_EVENT',
-    HCI_ROLE_CHANGE_EVENT:                                 'HCI_ROLE_CHANGE_EVENT',
-    HCI_NUMBER_OF_COMPLETED_PACKETS_EVENT:                 'HCI_NUMBER_OF_COMPLETED_PACKETS_EVENT',
-    HCI_MODE_CHANGE_EVENT:                                 'HCI_MODE_CHANGE_EVENT',
-    HCI_RETURN_LINK_KEYS_EVENT:                            'HCI_RETURN_LINK_KEYS_EVENT',
-    HCI_PIN_CODE_REQUEST_EVENT:                            'HCI_PIN_CODE_REQUEST_EVENT',
-    HCI_LINK_KEY_REQUEST_EVENT:                            'HCI_LINK_KEY_REQUEST_EVENT',
-    HCI_LINK_KEY_NOTIFICATION_EVENT:                       'HCI_LINK_KEY_NOTIFICATION_EVENT',
-    HCI_LOOPBACK_COMMAND_EVENT:                            'HCI_LOOPBACK_COMMAND_EVENT',
-    HCI_DATA_BUFFER_OVERFLOW_EVENT:                        'HCI_DATA_BUFFER_OVERFLOW_EVENT',
-    HCI_MAX_SLOTS_CHANGE_EVENT:                            'HCI_MAX_SLOTS_CHANGE_EVENT',
-    HCI_READ_CLOCK_OFFSET_COMPLETE_EVENT:                  'HCI_READ_CLOCK_OFFSET_COMPLETE_EVENT',
-    HCI_CONNECTION_PACKET_TYPE_CHANGED_EVENT:              'HCI_CONNECTION_PACKET_TYPE_CHANGED_EVENT',
-    HCI_QOS_VIOLATION_EVENT:                               'HCI_QOS_VIOLATION_EVENT',
-    HCI_PAGE_SCAN_REPETITION_MODE_CHANGE_EVENT:            'HCI_PAGE_SCAN_REPETITION_MODE_CHANGE_EVENT',
-    HCI_FLOW_SPECIFICATION_COMPLETE_EVENT:                 'HCI_FLOW_SPECIFICATION_COMPLETE_EVENT',
-    HCI_READ_REMOTE_EXTENDED_FEATURES_COMPLETE_EVENT:      'HCI_READ_REMOTE_EXTENDED_FEATURES_COMPLETE_EVENT',
-    HCI_EXTENDED_INQUIRY_RESULT_EVENT:                     'HCI_EXTENDED_INQUIRY_RESULT_EVENT',
-    HCI_ENCRYPTION_KEY_REFRESH_COMPLETE_EVENT:             'HCI_ENCRYPTION_KEY_REFRESH_COMPLETE_EVENT',
-    HCI_IO_CAPABILITY_REQUEST_EVENT:                       'HCI_IO_CAPABILITY_REQUEST_EVENT',
-    HCI_IO_CAPABILITY_RESPONSE_EVENT:                      'HCI_IO_CAPABILITY_RESPONSE_EVENT',
-    HCI_USER_CONFIRMATION_REQUEST_EVENT:                   'HCI_USER_CONFIRMATION_REQUEST_EVENT',
-    HCI_USER_PASSKEY_REQUEST_EVENT:                        'HCI_USER_PASSKEY_REQUEST_EVENT',
-    HCI_REMOTE_OOB_DATA_REQUEST:                           'HCI_REMOTE_OOB_DATA_REQUEST',
-    HCI_SIMPLE_PAIRING_COMPLETE_EVENT:                     'HCI_SIMPLE_PAIRING_COMPLETE_EVENT',
-    HCI_LINK_SUPERVISION_TIMEOUT_CHANGED_EVENT:            'HCI_LINK_SUPERVISION_TIMEOUT_CHANGED_EVENT',
-    HCI_ENHANCED_FLUSH_COMPLETE_EVENT:                     'HCI_ENHANCED_FLUSH_COMPLETE_EVENT',
-    HCI_USER_PASSKEY_NOTIFICATION_EVENT:                   'HCI_USER_PASSKEY_NOTIFICATION_EVENT',
-    HCI_KEYPRESS_NOTIFICATION_EVENT:                       'HCI_KEYPRESS_NOTIFICATION_EVENT',
-    HCI_REMOTE_HOST_SUPPORTED_FEATURES_NOTIFICATION_EVENT: 'HCI_REMOTE_HOST_SUPPORTED_FEATURES_NOTIFICATION_EVENT',
-    HCI_LE_META_EVENT:                                     'HCI_LE_META_EVENT'
+    event_code: event_name for (event_name, event_code) in globals().items()
+    if event_name.startswith('HCI_') and event_name.endswith('_EVENT')
 }
 
 # HCI Subevent Codes
-HCI_LE_CONNECTION_COMPLETE_EVENT                   = 0x01
-HCI_LE_ADVERTISING_REPORT_EVENT                    = 0x02
-HCI_LE_CONNECTION_UPDATE_COMPLETE_EVENT            = 0x03
-HCI_LE_READ_REMOTE_FEATURES_COMPLETE_EVENT         = 0x04
-HCI_LE_LONG_TERM_KEY_REQUEST_EVENT                 = 0x05
-HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_EVENT   = 0x06
-HCI_LE_DATA_LENGTH_CHANGE_EVENT                    = 0x07
-HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMPLETE_EVENT  = 0x08
-HCI_LE_GENERATE_DHKEY_COMPLETE_EVENT               = 0x09
-HCI_LE_ENHANCED_CONNECTION_COMPLETE_EVENT          = 0x0A
-HCI_LE_DIRECTED_ADVERTISING_REPORT_EVENT           = 0x0B
-HCI_LE_PHY_UPDATE_COMPLETE_EVENT                   = 0x0C
-HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT           = 0x0D
-HCI_LE_PERIODIC_ADVERTISING_SYNC_ESTABLISHED_EVENT = 0x0E
-HCI_LE_PERIODIC_ADVERTISING_REPORT_EVENT           = 0x0F
-HCI_LE_PERIODIC_ADVERTISING_SYNC_LOST_EVENT        = 0x10
-HCI_LE_SCAN_TIMEOUT_EVENT                          = 0x11
-HCI_LE_ADVERTISING_SET_TERMINATED_EVENT            = 0x12
-HCI_LE_SCAN_REQUEST_RECEIVED_EVENT                 = 0x13
-HCI_LE_CHANNEL_SELECTION_ALGORITHM_EVENT           = 0x14
+HCI_LE_CONNECTION_COMPLETE_EVENT                         = 0x01
+HCI_LE_ADVERTISING_REPORT_EVENT                          = 0x02
+HCI_LE_CONNECTION_UPDATE_COMPLETE_EVENT                  = 0x03
+HCI_LE_READ_REMOTE_FEATURES_COMPLETE_EVENT               = 0x04
+HCI_LE_LONG_TERM_KEY_REQUEST_EVENT                       = 0x05
+HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_EVENT         = 0x06
+HCI_LE_DATA_LENGTH_CHANGE_EVENT                          = 0x07
+HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMPLETE_EVENT        = 0x08
+HCI_LE_GENERATE_DHKEY_COMPLETE_EVENT                     = 0x09
+HCI_LE_ENHANCED_CONNECTION_COMPLETE_EVENT                = 0x0A
+HCI_LE_DIRECTED_ADVERTISING_REPORT_EVENT                 = 0x0B
+HCI_LE_PHY_UPDATE_COMPLETE_EVENT                         = 0x0C
+HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT                 = 0x0D
+HCI_LE_PERIODIC_ADVERTISING_SYNC_ESTABLISHED_EVENT       = 0x0E
+HCI_LE_PERIODIC_ADVERTISING_REPORT_EVENT                 = 0x0F
+HCI_LE_PERIODIC_ADVERTISING_SYNC_LOST_EVENT              = 0x10
+HCI_LE_SCAN_TIMEOUT_EVENT                                = 0x11
+HCI_LE_ADVERTISING_SET_TERMINATED_EVENT                  = 0x12
+HCI_LE_SCAN_REQUEST_RECEIVED_EVENT                       = 0x13
+HCI_LE_CHANNEL_SELECTION_ALGORITHM_EVENT                 = 0x14
+HCI_LE_CONNECTIONLESS_IQ_REPORT_EVENT                    = 0X15
+HCI_LE_CONNECTION_IQ_REPORT_EVENT                        = 0X16
+HCI_LE_CTE_REQUEST_FAILED_EVENT                          = 0X17
+HCI_LE_PERIODIC_ADVERTISING_SYNC_TRANSFER_RECEIVED_EVENT = 0X18
+HCI_LE_CIS_ESTABLISHED_EVENT                             = 0X19
+HCI_LE_CIS_REQUEST_EVENT                                 = 0X1A
+HCI_LE_CREATE_BIG_COMPLETE_EVENT                         = 0X1B
+HCI_LE_TERMINATE_BIG_COMPLETE_EVENT                      = 0X1C
+HCI_LE_BIG_SYNC_ESTABLISHED_EVENT                        = 0X1D
+HCI_LE_BIG_SYNC_LOST_EVENT                               = 0X1E
+HCI_LE_REQUEST_PEER_SCA_COMPLETE_EVENT                   = 0X1F
+HCI_LE_PATH_LOSS_THRESHOLD_EVENT                         = 0X20
+HCI_LE_TRANSMIT_POWER_REPORTING_EVENT                    = 0X21
+HCI_LE_BIGINFO_ADVERTISING_REPORT_EVENT                  = 0X22
+HCI_LE_SUBRATE_CHANGE_EVENT                              = 0X23
 
 HCI_SUBEVENT_NAMES = {
-    HCI_LE_CONNECTION_COMPLETE_EVENT:                   'HCI_LE_CONNECTION_COMPLETE_EVENT',
-    HCI_LE_ADVERTISING_REPORT_EVENT:                    'HCI_LE_ADVERTISING_REPORT_EVENT',
-    HCI_LE_CONNECTION_UPDATE_COMPLETE_EVENT:            'HCI_LE_CONNECTION_UPDATE_COMPLETE_EVENT',
-    HCI_LE_READ_REMOTE_FEATURES_COMPLETE_EVENT:         'HCI_LE_READ_REMOTE_FEATURES_COMPLETE_EVENT',
-    HCI_LE_LONG_TERM_KEY_REQUEST_EVENT:                 'HCI_LE_LONG_TERM_KEY_REQUEST_EVENT',
-    HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_EVENT:   'HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_EVENT',
-    HCI_LE_DATA_LENGTH_CHANGE_EVENT:                    'HCI_LE_DATA_LENGTH_CHANGE_EVENT',
-    HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMPLETE_EVENT:  'HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMPLETE_EVENT',
-    HCI_LE_GENERATE_DHKEY_COMPLETE_EVENT:               'HCI_LE_GENERATE_DHKEY_COMPLETE_EVENT',
-    HCI_LE_ENHANCED_CONNECTION_COMPLETE_EVENT:          'HCI_LE_ENHANCED_CONNECTION_COMPLETE_EVENT',
-    HCI_LE_DIRECTED_ADVERTISING_REPORT_EVENT:           'HCI_LE_DIRECTED_ADVERTISING_REPORT_EVENT',
-    HCI_LE_PHY_UPDATE_COMPLETE_EVENT:                   'HCI_LE_PHY_UPDATE_COMPLETE_EVENT',
-    HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT:           'HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT',
-    HCI_LE_PERIODIC_ADVERTISING_SYNC_ESTABLISHED_EVENT: 'HCI_LE_PERIODIC_ADVERTISING_SYNC_ESTABLISHED_EVENT',
-    HCI_LE_PERIODIC_ADVERTISING_REPORT_EVENT:           'HCI_LE_PERIODIC_ADVERTISING_REPORT_EVENT',
-    HCI_LE_PERIODIC_ADVERTISING_SYNC_LOST_EVENT:        'HCI_LE_PERIODIC_ADVERTISING_SYNC_LOST_EVENT',
-    HCI_LE_SCAN_TIMEOUT_EVENT:                          'HCI_LE_SCAN_TIMEOUT_EVENT',
-    HCI_LE_ADVERTISING_SET_TERMINATED_EVENT:            'HCI_LE_ADVERTISING_SET_TERMINATED_EVENT',
-    HCI_LE_SCAN_REQUEST_RECEIVED_EVENT:                 'HCI_LE_SCAN_REQUEST_RECEIVED_EVENT',
-    HCI_LE_CHANNEL_SELECTION_ALGORITHM_EVENT:           'HCI_LE_CHANNEL_SELECTION_ALGORITHM_EVENT'
+    event_code: event_name for (event_name, event_code) in globals().items()
+    if event_name.startswith('HCI_LE_') and event_name.endswith('_EVENT') and event_code != HCI_LE_META_EVENT
 }
 
 # HCI Command
-HCI_INQUIRY_COMMAND                                               = hci_command_op_code(0x01, 0x0001)
-HCI_INQUIRY_CANCEL_COMMAND                                        = hci_command_op_code(0x01, 0x0002)
-HCI_CREATE_CONNECTION_COMMAND                                     = hci_command_op_code(0x01, 0x0005)
-HCI_DISCONNECT_COMMAND                                            = hci_command_op_code(0x01, 0x0006)
-HCI_ACCEPT_CONNECTION_REQUEST_COMMAND                             = hci_command_op_code(0x01, 0x0009)
-HCI_LINK_KEY_REQUEST_REPLY_COMMAND                                = hci_command_op_code(0x01, 0x000B)
-HCI_LINK_KEY_REQUEST_NEGATIVE_REPLY_COMMAND                       = hci_command_op_code(0x01, 0x000C)
-HCI_PIN_CODE_REQUEST_NEGATIVE_REPLY_COMMAND                       = hci_command_op_code(0x01, 0x000E)
-HCI_CHANGE_CONNECTION_PACKET_TYPE_COMMAND                         = hci_command_op_code(0x01, 0x000F)
-HCI_AUTHENTICATION_REQUESTED_COMMAND                              = hci_command_op_code(0x01, 0x0011)
-HCI_SET_CONNECTION_ENCRYPTION_COMMAND                             = hci_command_op_code(0x01, 0x0013)
-HCI_REMOTE_NAME_REQUEST_COMMAND                                   = hci_command_op_code(0x01, 0x0019)
-HCI_READ_REMOTE_SUPPORTED_FEATURES_COMMAND                        = hci_command_op_code(0x01, 0x001B)
-HCI_READ_REMOTE_EXTENDED_FEATURES_COMMAND                         = hci_command_op_code(0x01, 0x001C)
-HCI_READ_REMOTE_VERSION_INFORMATION_COMMAND                       = hci_command_op_code(0x01, 0x001D)
-HCI_READ_CLOCK_OFFSET_COMMAND                                     = hci_command_op_code(0x01, 0x001F)
-HCI_IO_CAPABILITY_REQUEST_REPLY_COMMAND                           = hci_command_op_code(0x01, 0x002B)
-HCI_USER_CONFIRMATION_REQUEST_REPLY_COMMAND                       = hci_command_op_code(0x01, 0x002C)
-HCI_USER_CONFIRMATION_REQUEST_NEGATIVE_REPLY_COMMAND              = hci_command_op_code(0x01, 0x002D)
-HCI_USER_PASSKEY_REQUEST_REPLY_COMMAND                            = hci_command_op_code(0x01, 0x002E)
-HCI_USER_PASSKEY_REQUEST_NEGATIVE_REPLY_COMMAND                   = hci_command_op_code(0x01, 0x002F)
-HCI_ENHANCED_SETUP_SYNCHRONOUS_CONNECTION_COMMAND                 = hci_command_op_code(0x01, 0x003D)
-HCI_SNIFF_MODE_COMMAND                                            = hci_command_op_code(0x02, 0x0003)
-HCI_EXIT_SNIFF_MODE_COMMAND                                       = hci_command_op_code(0x02, 0x0004)
-HCI_SWITCH_ROLE_COMMAND                                           = hci_command_op_code(0x02, 0x000B)
-HCI_WRITE_LINK_POLICY_SETTINGS_COMMAND                            = hci_command_op_code(0x02, 0x000D)
-HCI_WRITE_DEFAULT_LINK_POLICY_SETTINGS_COMMAND                    = hci_command_op_code(0x02, 0x000F)
-HCI_SNIFF_SUBRATING_COMMAND                                       = hci_command_op_code(0x02, 0x0011)
-HCI_SET_EVENT_MASK_COMMAND                                        = hci_command_op_code(0x03, 0x0001)
-HCI_RESET_COMMAND                                                 = hci_command_op_code(0x03, 0x0003)
-HCI_SET_EVENT_FILTER_COMMAND                                      = hci_command_op_code(0x03, 0x0005)
-HCI_READ_STORED_LINK_KEY_COMMAND                                  = hci_command_op_code(0x03, 0x000D)
-HCI_DELETE_STORED_LINK_KEY_COMMAND                                = hci_command_op_code(0x03, 0x0012)
-HCI_WRITE_LOCAL_NAME_COMMAND                                      = hci_command_op_code(0x03, 0x0013)
-HCI_READ_LOCAL_NAME_COMMAND                                       = hci_command_op_code(0x03, 0x0014)
-HCI_WRITE_CONNECTION_ACCEPT_TIMEOUT_COMMAND                       = hci_command_op_code(0x03, 0x0016)
-HCI_WRITE_PAGE_TIMEOUT_COMMAND                                    = hci_command_op_code(0x03, 0x0018)
-HCI_WRITE_SCAN_ENABLE_COMMAND                                     = hci_command_op_code(0x03, 0x001A)
-HCI_READ_PAGE_SCAN_ACTIVITY_COMMAND                               = hci_command_op_code(0x03, 0x001B)
-HCI_WRITE_PAGE_SCAN_ACTIVITY_COMMAND                              = hci_command_op_code(0x03, 0x001C)
-HCI_WRITE_INQUIRY_SCAN_ACTIVITY_COMMAND                           = hci_command_op_code(0x03, 0x001E)
-HCI_READ_CLASS_OF_DEVICE_COMMAND                                  = hci_command_op_code(0x03, 0x0023)
-HCI_WRITE_CLASS_OF_DEVICE_COMMAND                                 = hci_command_op_code(0x03, 0x0024)
-HCI_READ_VOICE_SETTING_COMMAND                                    = hci_command_op_code(0x03, 0x0025)
-HCI_WRITE_VOICE_SETTING_COMMAND                                   = hci_command_op_code(0x03, 0x0026)
-HCI_READ_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND                  = hci_command_op_code(0x03, 0x002E)
-HCI_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND                 = hci_command_op_code(0x03, 0x002F)
-HCI_HOST_BUFFER_SIZE_COMMAND                                      = hci_command_op_code(0x03, 0x0033)
-HCI_WRITE_LINK_SUPERVISION_TIMEOUT_COMMAND                        = hci_command_op_code(0x03, 0x0037)
-HCI_READ_NUMBER_OF_SUPPORTED_IAC_COMMAND                          = hci_command_op_code(0x03, 0x0038)
-HCI_READ_CURRENT_IAC_LAP_COMMAND                                  = hci_command_op_code(0x03, 0x0039)
-HCI_WRITE_INQUIRY_SCAN_TYPE_COMMAND                               = hci_command_op_code(0x03, 0x0043)
-HCI_WRITE_INQUIRY_MODE_COMMAND                                    = hci_command_op_code(0x03, 0x0045)
-HCI_READ_PAGE_SCAN_TYPE_COMMAND                                   = hci_command_op_code(0x03, 0x0046)
-HCI_WRITE_PAGE_SCAN_TYPE_COMMAND                                  = hci_command_op_code(0x03, 0x0047)
-HCI_WRITE_EXTENDED_INQUIRY_RESPONSE_COMMAND                       = hci_command_op_code(0x03, 0x0052)
-HCI_WRITE_SIMPLE_PAIRING_MODE_COMMAND                             = hci_command_op_code(0x03, 0x0056)
-HCI_READ_INQUIRY_RESPONSE_TRANSMIT_POWER_LEVEL_COMMAND            = hci_command_op_code(0x03, 0x0058)
-HCI_SET_EVENT_MASK_PAGE_2_COMMAND                                 = hci_command_op_code(0x03, 0x0063)
-HCI_READ_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND                 = hci_command_op_code(0x03, 0x005A)
-HCI_READ_LE_HOST_SUPPORT_COMMAND                                  = hci_command_op_code(0x03, 0x006C)
-HCI_WRITE_LE_HOST_SUPPORT_COMMAND                                 = hci_command_op_code(0x03, 0x006D)
-HCI_WRITE_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND                 = hci_command_op_code(0x03, 0x007A)
-HCI_WRITE_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND                   = hci_command_op_code(0x03, 0x007C)
-HCI_READ_LOCAL_VERSION_INFORMATION_COMMAND                        = hci_command_op_code(0x04, 0x0001)
-HCI_READ_LOCAL_SUPPORTED_COMMANDS_COMMAND                         = hci_command_op_code(0x04, 0x0002)
-HCI_READ_LOCAL_SUPPORTED_FEATURES_COMMAND                         = hci_command_op_code(0x04, 0x0003)
-HCI_READ_LOCAL_EXTENDED_FEATURES_COMMAND                          = hci_command_op_code(0x04, 0x0004)
-HCI_READ_BUFFER_SIZE_COMMAND                                      = hci_command_op_code(0x04, 0x0005)
-HCI_READ_BD_ADDR_COMMAND                                          = hci_command_op_code(0x04, 0x0009)
-HCI_READ_LOCAL_SUPPORTED_CODECS_COMMAND                           = hci_command_op_code(0x04, 0x000B)
-HCI_READ_ENCRYPTION_KEY_SIZE_COMMAND                              = hci_command_op_code(0x05, 0x0008)
-HCI_LE_SET_EVENT_MASK_COMMAND                                     = hci_command_op_code(0x08, 0x0001)
-HCI_LE_READ_BUFFER_SIZE_COMMAND                                   = hci_command_op_code(0x08, 0x0002)
-HCI_LE_READ_LOCAL_SUPPORTED_FEATURES_COMMAND                      = hci_command_op_code(0x08, 0x0003)
-HCI_LE_SET_RANDOM_ADDRESS_COMMAND                                 = hci_command_op_code(0x08, 0x0005)
-HCI_LE_SET_ADVERTISING_PARAMETERS_COMMAND                         = hci_command_op_code(0x08, 0x0006)
-HCI_LE_READ_ADVERTISING_CHANNEL_TX_POWER_COMMAND                  = hci_command_op_code(0x08, 0x0007)
-HCI_LE_SET_ADVERTISING_DATA_COMMAND                               = hci_command_op_code(0x08, 0x0008)
-HCI_LE_SET_SCAN_RESPONSE_DATA_COMMAND                             = hci_command_op_code(0x08, 0x0009)
-HCI_LE_SET_ADVERTISING_ENABLE_COMMAND                             = hci_command_op_code(0x08, 0x000A)
-HCI_LE_SET_SCAN_PARAMETERS_COMMAND                                = hci_command_op_code(0x08, 0x000B)
-HCI_LE_SET_SCAN_ENABLE_COMMAND                                    = hci_command_op_code(0x08, 0x000C)
-HCI_LE_CREATE_CONNECTION_COMMAND                                  = hci_command_op_code(0x08, 0x000D)
-HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND                           = hci_command_op_code(0x08, 0x000E)
-HCI_LE_READ_WHITE_LIST_SIZE_COMMAND                               = hci_command_op_code(0x08, 0x000F)
-HCI_LE_CLEAR_WHITE_LIST_COMMAND                                   = hci_command_op_code(0x08, 0x0010)
-HCI_LE_ADD_DEVICE_TO_WHITE_LIST_COMMAND                           = hci_command_op_code(0x08, 0x0011)
-HCI_LE_REMOVE_DEVICE_FROM_WHITE_LIST_COMMAND                      = hci_command_op_code(0x08, 0x0012)
-HCI_LE_CONNECTION_UPDATE_COMMAND                                  = hci_command_op_code(0x08, 0x0013)
-HCI_LE_SET_HOST_CHANNEL_CLASSIFICATION_COMMAND                    = hci_command_op_code(0x08, 0x0014)
-HCI_LE_READ_CHANNEL_MAP_COMMAND                                   = hci_command_op_code(0x08, 0x0015)
-HCI_LE_READ_REMOTE_FEATURES_COMMAND                               = hci_command_op_code(0x08, 0x0016)
-HCI_LE_ENCRYPT_COMMAND                                            = hci_command_op_code(0x08, 0x0017)
-HCI_LE_RAND_COMMAND                                               = hci_command_op_code(0x08, 0x0018)
-HCI_LE_START_ENCRYPTION_COMMAND                                   = hci_command_op_code(0x08, 0x0019)
-HCI_LE_LONG_TERM_KEY_REQUEST_REPLY_COMMAND                        = hci_command_op_code(0x08, 0x001A)
-HCI_LE_LONG_TERM_KEY_REQUEST_NEGATIVE_REPLY_COMMAND               = hci_command_op_code(0x08, 0x001B)
-HCI_LE_READ_SUPPORTED_STATES_COMMAND                              = hci_command_op_code(0x08, 0x001C)
-HCI_LE_RECEIVER_TEST_COMMAND                                      = hci_command_op_code(0x08, 0x001D)
-HCI_LE_TRANSMITTER_TEST_COMMAND                                   = hci_command_op_code(0x08, 0x001E)
-HCI_LE_TEST_END_COMMAND                                           = hci_command_op_code(0x08, 0x001F)
-HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_REPLY_COMMAND          = hci_command_op_code(0x08, 0x0020)
-HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_NEGATIVE_REPLY_COMMAND = hci_command_op_code(0x08, 0x0021)
-HCI_LE_SET_DATA_LENGTH_COMMAND                                    = hci_command_op_code(0x08, 0x0022)
-HCI_LE_READ_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND                 = hci_command_op_code(0x08, 0x0023)
-HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND                = hci_command_op_code(0x08, 0x0024)
-HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMMAND                        = hci_command_op_code(0x08, 0x0025)
-HCI_LE_GENERATE_DHKEY_COMMAND                                     = hci_command_op_code(0x08, 0x0026)
-HCI_LE_ADD_DEVICE_TO_RESOLVING_LIST_COMMAND                       = hci_command_op_code(0x08, 0x0027)
-HCI_LE_REMOVE_DEVICE_FROM_RESOLVING_LIST_COMMAND                  = hci_command_op_code(0x08, 0x0028)
-HCI_LE_CLEAR_RESOLVING_LIST_COMMAND                               = hci_command_op_code(0x08, 0x0029)
-HCI_LE_READ_RESOLVING_LIST_SIZE_COMMAND                           = hci_command_op_code(0x08, 0x002A)
-HCI_LE_READ_PEER_RESOLVABLE_ADDRESS_COMMAND                       = hci_command_op_code(0x08, 0x002B)
-HCI_LE_READ_LOCAL_RESOLVABLE_ADDRESS_COMMAND                      = hci_command_op_code(0x08, 0x002C)
-HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE_COMMAND                      = hci_command_op_code(0x08, 0x002D)
-HCI_LE_SET_RESOLVABLE_PRIVATE_ADDRESS_TIMEOUT_COMMAND             = hci_command_op_code(0x08, 0x002E)
-HCI_LE_READ_MAXIMUM_DATA_LENGTH_COMMAND                           = hci_command_op_code(0x08, 0x002F)
-HCI_LE_READ_PHY_COMMAND                                           = hci_command_op_code(0x08, 0x0030)
-HCI_LE_SET_DEFAULT_PHY_COMMAND                                    = hci_command_op_code(0x08, 0x0031)
-HCI_LE_SET_PHY_COMMAND                                            = hci_command_op_code(0x08, 0x0032)
-HCI_LE_ENHANCED_RECEIVER_TEST_COMMAND                             = hci_command_op_code(0x08, 0x0033)
-HCI_LE_ENHANCED_TRANSMITTER_TEST_COMMAND                          = hci_command_op_code(0x08, 0x0034)
-HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS_COMMAND                 = hci_command_op_code(0x08, 0x0035)
-HCI_LE_SET_EXTENDED_ADVERTISING_PARAMETERS_COMMAND                = hci_command_op_code(0x08, 0x0036)
-HCI_LE_SET_EXTENDED_ADVERTISING_DATA_COMMAND                      = hci_command_op_code(0x08, 0x0037)
-HCI_LE_SET_EXTENDED_SCAN_RESPONSE_DATA_COMMAND                    = hci_command_op_code(0x08, 0x0038)
-HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND                    = hci_command_op_code(0x08, 0x0039)
-HCI_LE_READ_MAXIMUM_ADVERTISING_DATA_LENGTH_COMMAND               = hci_command_op_code(0x08, 0x003A)
-HCI_LE_READ_NUMBER_OF_SUPPORTED_ADVERETISING_SETS_COMMAND         = hci_command_op_code(0x08, 0x003B)
-HCI_LE_REMOVE_ADVERTISING_SET_COMMAND                             = hci_command_op_code(0x08, 0x003C)
-HCI_LE_CLEAR_ADVERTISING_SETS_COMMAND                             = hci_command_op_code(0x08, 0x003D)
-HCI_LE_SET_PERIODIC_ADVERTISING_PARAMETERS_COMMAND                = hci_command_op_code(0x08, 0x003E)
-HCI_LE_SET_PERIODIC_ADVERTISING_DATA_COMMAND                      = hci_command_op_code(0x08, 0x003F)
-HCI_LE_SET_PERIODIC_ADVERTISING_ENABLE_COMMAND                    = hci_command_op_code(0x08, 0x0040)
-HCI_LE_SET_EXTENDED_SCAN_PARAMETERS_COMMAND                       = hci_command_op_code(0x08, 0x0041)
-HCI_LE_SET_EXTENDED_SCAN_ENABLE_COMMAND                           = hci_command_op_code(0x08, 0x0042)
-HCI_LE_SET_EXTENDED_CREATE_CONNECTION_COMMAND                     = hci_command_op_code(0x08, 0x0043)
-HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_COMMAND                   = hci_command_op_code(0x08, 0x0044)
-HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_CANCEL_COMMAND            = hci_command_op_code(0x08, 0x0045)
-HCI_LE_PERIODIC_ADVERTISING_TERMINATE_SYNC_COMMAND                = hci_command_op_code(0x08, 0x0046)
-HCI_LE_ADD_DEVICE_TO_PERIODIC_ADVERTISER_LIST_COMMAND             = hci_command_op_code(0x08, 0x0047)
-HCI_LE_REMOVE_DEVICE_FROM_PERIODIC_ADVERTISER_LIST_COMMAND        = hci_command_op_code(0x08, 0x0048)
-HCI_LE_CLEAR_PERIODIC_ADVERTISER_LIST_COMMAND                     = hci_command_op_code(0x08, 0x0049)
-HCI_LE_READ_PERIODIC_ADVERTISER_LIST_SIZE_COMMAND                 = hci_command_op_code(0x08, 0x004A)
-HCI_LE_READ_TRANSMIT_POWER_COMMAND                                = hci_command_op_code(0x08, 0x004B)
-HCI_LE_READ_RF_PATH_COMPENSATION_COMMAND                          = hci_command_op_code(0x08, 0x004C)
-HCI_LE_WRITE_RF_PATH_COMPENSATION_COMMAND                         = hci_command_op_code(0x08, 0x004D)
-HCI_LE_SET_PRIVACY_MODE_COMMAND                                   = hci_command_op_code(0x08, 0x004E)
-
+HCI_INQUIRY_COMMAND                                                      = hci_command_op_code(0x01, 0x0001)
+HCI_INQUIRY_CANCEL_COMMAND                                               = hci_command_op_code(0x01, 0x0002)
+HCI_PERIODIC_INQUIRY_MODE_COMMAND                                        = hci_command_op_code(0x01, 0x0003)
+HCI_EXIT_PERIODIC_INQUIRY_MODE_COMMAND                                   = hci_command_op_code(0x01, 0x0004)
+HCI_CREATE_CONNECTION_COMMAND                                            = hci_command_op_code(0x01, 0x0005)
+HCI_DISCONNECT_COMMAND                                                   = hci_command_op_code(0x01, 0x0006)
+HCI_CREATE_CONNECTION_CANCEL_COMMAND                                     = hci_command_op_code(0x01, 0x0008)
+HCI_ACCEPT_CONNECTION_REQUEST_COMMAND                                    = hci_command_op_code(0x01, 0x0009)
+HCI_REJECT_CONNECTION_REQUEST_COMMAND                                    = hci_command_op_code(0x01, 0x000A)
+HCI_LINK_KEY_REQUEST_REPLY_COMMAND                                       = hci_command_op_code(0x01, 0x000B)
+HCI_LINK_KEY_REQUEST_NEGATIVE_REPLY_COMMAND                              = hci_command_op_code(0x01, 0x000C)
+HCI_PIN_CODE_REQUEST_REPLY_COMMAND                                       = hci_command_op_code(0x01, 0x000D)
+HCI_PIN_CODE_REQUEST_NEGATIVE_REPLY_COMMAND                              = hci_command_op_code(0x01, 0x000E)
+HCI_CHANGE_CONNECTION_PACKET_TYPE_COMMAND                                = hci_command_op_code(0x01, 0x000F)
+HCI_AUTHENTICATION_REQUESTED_COMMAND                                     = hci_command_op_code(0x01, 0x0011)
+HCI_SET_CONNECTION_ENCRYPTION_COMMAND                                    = hci_command_op_code(0x01, 0x0013)
+HCI_CHANGE_CONNECTION_LINK_KEY_COMMAND                                   = hci_command_op_code(0x01, 0x0015)
+HCI_LINK_KEY_SELECTION_COMMAND                                           = hci_command_op_code(0x01, 0x0017)
+HCI_REMOTE_NAME_REQUEST_COMMAND                                          = hci_command_op_code(0x01, 0x0019)
+HCI_REMOTE_NAME_REQUEST_CANCEL_COMMAND                                   = hci_command_op_code(0x01, 0x001A)
+HCI_READ_REMOTE_SUPPORTED_FEATURES_COMMAND                               = hci_command_op_code(0x01, 0x001B)
+HCI_READ_REMOTE_EXTENDED_FEATURES_COMMAND                                = hci_command_op_code(0x01, 0x001C)
+HCI_READ_REMOTE_VERSION_INFORMATION_COMMAND                              = hci_command_op_code(0x01, 0x001D)
+HCI_READ_CLOCK_OFFSET_COMMAND                                            = hci_command_op_code(0x01, 0x001F)
+HCI_READ_LMP_HANDLE_COMMAND                                              = hci_command_op_code(0x01, 0x0020)
+HCI_SETUP_SYNCHRONOUS_CONNECTION_COMMAND                                 = hci_command_op_code(0x01, 0x0028)
+HCI_ACCEPT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND                        = hci_command_op_code(0x01, 0x0029)
+HCI_REJECT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND                        = hci_command_op_code(0x01, 0x002A)
+HCI_IO_CAPABILITY_REQUEST_REPLY_COMMAND                                  = hci_command_op_code(0x01, 0x002B)
+HCI_USER_CONFIRMATION_REQUEST_REPLY_COMMAND                              = hci_command_op_code(0x01, 0x002C)
+HCI_USER_CONFIRMATION_REQUEST_NEGATIVE_REPLY_COMMAND                     = hci_command_op_code(0x01, 0x002D)
+HCI_USER_PASSKEY_REQUEST_REPLY_COMMAND                                   = hci_command_op_code(0x01, 0x002E)
+HCI_USER_PASSKEY_REQUEST_NEGATIVE_REPLY_COMMAND                          = hci_command_op_code(0x01, 0x002F)
+HCI_REMOTE_OOB_DATA_REQUEST_REPLY_COMMAND                                = hci_command_op_code(0x01, 0x0030)
+HCI_REMOTE_OOB_DATA_REQUEST_NEGATIVE_REPLY_COMMAND                       = hci_command_op_code(0x01, 0x0033)
+HCI_IO_CAPABILITY_REQUEST_NEGATIVE_REPLY_COMMAND                         = hci_command_op_code(0x01, 0x0034)
+HCI_ENHANCED_SETUP_SYNCHRONOUS_CONNECTION_COMMAND                        = hci_command_op_code(0x01, 0x003D)
+HCI_ENHANCED_ACCEPT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND               = hci_command_op_code(0x01, 0x003E)
+HCI_TRUNCATED_PAGE_COMMAND                                               = hci_command_op_code(0x01, 0x003F)
+HCI_TRUNCATED_PAGE_CANCEL_COMMAND                                        = hci_command_op_code(0x01, 0x0040)
+HCI_SET_CONNECTIONLESS_PERIPHERAL_BROADCAST_COMMAND                      = hci_command_op_code(0x01, 0x0041)
+HCI_SET_CONNECTIONLESS_PERIPHERAL_BROADCAST_RECEIVE_COMMAND              = hci_command_op_code(0x01, 0x0042)
+HCI_START_SYNCHRONIZATION_TRAIN_COMMAND                                  = hci_command_op_code(0x01, 0x0043)
+HCI_RECEIVE_SYNCHRONIZATION_TRAIN_COMMAND                                = hci_command_op_code(0x01, 0x0044)
+HCI_REMOTE_OOB_EXTENDED_DATA_REQUEST_REPLY_COMMAND                       = hci_command_op_code(0x01, 0x0045)
+HCI_HOLD_MODE_COMMAND                                                    = hci_command_op_code(0x02, 0x0001)
+HCI_SNIFF_MODE_COMMAND                                                   = hci_command_op_code(0x02, 0x0003)
+HCI_EXIT_SNIFF_MODE_COMMAND                                              = hci_command_op_code(0x02, 0x0004)
+HCI_QOS_SETUP_COMMAND                                                    = hci_command_op_code(0x02, 0x0007)
+HCI_ROLE_DISCOVERY_COMMAND                                               = hci_command_op_code(0x02, 0x0009)
+HCI_SWITCH_ROLE_COMMAND                                                  = hci_command_op_code(0x02, 0x000B)
+HCI_READ_LINK_POLICY_SETTINGS_COMMAND                                    = hci_command_op_code(0x02, 0x000C)
+HCI_WRITE_LINK_POLICY_SETTINGS_COMMAND                                   = hci_command_op_code(0x02, 0x000D)
+HCI_READ_DEFAULT_LINK_POLICY_SETTINGS_COMMAND                            = hci_command_op_code(0x02, 0x000E)
+HCI_WRITE_DEFAULT_LINK_POLICY_SETTINGS_COMMAND                           = hci_command_op_code(0x02, 0x000F)
+HCI_FLOW_SPECIFICATION_COMMAND                                           = hci_command_op_code(0x02, 0x0010)
+HCI_SNIFF_SUBRATING_COMMAND                                              = hci_command_op_code(0x02, 0x0011)
+HCI_SET_EVENT_MASK_COMMAND                                               = hci_command_op_code(0x03, 0x0001)
+HCI_RESET_COMMAND                                                        = hci_command_op_code(0x03, 0x0003)
+HCI_SET_EVENT_FILTER_COMMAND                                             = hci_command_op_code(0x03, 0x0005)
+HCI_FLUSH_COMMAND                                                        = hci_command_op_code(0x03, 0x0008)
+HCI_READ_PIN_TYPE_COMMAND                                                = hci_command_op_code(0x03, 0x0009)
+HCI_WRITE_PIN_TYPE_COMMAND                                               = hci_command_op_code(0x03, 0x000A)
+HCI_READ_STORED_LINK_KEY_COMMAND                                         = hci_command_op_code(0x03, 0x000D)
+HCI_WRITE_STORED_LINK_KEY_COMMAND                                        = hci_command_op_code(0x03, 0x0011)
+HCI_DELETE_STORED_LINK_KEY_COMMAND                                       = hci_command_op_code(0x03, 0x0012)
+HCI_WRITE_LOCAL_NAME_COMMAND                                             = hci_command_op_code(0x03, 0x0013)
+HCI_READ_LOCAL_NAME_COMMAND                                              = hci_command_op_code(0x03, 0x0014)
+HCI_READ_CONNECTION_ACCEPT_TIMEOUT_COMMAND                               = hci_command_op_code(0x03, 0x0015)
+HCI_WRITE_CONNECTION_ACCEPT_TIMEOUT_COMMAND                              = hci_command_op_code(0x03, 0x0016)
+HCI_READ_PAGE_TIMEOUT_COMMAND                                            = hci_command_op_code(0x03, 0x0017)
+HCI_WRITE_PAGE_TIMEOUT_COMMAND                                           = hci_command_op_code(0x03, 0x0018)
+HCI_READ_SCAN_ENABLE_COMMAND                                             = hci_command_op_code(0x03, 0x0019)
+HCI_WRITE_SCAN_ENABLE_COMMAND                                            = hci_command_op_code(0x03, 0x001A)
+HCI_READ_PAGE_SCAN_ACTIVITY_COMMAND                                      = hci_command_op_code(0x03, 0x001B)
+HCI_WRITE_PAGE_SCAN_ACTIVITY_COMMAND                                     = hci_command_op_code(0x03, 0x001C)
+HCI_READ_INQUIRY_SCAN_ACTIVITY_COMMAND                                   = hci_command_op_code(0x03, 0x001D)
+HCI_WRITE_INQUIRY_SCAN_ACTIVITY_COMMAND                                  = hci_command_op_code(0x03, 0x001E)
+HCI_READ_AUTHENTICATION_ENABLE_COMMAND                                   = hci_command_op_code(0x03, 0x001F)
+HCI_WRITE_AUTHENTICATION_ENABLE_COMMAND                                  = hci_command_op_code(0x03, 0x0020)
+HCI_READ_CLASS_OF_DEVICE_COMMAND                                         = hci_command_op_code(0x03, 0x0023)
+HCI_WRITE_CLASS_OF_DEVICE_COMMAND                                        = hci_command_op_code(0x03, 0x0024)
+HCI_READ_VOICE_SETTING_COMMAND                                           = hci_command_op_code(0x03, 0x0025)
+HCI_WRITE_VOICE_SETTING_COMMAND                                          = hci_command_op_code(0x03, 0x0026)
+HCI_READ_AUTOMATIC_FLUSH_TIMEOUT_COMMAND                                 = hci_command_op_code(0x03, 0x0027)
+HCI_WRITE_AUTOMATIC_FLUSH_TIMEOUT_COMMAND                                = hci_command_op_code(0x03, 0x0028)
+HCI_READ_NUM_BROADCAST_RETRANSMISSIONS_COMMAND                           = hci_command_op_code(0x03, 0x0029)
+HCI_WRITE_NUM_BROADCAST_RETRANSMISSIONS_COMMAND                          = hci_command_op_code(0x03, 0x002A)
+HCI_READ_HOLD_MODE_ACTIVITY_COMMAND                                      = hci_command_op_code(0x03, 0x002B)
+HCI_WRITE_HOLD_MODE_ACTIVITY_COMMAND                                     = hci_command_op_code(0x03, 0x002C)
+HCI_READ_TRANSMIT_POWER_LEVEL_COMMAND                                    = hci_command_op_code(0x03, 0x002D)
+HCI_READ_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND                         = hci_command_op_code(0x03, 0x002E)
+HCI_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND                        = hci_command_op_code(0x03, 0x002F)
+HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND                          = hci_command_op_code(0x03, 0x0031)
+HCI_HOST_BUFFER_SIZE_COMMAND                                             = hci_command_op_code(0x03, 0x0033)
+HCI_HOST_NUMBER_OF_COMPLETED_PACKETS_COMMAND                             = hci_command_op_code(0x03, 0x0035)
+HCI_READ_LINK_SUPERVISION_TIMEOUT_COMMAND                                = hci_command_op_code(0x03, 0x0036)
+HCI_WRITE_LINK_SUPERVISION_TIMEOUT_COMMAND                               = hci_command_op_code(0x03, 0x0037)
+HCI_READ_NUMBER_OF_SUPPORTED_IAC_COMMAND                                 = hci_command_op_code(0x03, 0x0038)
+HCI_READ_CURRENT_IAC_LAP_COMMAND                                         = hci_command_op_code(0x03, 0x0039)
+HCI_WRITE_CURRENT_IAC_LAP_COMMAND                                        = hci_command_op_code(0x03, 0x003A)
+HCI_SET_AFH_HOST_CHANNEL_CLASSIFICATION_COMMAND                          = hci_command_op_code(0x03, 0x003F)
+HCI_READ_INQUIRY_SCAN_TYPE_COMMAND                                       = hci_command_op_code(0x03, 0x0042)
+HCI_WRITE_INQUIRY_SCAN_TYPE_COMMAND                                      = hci_command_op_code(0x03, 0x0043)
+HCI_READ_INQUIRY_MODE_COMMAND                                            = hci_command_op_code(0x03, 0x0044)
+HCI_WRITE_INQUIRY_MODE_COMMAND                                           = hci_command_op_code(0x03, 0x0045)
+HCI_READ_PAGE_SCAN_TYPE_COMMAND                                          = hci_command_op_code(0x03, 0x0046)
+HCI_WRITE_PAGE_SCAN_TYPE_COMMAND                                         = hci_command_op_code(0x03, 0x0047)
+HCI_READ_AFH_CHANNEL_ASSESSMENT_MODE_COMMAND                             = hci_command_op_code(0x03, 0x0048)
+HCI_WRITE_AFH_CHANNEL_ASSESSMENT_MODE_COMMAND                            = hci_command_op_code(0x03, 0x0049)
+HCI_READ_EXTENDED_INQUIRY_RESPONSE_COMMAND                               = hci_command_op_code(0x03, 0x0051)
+HCI_WRITE_EXTENDED_INQUIRY_RESPONSE_COMMAND                              = hci_command_op_code(0x03, 0x0052)
+HCI_REFRESH_ENCRYPTION_KEY_COMMAND                                       = hci_command_op_code(0x03, 0x0053)
+HCI_READ_SIMPLE_PAIRING_MODE_COMMAND                                     = hci_command_op_code(0x03, 0x0055)
+HCI_WRITE_SIMPLE_PAIRING_MODE_COMMAND                                    = hci_command_op_code(0x03, 0x0056)
+HCI_READ_LOCAL_OOB_DATA_COMMAND                                          = hci_command_op_code(0x03, 0x0057)
+HCI_READ_INQUIRY_RESPONSE_TRANSMIT_POWER_LEVEL_COMMAND                   = hci_command_op_code(0x03, 0x0058)
+HCI_WRITE_INQUIRY_TRANSMIT_POWER_LEVEL_COMMAND                           = hci_command_op_code(0x03, 0x0059)
+HCI_READ_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND                        = hci_command_op_code(0x03, 0x005A)
+HCI_WRITE_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND                       = hci_command_op_code(0x03, 0x005B)
+HCI_ENHANCED_FLUSH_COMMAND                                               = hci_command_op_code(0x03, 0x005F)
+HCI_SEND_KEYPRESS_NOTIFICATION_COMMAND                                   = hci_command_op_code(0x03, 0x0060)
+HCI_SET_EVENT_MASK_PAGE_2_COMMAND                                        = hci_command_op_code(0x03, 0x0063)
+HCI_READ_FLOW_CONTROL_MODE_COMMAND                                       = hci_command_op_code(0x03, 0x0066)
+HCI_WRITE_FLOW_CONTROL_MODE_COMMAND                                      = hci_command_op_code(0x03, 0x0067)
+HCI_READ_ENHANCED_TRANSMIT_POWER_LEVEL_COMMAND                           = hci_command_op_code(0x03, 0x0068)
+HCI_READ_LE_HOST_SUPPORT_COMMAND                                         = hci_command_op_code(0x03, 0x006C)
+HCI_WRITE_LE_HOST_SUPPORT_COMMAND                                        = hci_command_op_code(0x03, 0x006D)
+HCI_SET_MWS_CHANNEL_PARAMETERS_COMMAND                                   = hci_command_op_code(0x03, 0x006E)
+HCI_SET_EXTERNAL_FRAME_CONFIGURATION_COMMAND                             = hci_command_op_code(0x03, 0x006F)
+HCI_SET_MWS_SIGNALING_COMMAND                                            = hci_command_op_code(0x03, 0x0070)
+HCI_SET_MWS_TRANSPORT_LAYER_COMMAND                                      = hci_command_op_code(0x03, 0x0071)
+HCI_SET_MWS_SCAN_FREQUENCY_TABLE_COMMAND                                 = hci_command_op_code(0x03, 0x0072)
+HCI_SET_MWS_PATTERN_CONFIGURATION_COMMAND                                = hci_command_op_code(0x03, 0x0073)
+HCI_SET_RESERVED_LT_ADDR_COMMAND                                         = hci_command_op_code(0x03, 0x0074)
+HCI_DELETE_RESERVED_LT_ADDR_COMMAND                                      = hci_command_op_code(0x03, 0x0075)
+HCI_SET_CONNECTIONLESS_PERIPHERAL_BROADCAST_DATA_COMMAND                 = hci_command_op_code(0x03, 0x0076)
+HCI_READ_SYNCHRONIZATION_TRAIN_PARAMETERS_COMMAND                        = hci_command_op_code(0x03, 0x0077)
+HCI_WRITE_SYNCHRONIZATION_TRAIN_PARAMETERS_COMMAND                       = hci_command_op_code(0x03, 0x0078)
+HCI_READ_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND                         = hci_command_op_code(0x03, 0x0079)
+HCI_WRITE_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND                        = hci_command_op_code(0x03, 0x007A)
+HCI_READ_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND                           = hci_command_op_code(0x03, 0x007B)
+HCI_WRITE_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND                          = hci_command_op_code(0x03, 0x007C)
+HCI_READ_LOCAL_OOB_EXTENDED_DATA_COMMAND                                 = hci_command_op_code(0x03, 0x007D)
+HCI_READ_EXTENDED_PAGE_TIMEOUT_COMMAND                                   = hci_command_op_code(0x03, 0x007E)
+HCI_WRITE_EXTENDED_PAGE_TIMEOUT_COMMAND                                  = hci_command_op_code(0x03, 0x007F)
+HCI_READ_EXTENDED_INQUIRY_LENGTH_COMMAND                                 = hci_command_op_code(0x03, 0x0080)
+HCI_WRITE_EXTENDED_INQUIRY_LENGTH_COMMAND                                = hci_command_op_code(0x03, 0x0081)
+HCI_SET_ECOSYSTEM_BASE_INTERVAL_COMMAND                                  = hci_command_op_code(0x03, 0x0082)
+HCI_CONFIGURE_DATA_PATH_COMMAND                                          = hci_command_op_code(0x03, 0x0083)
+HCI_SET_MIN_ENCRYPTION_KEY_SIZE_COMMAND                                  = hci_command_op_code(0x03, 0x0084)
+HCI_READ_LOCAL_VERSION_INFORMATION_COMMAND                               = hci_command_op_code(0x04, 0x0001)
+HCI_READ_LOCAL_SUPPORTED_COMMANDS_COMMAND                                = hci_command_op_code(0x04, 0x0002)
+HCI_READ_LOCAL_SUPPORTED_FEATURES_COMMAND                                = hci_command_op_code(0x04, 0x0003)
+HCI_READ_LOCAL_EXTENDED_FEATURES_COMMAND                                 = hci_command_op_code(0x04, 0x0004)
+HCI_READ_BUFFER_SIZE_COMMAND                                             = hci_command_op_code(0x04, 0x0005)
+HCI_READ_BD_ADDR_COMMAND                                                 = hci_command_op_code(0x04, 0x0009)
+HCI_READ_DATA_BLOCK_SIZE_COMMAND                                         = hci_command_op_code(0x04, 0x000A)
+HCI_READ_LOCAL_SUPPORTED_CODECS_COMMAND                                  = hci_command_op_code(0x04, 0x000B)
+HCI_READ_LOCAL_SIMPLE_PAIRING_OPTIONS_COMMAND                            = hci_command_op_code(0x04, 0x000C)
+HCI_READ_LOCAL_SUPPORTED_CODECS_V2_COMMAND                               = hci_command_op_code(0x04, 0x000D)
+HCI_READ_LOCAL_SUPPORTED_CODEC_CAPABILITIES_COMMAND                      = hci_command_op_code(0x04, 0x000E)
+HCI_READ_LOCAL_SUPPORTED_CONTROLLER_DELAY_COMMAND                        = hci_command_op_code(0x04, 0x000F)
+HCI_READ_FAILED_CONTACT_COUNTER_COMMAND                                  = hci_command_op_code(0x05, 0x0001)
+HCI_RESET_FAILED_CONTACT_COUNTER_COMMAND                                 = hci_command_op_code(0x05, 0x0002)
+HCI_READ_LINK_QUALITY_COMMAND                                            = hci_command_op_code(0x05, 0x0003)
+HCI_READ_RSSI_COMMAND                                                    = hci_command_op_code(0x05, 0x0005)
+HCI_READ_AFH_CHANNEL_MAP_COMMAND                                         = hci_command_op_code(0x05, 0x0006)
+HCI_READ_CLOCK_COMMAND                                                   = hci_command_op_code(0x05, 0x0007)
+HCI_READ_ENCRYPTION_KEY_SIZE_COMMAND                                     = hci_command_op_code(0x05, 0x0008)
+HCI_GET_MWS_TRANSPORT_LAYER_CONFIGURATION_COMMAND                        = hci_command_op_code(0x05, 0x000C)
+HCI_SET_TRIGGERED_CLOCK_CAPTURE_COMMAND                                  = hci_command_op_code(0x05, 0x000D)
+HCI_READ_LOOPBACK_MODE_COMMAND                                           = hci_command_op_code(0x06, 0x0001)
+HCI_WRITE_LOOPBACK_MODE_COMMAND                                          = hci_command_op_code(0x06, 0x0002)
+HCI_ENABLE_DEVICE_UNDER_TEST_MODE_COMMAND                                = hci_command_op_code(0x06, 0x0003)
+HCI_WRITE_SIMPLE_PAIRING_DEBUG_MODE_COMMAND                              = hci_command_op_code(0x06, 0x0004)
+HCI_WRITE_SECURE_CONNECTIONS_TEST_MODE_COMMAND                           = hci_command_op_code(0x06, 0x000A)
+HCI_LE_SET_EVENT_MASK_COMMAND                                            = hci_command_op_code(0x08, 0x0001)
+HCI_LE_READ_BUFFER_SIZE_COMMAND                                          = hci_command_op_code(0x08, 0x0002)
+HCI_LE_READ_LOCAL_SUPPORTED_FEATURES_COMMAND                             = hci_command_op_code(0x08, 0x0003)
+HCI_LE_SET_RANDOM_ADDRESS_COMMAND                                        = hci_command_op_code(0x08, 0x0005)
+HCI_LE_SET_ADVERTISING_PARAMETERS_COMMAND                                = hci_command_op_code(0x08, 0x0006)
+HCI_LE_READ_ADVERTISING_PHYSICAL_CHANNEL_TX_POWER_COMMAND                = hci_command_op_code(0x08, 0x0007)
+HCI_LE_SET_ADVERTISING_DATA_COMMAND                                      = hci_command_op_code(0x08, 0x0008)
+HCI_LE_SET_SCAN_RESPONSE_DATA_COMMAND                                    = hci_command_op_code(0x08, 0x0009)
+HCI_LE_SET_ADVERTISING_ENABLE_COMMAND                                    = hci_command_op_code(0x08, 0x000A)
+HCI_LE_SET_SCAN_PARAMETERS_COMMAND                                       = hci_command_op_code(0x08, 0x000B)
+HCI_LE_SET_SCAN_ENABLE_COMMAND                                           = hci_command_op_code(0x08, 0x000C)
+HCI_LE_CREATE_CONNECTION_COMMAND                                         = hci_command_op_code(0x08, 0x000D)
+HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND                                  = hci_command_op_code(0x08, 0x000E)
+HCI_LE_READ_FILTER_ACCEPT_LIST_SIZE_COMMAND                              = hci_command_op_code(0x08, 0x000F)
+HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND                                  = hci_command_op_code(0x08, 0x0010)
+HCI_LE_ADD_DEVICE_TO_FILTER_ACCEPT_LIST_COMMAND                          = hci_command_op_code(0x08, 0x0011)
+HCI_LE_REMOVE_DEVICE_FROM_FILTER_ACCEPT_LIST_COMMAND                     = hci_command_op_code(0x08, 0x0012)
+HCI_LE_CONNECTION_UPDATE_COMMAND                                         = hci_command_op_code(0x08, 0x0013)
+HCI_LE_SET_HOST_CHANNEL_CLASSIFICATION_COMMAND                           = hci_command_op_code(0x08, 0x0014)
+HCI_LE_READ_CHANNEL_MAP_COMMAND                                          = hci_command_op_code(0x08, 0x0015)
+HCI_LE_READ_REMOTE_FEATURES_COMMAND                                      = hci_command_op_code(0x08, 0x0016)
+HCI_LE_ENCRYPT_COMMAND                                                   = hci_command_op_code(0x08, 0x0017)
+HCI_LE_RAND_COMMAND                                                      = hci_command_op_code(0x08, 0x0018)
+HCI_LE_ENABLE_ENCRYPTION_COMMAND                                         = hci_command_op_code(0x08, 0x0019)
+HCI_LE_LONG_TERM_KEY_REQUEST_REPLY_COMMAND                               = hci_command_op_code(0x08, 0x001A)
+HCI_LE_LONG_TERM_KEY_REQUEST_NEGATIVE_REPLY_COMMAND                      = hci_command_op_code(0x08, 0x001B)
+HCI_LE_READ_SUPPORTED_STATES_COMMAND                                     = hci_command_op_code(0x08, 0x001C)
+HCI_LE_RECEIVER_TEST_COMMAND                                             = hci_command_op_code(0x08, 0x001D)
+HCI_LE_TRANSMITTER_TEST_COMMAND                                          = hci_command_op_code(0x08, 0x001E)
+HCI_LE_TEST_END_COMMAND                                                  = hci_command_op_code(0x08, 0x001F)
+HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_REPLY_COMMAND                 = hci_command_op_code(0x08, 0x0020)
+HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_NEGATIVE_REPLY_COMMAND        = hci_command_op_code(0x08, 0x0021)
+HCI_LE_SET_DATA_LENGTH_COMMAND                                           = hci_command_op_code(0x08, 0x0022)
+HCI_LE_READ_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND                        = hci_command_op_code(0x08, 0x0023)
+HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND                       = hci_command_op_code(0x08, 0x0024)
+HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMMAND                               = hci_command_op_code(0x08, 0x0025)
+HCI_LE_GENERATE_DHKEY_COMMAND                                            = hci_command_op_code(0x08, 0x0026)
+HCI_LE_ADD_DEVICE_TO_RESOLVING_LIST_COMMAND                              = hci_command_op_code(0x08, 0x0027)
+HCI_LE_REMOVE_DEVICE_FROM_RESOLVING_LIST_COMMAND                         = hci_command_op_code(0x08, 0x0028)
+HCI_LE_CLEAR_RESOLVING_LIST_COMMAND                                      = hci_command_op_code(0x08, 0x0029)
+HCI_LE_READ_RESOLVING_LIST_SIZE_COMMAND                                  = hci_command_op_code(0x08, 0x002A)
+HCI_LE_READ_PEER_RESOLVABLE_ADDRESS_COMMAND                              = hci_command_op_code(0x08, 0x002B)
+HCI_LE_READ_LOCAL_RESOLVABLE_ADDRESS_COMMAND                             = hci_command_op_code(0x08, 0x002C)
+HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE_COMMAND                             = hci_command_op_code(0x08, 0x002D)
+HCI_LE_SET_RESOLVABLE_PRIVATE_ADDRESS_TIMEOUT_COMMAND                    = hci_command_op_code(0x08, 0x002E)
+HCI_LE_READ_MAXIMUM_DATA_LENGTH_COMMAND                                  = hci_command_op_code(0x08, 0x002F)
+HCI_LE_READ_PHY_COMMAND                                                  = hci_command_op_code(0x08, 0x0030)
+HCI_LE_SET_DEFAULT_PHY_COMMAND                                           = hci_command_op_code(0x08, 0x0031)
+HCI_LE_SET_PHY_COMMAND                                                   = hci_command_op_code(0x08, 0x0032)
+HCI_LE_RECEIVER_TEST_V2_COMMAND                                          = hci_command_op_code(0x08, 0x0033)
+HCI_LE_TRANSMITTER_TEST_V2_COMMAND                                       = hci_command_op_code(0x08, 0x0034)
+HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS_COMMAND                        = hci_command_op_code(0x08, 0x0035)
+HCI_LE_SET_EXTENDED_ADVERTISING_PARAMETERS_COMMAND                       = hci_command_op_code(0x08, 0x0036)
+HCI_LE_SET_EXTENDED_ADVERTISING_DATA_COMMAND                             = hci_command_op_code(0x08, 0x0037)
+HCI_LE_SET_EXTENDED_SCAN_RESPONSE_DATA_COMMAND                           = hci_command_op_code(0x08, 0x0038)
+HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND                           = hci_command_op_code(0x08, 0x0039)
+HCI_LE_READ_MAXIMUM_ADVERTISING_DATA_LENGTH_COMMAND                      = hci_command_op_code(0x08, 0x003A)
+HCI_LE_READ_NUMBER_OF_SUPPORTED_ADVERTISING_SETS_COMMAND                 = hci_command_op_code(0x08, 0x003B)
+HCI_LE_REMOVE_ADVERTISING_SET_COMMAND                                    = hci_command_op_code(0x08, 0x003C)
+HCI_LE_CLEAR_ADVERTISING_SETS_COMMAND                                    = hci_command_op_code(0x08, 0x003D)
+HCI_LE_SET_PERIODIC_ADVERTISING_PARAMETERS_COMMAND                       = hci_command_op_code(0x08, 0x003E)
+HCI_LE_SET_PERIODIC_ADVERTISING_DATA_COMMAND                             = hci_command_op_code(0x08, 0x003F)
+HCI_LE_SET_PERIODIC_ADVERTISING_ENABLE_COMMAND                           = hci_command_op_code(0x08, 0x0040)
+HCI_LE_SET_EXTENDED_SCAN_PARAMETERS_COMMAND                              = hci_command_op_code(0x08, 0x0041)
+HCI_LE_SET_EXTENDED_SCAN_ENABLE_COMMAND                                  = hci_command_op_code(0x08, 0x0042)
+HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND                                = hci_command_op_code(0x08, 0x0043)
+HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_COMMAND                          = hci_command_op_code(0x08, 0x0044)
+HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_CANCEL_COMMAND                   = hci_command_op_code(0x08, 0x0045)
+HCI_LE_PERIODIC_ADVERTISING_TERMINATE_SYNC_COMMAND                       = hci_command_op_code(0x08, 0x0046)
+HCI_LE_ADD_DEVICE_TO_PERIODIC_ADVERTISER_LIST_COMMAND                    = hci_command_op_code(0x08, 0x0047)
+HCI_LE_REMOVE_DEVICE_FROM_PERIODIC_ADVERTISER_LIST_COMMAND               = hci_command_op_code(0x08, 0x0048)
+HCI_LE_CLEAR_PERIODIC_ADVERTISER_LIST_COMMAND                            = hci_command_op_code(0x08, 0x0049)
+HCI_LE_READ_PERIODIC_ADVERTISER_LIST_SIZE_COMMAND                        = hci_command_op_code(0x08, 0x004A)
+HCI_LE_READ_TRANSMIT_POWER_COMMAND                                       = hci_command_op_code(0x08, 0x004B)
+HCI_LE_READ_RF_PATH_COMPENSATION_COMMAND                                 = hci_command_op_code(0x08, 0x004C)
+HCI_LE_WRITE_RF_PATH_COMPENSATION_COMMAND                                = hci_command_op_code(0x08, 0x004D)
+HCI_LE_SET_PRIVACY_MODE_COMMAND                                          = hci_command_op_code(0x08, 0x004E)
+HCI_LE_RECEIVER_TEST_V3_COMMAND                                          = hci_command_op_code(0x08, 0x004F)
+HCI_LE_TRANSMITTER_TEST_V3_COMMAND                                       = hci_command_op_code(0x08, 0x0050)
+HCI_LE_SET_CONNECTIONLESS_CTE_TRANSMIT_PARAMETERS_COMMAND                = hci_command_op_code(0x08, 0x0051)
+HCI_LE_SET_CONNECTIONLESS_CTE_TRANSMIT_ENABLE_COMMAND                    = hci_command_op_code(0x08, 0x0052)
+HCI_LE_SET_CONNECTIONLESS_IQ_SAMPLING_ENABLE_COMMAND                     = hci_command_op_code(0x08, 0x0053)
+HCI_LE_SET_CONNECTION_CTE_RECEIVE_PARAMETERS_COMMAND                     = hci_command_op_code(0x08, 0x0054)
+HCI_LE_SET_CONNECTION_CTE_TRANSMIT_PARAMETERS_COMMAND                    = hci_command_op_code(0x08, 0x0055)
+HCI_LE_CONNECTION_CTE_REQUEST_ENABLE_COMMAND                             = hci_command_op_code(0x08, 0x0056)
+HCI_LE_CONNECTION_CTE_RESPONSE_ENABLE_COMMAND                            = hci_command_op_code(0x08, 0x0057)
+HCI_LE_READ_ANTENNA_INFORMATION_COMMAND                                  = hci_command_op_code(0x08, 0x0058)
+HCI_LE_SET_PERIODIC_ADVERTISING_RECEIVE_ENABLE_COMMAND                   = hci_command_op_code(0x08, 0x0059)
+HCI_LE_PERIODIC_ADVERTISING_SYNC_TRANSFER_COMMAND                        = hci_command_op_code(0x08, 0x005A)
+HCI_LE_PERIODIC_ADVERTISING_SET_INFO_TRANSFER_COMMAND                    = hci_command_op_code(0x08, 0x005B)
+HCI_LE_SET_PERIODIC_ADVERTISING_SYNC_TRANSFER_PARAMETERS_COMMAND         = hci_command_op_code(0x08, 0x005C)
+HCI_LE_SET_DEFAULT_PERIODIC_ADVERTISING_SYNC_TRANSFER_PARAMETERS_COMMAND = hci_command_op_code(0x08, 0x005D)
+HCI_LE_GENERATE_DHKEY_V2_COMMAND                                         = hci_command_op_code(0x08, 0x005E)
+HCI_LE_MODIFY_SLEEP_CLOCK_ACCURACY_COMMAND                               = hci_command_op_code(0x08, 0x005F)
+HCI_LE_READ_BUFFER_SIZE_V2_COMMAND                                       = hci_command_op_code(0x08, 0x0060)
+HCI_LE_READ_ISO_TX_SYNC_COMMAND                                          = hci_command_op_code(0x08, 0x0061)
+HCI_LE_SET_CIG_PARAMETERS_COMMAND                                        = hci_command_op_code(0x08, 0x0062)
+HCI_LE_SET_CIG_PARAMETERS_TEST_COMMAND                                   = hci_command_op_code(0x08, 0x0063)
+HCI_LE_CREATE_CIS_COMMAND                                                = hci_command_op_code(0x08, 0x0064)
+HCI_LE_REMOVE_CIG_COMMAND                                                = hci_command_op_code(0x08, 0x0065)
+HCI_LE_ACCEPT_CIS_REQUEST_COMMAND                                        = hci_command_op_code(0x08, 0x0066)
+HCI_LE_REJECT_CIS_REQUEST_COMMAND                                        = hci_command_op_code(0x08, 0x0067)
+HCI_LE_CREATE_BIG_COMMAND                                                = hci_command_op_code(0x08, 0x0068)
+HCI_LE_CREATE_BIG_TEST_COMMAND                                           = hci_command_op_code(0x08, 0x0069)
+HCI_LE_TERMINATE_BIG_COMMAND                                             = hci_command_op_code(0x08, 0x006A)
+HCI_LE_BIG_CREATE_SYNC_COMMAND                                           = hci_command_op_code(0x08, 0x006B)
+HCI_LE_BIG_TERMINATE_SYNC_COMMAND                                        = hci_command_op_code(0x08, 0x006C)
+HCI_LE_REQUEST_PEER_SCA_COMMAND                                          = hci_command_op_code(0x08, 0x006D)
+HCI_LE_SETUP_ISO_DATA_PATH_COMMAND                                       = hci_command_op_code(0x08, 0x006E)
+HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND                                      = hci_command_op_code(0x08, 0x006F)
+HCI_LE_ISO_TRANSMIT_TEST_COMMAND                                         = hci_command_op_code(0x08, 0x0070)
+HCI_LE_ISO_RECEIVE_TEST_COMMAND                                          = hci_command_op_code(0x08, 0x0071)
+HCI_LE_ISO_READ_TEST_COUNTERS_COMMAND                                    = hci_command_op_code(0x08, 0x0072)
+HCI_LE_ISO_TEST_END_COMMAND                                              = hci_command_op_code(0x08, 0x0073)
+HCI_LE_SET_HOST_FEATURE_COMMAND                                          = hci_command_op_code(0x08, 0x0074)
+HCI_LE_READ_ISO_LINK_QUALITY_COMMAND                                     = hci_command_op_code(0x08, 0x0075)
+HCI_LE_ENHANCED_READ_TRANSMIT_POWER_LEVEL_COMMAND                        = hci_command_op_code(0x08, 0x0076)
+HCI_LE_READ_REMOTE_TRANSMIT_POWER_LEVEL_COMMAND                          = hci_command_op_code(0x08, 0x0077)
+HCI_LE_SET_PATH_LOSS_REPORTING_PARAMETERS_COMMAND                        = hci_command_op_code(0x08, 0x0078)
+HCI_LE_SET_PATH_LOSS_REPORTING_ENABLE_COMMAND                            = hci_command_op_code(0x08, 0x0079)
+HCI_LE_SET_TRANSMIT_POWER_REPORTING_ENABLE_COMMAND                       = hci_command_op_code(0x08, 0x007A)
+HCI_LE_TRANSMITTER_TEST_V4_COMMAND                                       = hci_command_op_code(0x08, 0x007B)
+HCI_LE_SET_DATA_RELATED_ADDRESS_CHANGES_COMMAND                          = hci_command_op_code(0x08, 0x007C)
+HCI_LE_SET_DEFAULT_SUBRATE_COMMAND                                       = hci_command_op_code(0x08, 0x007D)
+HCI_LE_SUBRATE_REQUEST_COMMAND                                           = hci_command_op_code(0x08, 0x007E)
 
 HCI_COMMAND_NAMES = {
-    HCI_INQUIRY_COMMAND:                                               'HCI_INQUIRY_COMMAND',
-    HCI_INQUIRY_CANCEL_COMMAND:                                        'HCI_INQUIRY_CANCEL_COMMAND',
-    HCI_CREATE_CONNECTION_COMMAND:                                     'HCI_CREATE_CONNECTION_COMMAND',
-    HCI_DISCONNECT_COMMAND:                                            'HCI_DISCONNECT_COMMAND',
-    HCI_ACCEPT_CONNECTION_REQUEST_COMMAND:                             'HCI_ACCEPT_CONNECTION_REQUEST_COMMAND',
-    HCI_LINK_KEY_REQUEST_REPLY_COMMAND:                                'HCI_LINK_KEY_REQUEST_REPLY_COMMAND',
-    HCI_LINK_KEY_REQUEST_NEGATIVE_REPLY_COMMAND:                       'HCI_LINK_KEY_REQUEST_NEGATIVE_REPLY_COMMAND',
-    HCI_PIN_CODE_REQUEST_NEGATIVE_REPLY_COMMAND:                       'HCI_PIN_CODE_REQUEST_NEGATIVE_REPLY_COMMAND',
-    HCI_CHANGE_CONNECTION_PACKET_TYPE_COMMAND:                         'HCI_CHANGE_CONNECTION_PACKET_TYPE_COMMAND',
-    HCI_AUTHENTICATION_REQUESTED_COMMAND:                              'HCI_AUTHENTICATION_REQUESTED_COMMAND',
-    HCI_SET_CONNECTION_ENCRYPTION_COMMAND:                             'HCI_SET_CONNECTION_ENCRYPTION_COMMAND',
-    HCI_REMOTE_NAME_REQUEST_COMMAND:                                   'HCI_REMOTE_NAME_REQUEST_COMMAND',
-    HCI_READ_REMOTE_SUPPORTED_FEATURES_COMMAND:                        'HCI_READ_REMOTE_SUPPORTED_FEATURES_COMMAND',
-    HCI_READ_REMOTE_EXTENDED_FEATURES_COMMAND:                         'HCI_READ_REMOTE_EXTENDED_FEATURES_COMMAND',
-    HCI_READ_REMOTE_VERSION_INFORMATION_COMMAND:                       'HCI_READ_REMOTE_VERSION_INFORMATION_COMMAND',
-    HCI_READ_CLOCK_OFFSET_COMMAND:                                     'HCI_READ_CLOCK_OFFSET_COMMAND',
-    HCI_IO_CAPABILITY_REQUEST_REPLY_COMMAND:                           'HCI_IO_CAPABILITY_REQUEST_REPLY_COMMAND',
-    HCI_USER_CONFIRMATION_REQUEST_REPLY_COMMAND:                       'HCI_USER_CONFIRMATION_REQUEST_REPLY_COMMAND',
-    HCI_USER_CONFIRMATION_REQUEST_NEGATIVE_REPLY_COMMAND:              'HCI_USER_CONFIRMATION_REQUEST_NEGATIVE_REPLY_COMMAND',
-    HCI_USER_PASSKEY_REQUEST_REPLY_COMMAND:                            'HCI_USER_PASSKEY_REQUEST_REPLY_COMMAND',
-    HCI_USER_PASSKEY_REQUEST_NEGATIVE_REPLY_COMMAND:                   'HCI_USER_PASSKEY_REQUEST_NEGATIVE_REPLY_COMMAND',
-    HCI_ENHANCED_SETUP_SYNCHRONOUS_CONNECTION_COMMAND:                 'HCI_ENHANCED_SETUP_SYNCHRONOUS_CONNECTION_COMMAND',
-    HCI_SNIFF_MODE_COMMAND:                                            'HCI_SNIFF_MODE_COMMAND',
-    HCI_EXIT_SNIFF_MODE_COMMAND:                                       'HCI_EXIT_SNIFF_MODE_COMMAND',
-    HCI_SWITCH_ROLE_COMMAND:                                           'HCI_SWITCH_ROLE_COMMAND',
-    HCI_WRITE_LINK_POLICY_SETTINGS_COMMAND:                            'HCI_WRITE_LINK_POLICY_SETTINGS_COMMAND',
-    HCI_WRITE_DEFAULT_LINK_POLICY_SETTINGS_COMMAND:                    'HCI_WRITE_DEFAULT_LINK_POLICY_SETTINGS_COMMAND',
-    HCI_SNIFF_SUBRATING_COMMAND:                                       'HCI_SNIFF_SUBRATING_COMMAND',
-    HCI_SET_EVENT_MASK_COMMAND:                                        'HCI_SET_EVENT_MASK_COMMAND',
-    HCI_RESET_COMMAND:                                                 'HCI_RESET_COMMAND',
-    HCI_SET_EVENT_FILTER_COMMAND:                                      'HCI_SET_EVENT_FILTER_COMMAND',
-    HCI_READ_STORED_LINK_KEY_COMMAND:                                  'HCI_READ_STORED_LINK_KEY_COMMAND',
-    HCI_DELETE_STORED_LINK_KEY_COMMAND:                                'HCI_DELETE_STORED_LINK_KEY_COMMAND',
-    HCI_WRITE_LOCAL_NAME_COMMAND:                                      'HCI_WRITE_LOCAL_NAME_COMMAND',
-    HCI_READ_LOCAL_NAME_COMMAND:                                       'HCI_READ_LOCAL_NAME_COMMAND',
-    HCI_WRITE_CONNECTION_ACCEPT_TIMEOUT_COMMAND:                       'HCI_WRITE_CONNECTION_ACCEPT_TIMEOUT_COMMAND',
-    HCI_WRITE_PAGE_TIMEOUT_COMMAND:                                    'HCI_WRITE_PAGE_TIMEOUT_COMMAND',
-    HCI_WRITE_SCAN_ENABLE_COMMAND:                                     'HCI_WRITE_SCAN_ENABLE_COMMAND',
-    HCI_READ_PAGE_SCAN_ACTIVITY_COMMAND:                               'HCI_READ_PAGE_SCAN_ACTIVITY_COMMAND',
-    HCI_WRITE_PAGE_SCAN_ACTIVITY_COMMAND:                              'HCI_WRITE_PAGE_SCAN_ACTIVITY_COMMAND',
-    HCI_WRITE_INQUIRY_SCAN_ACTIVITY_COMMAND:                           'HCI_WRITE_INQUIRY_SCAN_ACTIVITY_COMMAND',
-    HCI_READ_CLASS_OF_DEVICE_COMMAND:                                  'HCI_READ_CLASS_OF_DEVICE_COMMAND',
-    HCI_WRITE_CLASS_OF_DEVICE_COMMAND:                                 'HCI_WRITE_CLASS_OF_DEVICE_COMMAND',
-    HCI_READ_VOICE_SETTING_COMMAND:                                    'HCI_READ_VOICE_SETTING_COMMAND',
-    HCI_WRITE_VOICE_SETTING_COMMAND:                                   'HCI_WRITE_VOICE_SETTING_COMMAND',
-    HCI_READ_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND:                  'HCI_READ_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND',
-    HCI_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND:                 'HCI_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND',
-    HCI_HOST_BUFFER_SIZE_COMMAND:                                      'HCI_HOST_BUFFER_SIZE_COMMAND',
-    HCI_WRITE_LINK_SUPERVISION_TIMEOUT_COMMAND:                        'HCI_WRITE_LINK_SUPERVISION_TIMEOUT_COMMAND',
-    HCI_READ_NUMBER_OF_SUPPORTED_IAC_COMMAND:                          'HCI_READ_NUMBER_OF_SUPPORTED_IAC_COMMAND',
-    HCI_READ_CURRENT_IAC_LAP_COMMAND:                                  'HCI_READ_CURRENT_IAC_LAP_COMMAND',
-    HCI_WRITE_INQUIRY_SCAN_TYPE_COMMAND:                               'HCI_WRITE_INQUIRY_SCAN_TYPE_COMMAND',
-    HCI_WRITE_INQUIRY_MODE_COMMAND:                                    'HCI_WRITE_INQUIRY_MODE_COMMAND',
-    HCI_READ_PAGE_SCAN_TYPE_COMMAND:                                   'HCI_READ_PAGE_SCAN_TYPE_COMMAND',
-    HCI_WRITE_PAGE_SCAN_TYPE_COMMAND:                                  'HCI_WRITE_PAGE_SCAN_TYPE_COMMAND',
-    HCI_WRITE_EXTENDED_INQUIRY_RESPONSE_COMMAND:                       'HCI_WRITE_EXTENDED_INQUIRY_RESPONSE_COMMAND',
-    HCI_WRITE_SIMPLE_PAIRING_MODE_COMMAND:                             'HCI_WRITE_SIMPLE_PAIRING_MODE_COMMAND',
-    HCI_READ_INQUIRY_RESPONSE_TRANSMIT_POWER_LEVEL_COMMAND:            'HCI_READ_INQUIRY_RESPONSE_TRANSMIT_POWER_LEVEL_COMMAND',
-    HCI_SET_EVENT_MASK_PAGE_2_COMMAND:                                 'HCI_SET_EVENT_MASK_PAGE_2_COMMAND',
-    HCI_READ_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND:                 'HCI_READ_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND',
-    HCI_READ_LOCAL_VERSION_INFORMATION_COMMAND:                        'HCI_READ_LOCAL_VERSION_INFORMATION_COMMAND',
-    HCI_READ_LOCAL_SUPPORTED_COMMANDS_COMMAND:                         'HCI_READ_LOCAL_SUPPORTED_COMMANDS_COMMAND',
-    HCI_READ_LOCAL_SUPPORTED_FEATURES_COMMAND:                         'HCI_READ_LOCAL_SUPPORTED_FEATURES_COMMAND',
-    HCI_READ_LOCAL_EXTENDED_FEATURES_COMMAND:                          'HCI_READ_LOCAL_EXTENDED_FEATURES_COMMAND',
-    HCI_READ_BUFFER_SIZE_COMMAND:                                      'HCI_READ_BUFFER_SIZE_COMMAND',
-    HCI_READ_LE_HOST_SUPPORT_COMMAND:                                  'HCI_READ_LE_HOST_SUPPORT_COMMAND',
-    HCI_WRITE_LE_HOST_SUPPORT_COMMAND:                                 'HCI_WRITE_LE_HOST_SUPPORT_COMMAND',
-    HCI_WRITE_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND:                 'HCI_WRITE_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND',
-    HCI_WRITE_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND:                   'HCI_WRITE_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND',
-    HCI_READ_BD_ADDR_COMMAND:                                          'HCI_READ_BD_ADDR_COMMAND',
-    HCI_READ_LOCAL_SUPPORTED_CODECS_COMMAND:                           'HCI_READ_LOCAL_SUPPORTED_CODECS_COMMAND',
-    HCI_READ_ENCRYPTION_KEY_SIZE_COMMAND:                              'HCI_READ_ENCRYPTION_KEY_SIZE_COMMAND',
-    HCI_LE_SET_EVENT_MASK_COMMAND:                                     'HCI_LE_SET_EVENT_MASK_COMMAND',
-    HCI_LE_READ_BUFFER_SIZE_COMMAND:                                   'HCI_LE_READ_BUFFER_SIZE_COMMAND',
-    HCI_LE_READ_LOCAL_SUPPORTED_FEATURES_COMMAND:                      'HCI_LE_READ_LOCAL_SUPPORTED_FEATURES_COMMAND',
-    HCI_LE_SET_RANDOM_ADDRESS_COMMAND:                                 'HCI_LE_SET_RANDOM_ADDRESS_COMMAND',
-    HCI_LE_SET_ADVERTISING_PARAMETERS_COMMAND:                         'HCI_LE_SET_ADVERTISING_PARAMETERS_COMMAND',
-    HCI_LE_READ_ADVERTISING_CHANNEL_TX_POWER_COMMAND:                  'HCI_LE_READ_ADVERTISING_CHANNEL_TX_POWER_COMMAND',
-    HCI_LE_SET_ADVERTISING_DATA_COMMAND:                               'HCI_LE_SET_ADVERTISING_DATA_COMMAND',
-    HCI_LE_SET_SCAN_RESPONSE_DATA_COMMAND:                             'HCI_LE_SET_SCAN_RESPONSE_DATA_COMMAND',
-    HCI_LE_SET_ADVERTISING_ENABLE_COMMAND:                             'HCI_LE_SET_ADVERTISING_ENABLE_COMMAND',
-    HCI_LE_SET_SCAN_PARAMETERS_COMMAND:                                'HCI_LE_SET_SCAN_PARAMETERS_COMMAND',
-    HCI_LE_SET_SCAN_ENABLE_COMMAND:                                    'HCI_LE_SET_SCAN_ENABLE_COMMAND',
-    HCI_LE_CREATE_CONNECTION_COMMAND:                                  'HCI_LE_CREATE_CONNECTION_COMMAND',
-    HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND:                           'HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND',
-    HCI_LE_READ_WHITE_LIST_SIZE_COMMAND:                               'HCI_LE_READ_WHITE_LIST_SIZE_COMMAND',
-    HCI_LE_CLEAR_WHITE_LIST_COMMAND:                                   'HCI_LE_CLEAR_WHITE_LIST_COMMAND',
-    HCI_LE_ADD_DEVICE_TO_WHITE_LIST_COMMAND:                           'HCI_LE_ADD_DEVICE_TO_WHITE_LIST_COMMAND',
-    HCI_LE_REMOVE_DEVICE_FROM_WHITE_LIST_COMMAND:                      'HCI_LE_REMOVE_DEVICE_FROM_WHITE_LIST_COMMAND',
-    HCI_LE_CONNECTION_UPDATE_COMMAND:                                  'HCI_LE_CONNECTION_UPDATE_COMMAND',
-    HCI_LE_SET_HOST_CHANNEL_CLASSIFICATION_COMMAND:                    'HCI_LE_SET_HOST_CHANNEL_CLASSIFICATION_COMMAND',
-    HCI_LE_READ_CHANNEL_MAP_COMMAND:                                   'HCI_LE_READ_CHANNEL_MAP_COMMAND',
-    HCI_LE_READ_REMOTE_FEATURES_COMMAND:                               'HCI_LE_READ_REMOTE_FEATURES_COMMAND',
-    HCI_LE_ENCRYPT_COMMAND:                                            'HCI_LE_ENCRYPT_COMMAND',
-    HCI_LE_RAND_COMMAND:                                               'HCI_LE_RAND_COMMAND',
-    HCI_LE_START_ENCRYPTION_COMMAND:                                   'HCI_LE_START_ENCRYPTION_COMMAND',
-    HCI_LE_LONG_TERM_KEY_REQUEST_REPLY_COMMAND:                        'HCI_LE_LONG_TERM_KEY_REQUEST_REPLY_COMMAND',
-    HCI_LE_LONG_TERM_KEY_REQUEST_NEGATIVE_REPLY_COMMAND:               'HCI_LE_LONG_TERM_KEY_REQUEST_NEGATIVE_REPLY_COMMAND',
-    HCI_LE_READ_SUPPORTED_STATES_COMMAND:                              'HCI_LE_READ_SUPPORTED_STATES_COMMAND',
-    HCI_LE_RECEIVER_TEST_COMMAND:                                      'HCI_LE_RECEIVER_TEST_COMMAND',
-    HCI_LE_TRANSMITTER_TEST_COMMAND:                                   'HCI_LE_TRANSMITTER_TEST_COMMAND',
-    HCI_LE_TEST_END_COMMAND:                                           'HCI_LE_TEST_END_COMMAND',
-    HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_REPLY_COMMAND:          'HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_REPLY_COMMAND',
-    HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_NEGATIVE_REPLY_COMMAND: 'HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_NEGATIVE_REPLY_COMMAND',
-    HCI_LE_SET_DATA_LENGTH_COMMAND:                                    'HCI_LE_SET_DATA_LENGTH_COMMAND',
-    HCI_LE_READ_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND:                 'HCI_LE_READ_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND',
-    HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND:                'HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND',
-    HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMMAND:                        'HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMMAND',
-    HCI_LE_GENERATE_DHKEY_COMMAND:                                     'HCI_LE_GENERATE_DHKEY_COMMAND',
-    HCI_LE_ADD_DEVICE_TO_RESOLVING_LIST_COMMAND:                       'HCI_LE_ADD_DEVICE_TO_RESOLVING_LIST_COMMAND',
-    HCI_LE_REMOVE_DEVICE_FROM_RESOLVING_LIST_COMMAND:                  'HCI_LE_REMOVE_DEVICE_FROM_RESOLVING_LIST_COMMAND',
-    HCI_LE_CLEAR_RESOLVING_LIST_COMMAND:                               'HCI_LE_CLEAR_RESOLVING_LIST_COMMAND',
-    HCI_LE_READ_RESOLVING_LIST_SIZE_COMMAND:                           'HCI_LE_READ_RESOLVING_LIST_SIZE_COMMAND',
-    HCI_LE_READ_PEER_RESOLVABLE_ADDRESS_COMMAND:                       'HCI_LE_READ_PEER_RESOLVABLE_ADDRESS_COMMAND',
-    HCI_LE_READ_LOCAL_RESOLVABLE_ADDRESS_COMMAND:                      'HCI_LE_READ_LOCAL_RESOLVABLE_ADDRESS_COMMAND',
-    HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE_COMMAND:                      'HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE_COMMAND',
-    HCI_LE_SET_RESOLVABLE_PRIVATE_ADDRESS_TIMEOUT_COMMAND:             'HCI_LE_SET_RESOLVABLE_PRIVATE_ADDRESS_TIMEOUT_COMMAND',
-    HCI_LE_READ_MAXIMUM_DATA_LENGTH_COMMAND:                           'HCI_LE_READ_MAXIMUM_DATA_LENGTH_COMMAND',
-    HCI_LE_READ_PHY_COMMAND:                                           'HCI_LE_READ_PHY_COMMAND',
-    HCI_LE_SET_DEFAULT_PHY_COMMAND:                                    'HCI_LE_SET_DEFAULT_PHY_COMMAND',
-    HCI_LE_SET_PHY_COMMAND:                                            'HCI_LE_SET_PHY_COMMAND',
-    HCI_LE_ENHANCED_RECEIVER_TEST_COMMAND:                             'HCI_LE_ENHANCED_RECEIVER_TEST_COMMAND',
-    HCI_LE_ENHANCED_TRANSMITTER_TEST_COMMAND:                          'HCI_LE_ENHANCED_TRANSMITTER_TEST_COMMAND',
-    HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS_COMMAND:                 'HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS_COMMAND',
-    HCI_LE_SET_EXTENDED_ADVERTISING_PARAMETERS_COMMAND:                'HCI_LE_SET_EXTENDED_ADVERTISING_PARAMETERS_COMMAND',
-    HCI_LE_SET_EXTENDED_ADVERTISING_DATA_COMMAND:                      'HCI_LE_SET_EXTENDED_ADVERTISING_DATA_COMMAND',
-    HCI_LE_SET_EXTENDED_SCAN_RESPONSE_DATA_COMMAND:                    'HCI_LE_SET_EXTENDED_SCAN_RESPONSE_DATA_COMMAND',
-    HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND:                    'HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND',
-    HCI_LE_READ_MAXIMUM_ADVERTISING_DATA_LENGTH_COMMAND:               'HCI_LE_READ_MAXIMUM_ADVERTISING_DATA_LENGTH_COMMAND',
-    HCI_LE_READ_NUMBER_OF_SUPPORTED_ADVERETISING_SETS_COMMAND:         'HCI_LE_READ_NUMBER_OF_SUPPORTED_ADVERETISING_SETS_COMMAND',
-    HCI_LE_REMOVE_ADVERTISING_SET_COMMAND:                             'HCI_LE_REMOVE_ADVERTISING_SET_COMMAND',
-    HCI_LE_CLEAR_ADVERTISING_SETS_COMMAND:                             'HCI_LE_CLEAR_ADVERTISING_SETS_COMMAND',
-    HCI_LE_SET_PERIODIC_ADVERTISING_PARAMETERS_COMMAND:                'HCI_LE_SET_PERIODIC_ADVERTISING_PARAMETERS_COMMAND',
-    HCI_LE_SET_PERIODIC_ADVERTISING_DATA_COMMAND:                      'HCI_LE_SET_PERIODIC_ADVERTISING_DATA_COMMAND',
-    HCI_LE_SET_PERIODIC_ADVERTISING_ENABLE_COMMAND:                    'HCI_LE_SET_PERIODIC_ADVERTISING_ENABLE_COMMAND',
-    HCI_LE_SET_EXTENDED_SCAN_PARAMETERS_COMMAND:                       'HCI_LE_SET_EXTENDED_SCAN_PARAMETERS_COMMAND',
-    HCI_LE_SET_EXTENDED_SCAN_ENABLE_COMMAND:                           'HCI_LE_SET_EXTENDED_SCAN_ENABLE_COMMAND',
-    HCI_LE_SET_EXTENDED_CREATE_CONNECTION_COMMAND:                     'HCI_LE_SET_EXTENDED_CREATE_CONNECTION_COMMAND',
-    HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_COMMAND:                   'HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_COMMAND',
-    HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_CANCEL_COMMAND:            'HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_CANCEL_COMMAND',
-    HCI_LE_PERIODIC_ADVERTISING_TERMINATE_SYNC_COMMAND:                'HCI_LE_PERIODIC_ADVERTISING_TERMINATE_SYNC_COMMAND',
-    HCI_LE_ADD_DEVICE_TO_PERIODIC_ADVERTISER_LIST_COMMAND:             'HCI_LE_ADD_DEVICE_TO_PERIODIC_ADVERTISER_LIST_COMMAND',
-    HCI_LE_REMOVE_DEVICE_FROM_PERIODIC_ADVERTISER_LIST_COMMAND:        'HCI_LE_REMOVE_DEVICE_FROM_PERIODIC_ADVERTISER_LIST_COMMAND',
-    HCI_LE_CLEAR_PERIODIC_ADVERTISER_LIST_COMMAND:                     'HCI_LE_CLEAR_PERIODIC_ADVERTISER_LIST_COMMAND',
-    HCI_LE_READ_PERIODIC_ADVERTISER_LIST_SIZE_COMMAND:                 'HCI_LE_READ_PERIODIC_ADVERTISER_LIST_SIZE_COMMAND',
-    HCI_LE_READ_TRANSMIT_POWER_COMMAND:                                'HCI_LE_READ_TRANSMIT_POWER_COMMAND',
-    HCI_LE_READ_RF_PATH_COMPENSATION_COMMAND:                          'HCI_LE_READ_RF_PATH_COMPENSATION_COMMAND',
-    HCI_LE_WRITE_RF_PATH_COMPENSATION_COMMAND:                         'HCI_LE_WRITE_RF_PATH_COMPENSATION_COMMAND',
-    HCI_LE_SET_PRIVACY_MODE_COMMAND:                                   'HCI_LE_SET_PRIVACY_MODE_COMMAND'
+    command_code: command_name for (command_name, command_code) in globals().items()
+    if command_name.startswith('HCI_') and command_name.endswith('_COMMAND')
 }
-
 
 # HCI Error Codes
 # See Bluetooth spec Vol 2, Part D - 1.3 LIST OF ERROR CODES
-HCI_SUCCESS                                                        = 0x00
-HCI_UNKNOWN_HCI_COMMAND_ERROR                                      = 0x01
-HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR                            = 0x02
-HCI_HARDWARE_FAILURE_ERROR                                         = 0x03
-HCI_PAGE_TIMEOUT_ERROR                                             = 0x04
-HCI_AUTHENTICATION_FAILURE_ERROR                                   = 0x05
-HCI_PIN_OR_KEY_MISSING_ERROR                                       = 0x06
-HCI_MEMORY_CAPACITY_EXCEEDED_ERROR                                 = 0x07
-HCI_CONNECTION_TIMEOUT_ERROR                                       = 0x08
-HCI_CONNECTION_LIMIT_EXCEEDED_ERROR                                = 0x09
-HCI_SYNCHRONOUS_CONNECTION_LIMIT_TO_A_DEVICE_EXCEEDED_ERROR        = 0x0A
-HCI_CONNECTION_ALREADY_EXISTS_ERROR                                = 0x0B
-HCI_COMMAND_DISALLOWED_ERROR                                       = 0x0C
-HCI_CONNECTION_REJECTED_DUE_TO_LIMITED_RESOURCES_ERROR             = 0x0D
-HCI_CONNECTION_REJECTED_DUE_TO_SECURITY_REASONS_ERROR              = 0x0E
-HCI_CONNECTION_REJECTED_DUE_TO_UNACCEPTABLE_BD_ADDR_ERROR          = 0x0F
-HCI_CONNECTION_ACCEPT_TIMEOUT_ERROR                                = 0x10
-HCI_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE_ERROR                   = 0x11
-HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR                           = 0x12
-HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR                        = 0x13
-HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_LOW_RESOURCES_ERROR = 0x14
-HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_POWER_OFF_ERROR     = 0x15
-HCI_CONNECTION_TERMINATED_BY_LOCAL_HOST_ERROR                      = 0x16
-HCI_UNACCEPTABLE_CONNECTION_PARAMETERS_ERROR                       = 0x3B
-HCI_CONNECTION_FAILED_TO_BE_ESTABLISHED_ERROR                      = 0x3E
-# TODO: more error codes
+HCI_SUCCESS                                                                            = 0x00
+HCI_UNKNOWN_HCI_COMMAND_ERROR                                                          = 0x01
+HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR                                                = 0x02
+HCI_HARDWARE_FAILURE_ERROR                                                             = 0x03
+HCI_PAGE_TIMEOUT_ERROR                                                                 = 0x04
+HCI_AUTHENTICATION_FAILURE_ERROR                                                       = 0x05
+HCI_PIN_OR_KEY_MISSING_ERROR                                                           = 0x06
+HCI_MEMORY_CAPACITY_EXCEEDED_ERROR                                                     = 0x07
+HCI_CONNECTION_TIMEOUT_ERROR                                                           = 0x08
+HCI_CONNECTION_LIMIT_EXCEEDED_ERROR                                                    = 0x09
+HCI_SYNCHRONOUS_CONNECTION_LIMIT_TO_A_DEVICE_EXCEEDED_ERROR                            = 0x0A
+HCI_CONNECTION_ALREADY_EXISTS_ERROR                                                    = 0x0B
+HCI_COMMAND_DISALLOWED_ERROR                                                           = 0x0C
+HCI_CONNECTION_REJECTED_DUE_TO_LIMITED_RESOURCES_ERROR                                 = 0x0D
+HCI_CONNECTION_REJECTED_DUE_TO_SECURITY_REASONS_ERROR                                  = 0x0E
+HCI_CONNECTION_REJECTED_DUE_TO_UNACCEPTABLE_BD_ADDR_ERROR                              = 0x0F
+HCI_CONNECTION_ACCEPT_TIMEOUT_ERROR                                                    = 0x10
+HCI_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE_ERROR                                       = 0x11
+HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR                                               = 0x12
+HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR                                            = 0x13
+HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_LOW_RESOURCES_ERROR                     = 0x14
+HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_POWER_OFF_ERROR                         = 0x15
+HCI_CONNECTION_TERMINATED_BY_LOCAL_HOST_ERROR                                          = 0x16
+HCI_REPEATED_ATTEMPTS_ERROR                                                            = 0X17
+HCI_PAIRING_NOT_ALLOWED_ERROR                                                          = 0X18
+HCI_UNKNOWN_LMP_PDU_ERROR                                                              = 0X19
+HCI_UNSUPPORTED_REMOTE_FEATURE_ERROR                                                   = 0X1A
+HCI_SCO_OFFSET_REJECTED_ERROR                                                          = 0X1B
+HCI_SCO_INTERVAL_REJECTED_ERROR                                                        = 0X1C
+HCI_SCO_AIR_MODE_REJECTED_ERROR                                                        = 0X1D
+HCI_INVALID_LMP_OR_LL_PARAMETERS_ERROR                                                 = 0X1E
+HCI_UNSPECIFIED_ERROR_ERROR                                                            = 0X1F
+HCI_UNSUPPORTED_LMP_OR_LL_PARAMETER_VALUE_ERROR                                        = 0X20
+HCI_ROLE_CHANGE_NOT_ALLOWED_ERROR                                                      = 0X21
+HCI_LMP_OR_LL_RESPONSE_TIMEOUT_ERROR                                                   = 0X22
+HCI_LMP_ERROR_TRANSACTION_COLLISION_OR_LL_PROCEDURE_COLLISION_ERROR                    = 0X23
+HCI_LMP_PDU_NOT_ALLOWED_ERROR                                                          = 0X24
+HCI_ENCRYPTION_MODE_NOT_ACCEPTABLE_ERROR                                               = 0X25
+HCI_LINK_KEY_CANNOT_BE_CHANGED_ERROR                                                   = 0X26
+HCI_REQUESTED_QOS_NOT_SUPPORTED_ERROR                                                  = 0X27
+HCI_INSTANT_PASSED_ERROR                                                               = 0X28
+HCI_PAIRING_WITH_UNIT_KEY_NOT_SUPPORTED_ERROR                                          = 0X29
+HCI_DIFFERENT_TRANSACTION_COLLISION_ERROR                                              = 0X2A
+HCI_RESERVED_FOR_FUTURE_USE                                                            = 0X2B
+HCI_QOS_UNACCEPTABLE_PARAMETER_ERROR                                                   = 0X2C
+HCI_QOS_REJECTED_ERROR                                                                 = 0X2D
+HCI_CHANNEL_CLASSIFICATION_NOT_SUPPORTED_ERROR                                         = 0X2E
+HCI_INSUFFICIENT_SECURITY_ERROR                                                        = 0X2F
+HCI_PARAMETER_OUT_OF_MANDATORY_RANGE_ERROR                                             = 0X30
+HCI_ROLE_SWITCH_PENDING_ERROR                                                          = 0X32
+HCI_RESERVED_SLOT_VIOLATION_ERROR                                                      = 0X34
+HCI_ROLE_SWITCH_FAILED_ERROR                                                           = 0X35
+HCI_EXTENDED_INQUIRY_RESPONSE_TOO_LARGE_ERROR                                          = 0X36
+HCI_SECURE_SIMPLE_PAIRING_NOT_SUPPORTED_BY_HOST_ERROR                                  = 0X37
+HCI_HOST_BUSY_PAIRING_ERROR                                                            = 0X38
+HCI_CONNECTION_REJECTED_DUE_TO_NO_SUITABLE_CHANNEL_FOUND_ERROR                         = 0X39
+HCI_CONTROLLER_BUSY_ERROR                                                              = 0X3A
+HCI_UNACCEPTABLE_CONNECTION_PARAMETERS_ERROR                                           = 0X3B
+HCI_ADVERTISING_TIMEOUT_ERROR                                                          = 0X3C
+HCI_CONNECTION_TERMINATED_DUE_TO_MIC_FAILURE_ERROR                                     = 0X3D
+HCI_CONNECTION_FAILED_TO_BE_ESTABLISHED_ERROR                                          = 0X3E
+HCI_COARSE_CLOCK_ADJUSTMENT_REJECTED_BUT_WILL_TRY_TO_ADJUST_USING_CLOCK_DRAGGING_ERROR = 0X40
+HCI_TYPE0_SUBMAP_NOT_DEFINED_ERROR                                                     = 0X41
+HCI_UNKNOWN_ADVERTISING_IDENTIFIER_ERROR                                               = 0X42
+HCI_LIMIT_REACHED_ERROR                                                                = 0X43
+HCI_OPERATION_CANCELLED_BY_HOST_ERROR                                                  = 0X44
+HCI_PACKET_TOO_LONG_ERROR                                                              = 0X45
 
 HCI_ERROR_NAMES = {
-    HCI_SUCCESS:                                                        'HCI_SUCCESS',
-    HCI_UNKNOWN_HCI_COMMAND_ERROR:                                      'HCI_UNKNOWN_HCI_COMMAND_ERROR',
-    HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR:                            'HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR',
-    HCI_HARDWARE_FAILURE_ERROR:                                         'HCI_HARDWARE_FAILURE_ERROR',
-    HCI_PAGE_TIMEOUT_ERROR:                                             'HCI_PAGE_TIMEOUT_ERROR',
-    HCI_AUTHENTICATION_FAILURE_ERROR:                                   'HCI_AUTHENTICATION_FAILURE_ERROR',
-    HCI_PIN_OR_KEY_MISSING_ERROR:                                       'HCI_PIN_OR_KEY_MISSING_ERROR',
-    HCI_MEMORY_CAPACITY_EXCEEDED_ERROR:                                 'HCI_MEMORY_CAPACITY_EXCEEDED_ERROR',
-    HCI_CONNECTION_TIMEOUT_ERROR:                                       'HCI_CONNECTION_TIMEOUT_ERROR',
-    HCI_CONNECTION_LIMIT_EXCEEDED_ERROR:                                'HCI_CONNECTION_LIMIT_EXCEEDED_ERROR',
-    HCI_SYNCHRONOUS_CONNECTION_LIMIT_TO_A_DEVICE_EXCEEDED_ERROR:        'HCI_SYNCHRONOUS_CONNECTION_LIMIT_TO_A_DEVICE_EXCEEDED_ERROR',
-    HCI_CONNECTION_ALREADY_EXISTS_ERROR:                                'HCI_CONNECTION_ALREADY_EXISTS_ERROR',
-    HCI_COMMAND_DISALLOWED_ERROR:                                       'HCI_COMMAND_DISALLOWED_ERROR',
-    HCI_CONNECTION_REJECTED_DUE_TO_LIMITED_RESOURCES_ERROR:             'HCI_CONNECTION_REJECTED_DUE_TO_LIMITED_RESOURCES_ERROR',
-    HCI_CONNECTION_REJECTED_DUE_TO_SECURITY_REASONS_ERROR:              'HCI_CONNECTION_REJECTED_DUE_TO_SECURITY_REASONS_ERROR',
-    HCI_CONNECTION_REJECTED_DUE_TO_UNACCEPTABLE_BD_ADDR_ERROR:          'HCI_CONNECTION_REJECTED_DUE_TO_UNACCEPTABLE_BD_ADDR_ERROR',
-    HCI_CONNECTION_ACCEPT_TIMEOUT_ERROR:                                'HCI_CONNECTION_ACCEPT_TIMEOUT_ERROR',
-    HCI_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE_ERROR:                   'HCI_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE_ERROR',
-    HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR:                           'HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR',
-    HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR:                        'HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR',
-    HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_LOW_RESOURCES_ERROR: 'HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_LOW_RESOURCES_ERROR',
-    HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_POWER_OFF_ERROR:     'HCI_REMOTE_DEVICE_TERMINATED_CONNECTION_DUE_TO_POWER_OFF_ERROR',
-    HCI_CONNECTION_TERMINATED_BY_LOCAL_HOST_ERROR:                      'HCI_CONNECTION_TERMINATED_BY_LOCAL_HOST_ERROR',
-    HCI_UNACCEPTABLE_CONNECTION_PARAMETERS_ERROR:                       'HCI_UNACCEPTABLE_CONNECTION_PARAMETERS_ERROR',
-    HCI_CONNECTION_FAILED_TO_BE_ESTABLISHED_ERROR:                      'HCI_CONNECTION_FAILED_TO_BE_ESTABLISHED_ERROR'
+    error_code: error_name for (error_name, error_code) in globals().items()
+    if error_name.startswith('HCI_') and error_name.endswith('_ERROR')
 }
+HCI_ERROR_NAMES[HCI_SUCCESS] = 'HCI_SUCCESS'
 
 # Command Status codes
 HCI_COMMAND_STATUS_PENDING = 0
 
 # LE Event Masks
-LE_CONNECTION_COMPLETE_EVENT_MASK                   = (1 << 0)
-LE_ADVERTISING_REPORT_EVENT_MASK                    = (1 << 1)
-LE_CONNECTION_UPDATE_COMPLETE_EVENT_MASK            = (1 << 2)
-LE_READ_REMOTE_FEATURES_COMPLETE_EVENT_MASK         = (1 << 3)
-LE_LONG_TERM_KEY_REQUEST_EVENT_MASK                 = (1 << 4)
-LE_REMOTE_CONNECTION_PARAMETER_REQUEST_EVENT_MASK   = (1 << 5)
-LE_DATA_LENGTH_CHANGE_EVENT_MASK                    = (1 << 6)
-LE_READ_LOCAL_P_256_PUBLIC_KEY_COMPLETE_EVENT_MASK  = (1 << 7)
-LE_GENERATE_DHKEY_COMPLETE_EVENT_MASK               = (1 << 8)
-LE_ENHANCED_CONNECTION_COMPLETE_EVENT_MASK          = (1 << 9)
-LE_DIRECTED_ADVERTISING_REPORT_EVENT_MASK           = (1 << 10)
-LE_PHY_UPDATE_COMPLETE_EVENT_MASK                   = (1 << 11)
-LE_EXTENDED_ADVERTISING_REPORT_EVENT_MASK           = (1 << 12)
-LE_PERIODIC_ADVERTISING_SYNC_ESTABLISHED_EVENT_MASK = (1 << 13)
-LE_PERIODIC_ADVERTISING_REPORT_EVENT_MASK           = (1 << 14)
-LE_PERIODIC_ADVERTISING_SYNC_LOST_EVENT_MASK        = (1 << 15)
-LE_EXTENDED_SCAN_TIMEOUT_EVENT_MASK                 = (1 << 16)
-LE_EXTENDED_ADVERTISING_SET_TERMINATED_EVENT_MASK   = (1 << 17)
-LE_SCAN_REQUEST_RECEIVED_EVENT_MASK                 = (1 << 18)
-LE_CHANNEL_SELECTION_ALGORITHM_EVENT_MASK           = (1 << 19)
+HCI_LE_CONNECTION_COMPLETE_EVENT_MASK                         = (1 << 0)
+HCI_LE_ADVERTISING_REPORT_EVENT_MASK                          = (1 << 1)
+HCI_LE_CONNECTION_UPDATE_COMPLETE_EVENT_MASK                  = (1 << 2)
+HCI_LE_READ_REMOTE_FEATURES_COMPLETE_EVENT_MASK               = (1 << 3)
+HCI_LE_LONG_TERM_KEY_REQUEST_EVENT_MASK                       = (1 << 4)
+HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_EVENT_MASK         = (1 << 5)
+HCI_LE_DATA_LENGTH_CHANGE_EVENT_MASK                          = (1 << 6)
+HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMPLETE_EVENT_MASK        = (1 << 7)
+HCI_LE_GENERATE_DHKEY_COMPLETE_EVENT_MASK                     = (1 << 8)
+HCI_LE_ENHANCED_CONNECTION_COMPLETE_EVENT_MASK                = (1 << 9)
+HCI_LE_DIRECTED_ADVERTISING_REPORT_EVENT_MASK                 = (1 << 10)
+HCI_LE_PHY_UPDATE_COMPLETE_EVENT_MASK                         = (1 << 11)
+HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT_MASK                 = (1 << 12)
+HCI_LE_PERIODIC_ADVERTISING_SYNC_ESTABLISHED_EVENT_MASK       = (1 << 13)
+HCI_LE_PERIODIC_ADVERTISING_REPORT_EVENT_MASK                 = (1 << 14)
+HCI_LE_PERIODIC_ADVERTISING_SYNC_LOST_EVENT_MASK              = (1 << 15)
+HCI_LE_EXTENDED_SCAN_TIMEOUT_EVENT_MASK                       = (1 << 16)
+HCI_LE_EXTENDED_ADVERTISING_SET_TERMINATED_EVENT_MASK         = (1 << 17)
+HCI_LE_SCAN_REQUEST_RECEIVED_EVENT_MASK                       = (1 << 18)
+HCI_LE_CHANNEL_SELECTION_ALGORITHM_EVENT_MASK                 = (1 << 19)
+HCI_LE_CONNECTIONLESS_IQ_REPORT_EVENT_MASK                    = (1 << 20)
+HCI_LE_CONNECTION_IQ_REPORT_EVENT_MASK                        = (1 << 21)
+HCI_LE_CTE_REQUEST_FAILED_EVENT_MASK                          = (1 << 22)
+HCI_LE_PERIODIC_ADVERTISING_SYNC_TRANSFER_RECEIVED_EVENT_MASK = (1 << 23)
+HCI_LE_CIS_ESTABLISHED_EVENT_MASK                             = (1 << 24)
+HCI_LE_CIS_REQUEST_EVENT_MASK                                 = (1 << 25)
+HCI_LE_CREATE_BIG_COMPLETE_EVENT_MASK                         = (1 << 26)
+HCI_LE_TERMINATE_BIG_COMPLETE_EVENT_MASK                      = (1 << 27)
+HCI_LE_BIG_SYNC_ESTABLISHED_EVENT_MASK                        = (1 << 28)
+HCI_LE_BIG_SYNC_LOST_EVENT_MASK                               = (1 << 29)
+HCI_LE_REQUEST_PEER_SCA_COMPLETE_EVENT_MASK                   = (1 << 30)
+HCI_LE_PATH_LOSS_THRESHOLD_EVENT_MASK                         = (1 << 31)
+HCI_LE_TRANSMIT_POWER_REPORTING_EVENT_MASK                    = (1 << 32)
+HCI_LE_BIGINFO_ADVERTISING_REPORT_EVENT_MASK                  = (1 << 33)
+HCI_LE_SUBRATE_CHANGE_EVENT_MASK                              = (1 << 34)
+
+HCI_LE_EVENT_MASK_NAMES = {
+    mask: mask_name for (mask_name, mask) in globals().items()
+    if mask_name.startswith('HCI_LE_') and mask_name.endswith('_EVENT_MASK')
+}
 
 # ACL
 HCI_ACL_PB_FIRST_NON_FLUSHABLE = 0
@@ -649,8 +682,20 @@ HCI_LE_CODED_PHY = 3
 
 HCI_LE_PHY_NAMES = {
     HCI_LE_1M_PHY:    'LE 1M',
-    HCI_LE_2M_PHY:    'L2 2M',
+    HCI_LE_2M_PHY:    'LE 2M',
     HCI_LE_CODED_PHY: 'LE Coded'
+}
+
+HCI_LE_1M_PHY_BIT    = 0
+HCI_LE_2M_PHY_BIT    = 1
+HCI_LE_CODED_PHY_BIT = 2
+
+HCI_LE_PHY_BIT_NAMES = ['LE_1M_PHY', 'LE_2M_PHY', 'LE_CODED_PHY']
+
+HCI_LE_PHY_TYPE_TO_BIT = {
+    HCI_LE_1M_PHY:    HCI_LE_1M_PHY_BIT,
+    HCI_LE_2M_PHY:    HCI_LE_2M_PHY_BIT,
+    HCI_LE_CODED_PHY: HCI_LE_CODED_PHY_BIT
 }
 
 # Connection Parameters
@@ -735,6 +780,575 @@ HCI_RANDOM_DEVICE_ADDRESS_TYPE   = 0x01
 HCI_PUBLIC_IDENTITY_ADDRESS_TYPE = 0x02
 HCI_RANDOM_IDENTITY_ADDRESS_TYPE = 0x03
 
+# Supported Commands Flags
+# See Bluetooth spec @ 6.27 SUPPORTED COMMANDS
+HCI_SUPPORTED_COMMANDS_FLAGS = (
+    # Octet 0
+    (
+        HCI_INQUIRY_COMMAND,
+        HCI_INQUIRY_CANCEL_COMMAND,
+        HCI_PERIODIC_INQUIRY_MODE_COMMAND,
+        HCI_EXIT_PERIODIC_INQUIRY_MODE_COMMAND,
+        HCI_CREATE_CONNECTION_COMMAND,
+        HCI_DISCONNECT_COMMAND,
+        None,
+        HCI_CREATE_CONNECTION_CANCEL_COMMAND
+    ),
+    # Octet 1
+    (
+        HCI_ACCEPT_CONNECTION_REQUEST_COMMAND,
+        HCI_REJECT_CONNECTION_REQUEST_COMMAND,
+        HCI_LINK_KEY_REQUEST_REPLY_COMMAND,
+        HCI_LINK_KEY_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_PIN_CODE_REQUEST_REPLY_COMMAND,
+        HCI_PIN_CODE_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_CHANGE_CONNECTION_PACKET_TYPE_COMMAND,
+        HCI_AUTHENTICATION_REQUESTED_COMMAND
+    ),
+    # Octet 2
+    (
+        HCI_SET_CONNECTION_ENCRYPTION_COMMAND,
+        HCI_CHANGE_CONNECTION_LINK_KEY_COMMAND,
+        HCI_LINK_KEY_SELECTION_COMMAND,
+        HCI_REMOTE_NAME_REQUEST_COMMAND,
+        HCI_REMOTE_NAME_REQUEST_CANCEL_COMMAND,
+        HCI_READ_REMOTE_SUPPORTED_FEATURES_COMMAND,
+        HCI_READ_REMOTE_EXTENDED_FEATURES_COMMAND,
+        HCI_READ_REMOTE_VERSION_INFORMATION_COMMAND
+    ),
+    # Octet 3
+    (
+        HCI_READ_CLOCK_OFFSET_COMMAND,
+        HCI_READ_LMP_HANDLE_COMMAND,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    ),
+    # Octet 4
+    (
+        None,
+        HCI_HOLD_MODE_COMMAND,
+        HCI_SNIFF_MODE_COMMAND,
+        HCI_EXIT_SNIFF_MODE_COMMAND,
+        None,
+        None,
+        HCI_QOS_SETUP_COMMAND,
+        HCI_ROLE_DISCOVERY_COMMAND
+    ),
+    # Octet 5
+    (
+        HCI_SWITCH_ROLE_COMMAND,
+        HCI_READ_LINK_POLICY_SETTINGS_COMMAND,
+        HCI_WRITE_LINK_POLICY_SETTINGS_COMMAND,
+        HCI_READ_DEFAULT_LINK_POLICY_SETTINGS_COMMAND,
+        HCI_WRITE_DEFAULT_LINK_POLICY_SETTINGS_COMMAND,
+        HCI_FLOW_SPECIFICATION_COMMAND,
+        HCI_SET_EVENT_MASK_COMMAND,
+        HCI_RESET_COMMAND
+    ),
+    # Octet 6
+    (
+        HCI_SET_EVENT_FILTER_COMMAND,
+        HCI_FLUSH_COMMAND,
+        HCI_READ_PIN_TYPE_COMMAND,
+        HCI_WRITE_PIN_TYPE_COMMAND,
+        None,
+        HCI_READ_STORED_LINK_KEY_COMMAND,
+        HCI_WRITE_STORED_LINK_KEY_COMMAND,
+        HCI_DELETE_STORED_LINK_KEY_COMMAND
+    ),
+    # Octet 7
+    (
+        HCI_WRITE_LOCAL_NAME_COMMAND,
+        HCI_READ_LOCAL_NAME_COMMAND,
+        HCI_READ_CONNECTION_ACCEPT_TIMEOUT_COMMAND,
+        HCI_WRITE_CONNECTION_ACCEPT_TIMEOUT_COMMAND,
+        HCI_READ_PAGE_TIMEOUT_COMMAND,
+        HCI_WRITE_PAGE_TIMEOUT_COMMAND,
+        HCI_READ_SCAN_ENABLE_COMMAND,
+        HCI_WRITE_SCAN_ENABLE_COMMAND
+    ),
+    # Octet 8
+    (
+        HCI_READ_PAGE_SCAN_ACTIVITY_COMMAND,
+        HCI_WRITE_PAGE_SCAN_ACTIVITY_COMMAND,
+        HCI_READ_INQUIRY_SCAN_ACTIVITY_COMMAND,
+        HCI_WRITE_INQUIRY_SCAN_ACTIVITY_COMMAND,
+        HCI_READ_AUTHENTICATION_ENABLE_COMMAND,
+        HCI_WRITE_AUTHENTICATION_ENABLE_COMMAND,
+        None,
+        None
+    ),
+    # Octet 9
+    (
+        HCI_READ_CLASS_OF_DEVICE_COMMAND,
+        HCI_WRITE_CLASS_OF_DEVICE_COMMAND,
+        HCI_READ_VOICE_SETTING_COMMAND,
+        HCI_WRITE_VOICE_SETTING_COMMAND,
+        HCI_READ_AUTOMATIC_FLUSH_TIMEOUT_COMMAND,
+        HCI_WRITE_AUTOMATIC_FLUSH_TIMEOUT_COMMAND,
+        HCI_READ_NUM_BROADCAST_RETRANSMISSIONS_COMMAND,
+        HCI_WRITE_NUM_BROADCAST_RETRANSMISSIONS_COMMAND
+    ),
+    # Octet 10
+    (
+        HCI_READ_HOLD_MODE_ACTIVITY_COMMAND,
+        HCI_WRITE_HOLD_MODE_ACTIVITY_COMMAND,
+        HCI_READ_TRANSMIT_POWER_LEVEL_COMMAND,
+        HCI_READ_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND,
+        HCI_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE_COMMAND,
+        HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND,
+        HCI_HOST_BUFFER_SIZE_COMMAND,
+        HCI_HOST_NUMBER_OF_COMPLETED_PACKETS_COMMAND
+    ),
+    # Octet 11
+    (
+        HCI_READ_LINK_SUPERVISION_TIMEOUT_COMMAND,
+        HCI_WRITE_LINK_SUPERVISION_TIMEOUT_COMMAND,
+        HCI_READ_NUMBER_OF_SUPPORTED_IAC_COMMAND,
+        HCI_READ_CURRENT_IAC_LAP_COMMAND,
+        HCI_WRITE_CURRENT_IAC_LAP_COMMAND,
+        None,
+        None,
+        None
+    ),
+    # Octet 12
+    (
+        None,
+        HCI_SET_AFH_HOST_CHANNEL_CLASSIFICATION_COMMAND,
+        None,
+        None,
+        HCI_READ_INQUIRY_SCAN_TYPE_COMMAND,
+        HCI_WRITE_INQUIRY_SCAN_TYPE_COMMAND,
+        HCI_READ_INQUIRY_MODE_COMMAND,
+        HCI_WRITE_INQUIRY_MODE_COMMAND
+    ),
+    # Octet 13
+    (
+        HCI_READ_PAGE_SCAN_TYPE_COMMAND,
+        HCI_WRITE_PAGE_SCAN_TYPE_COMMAND,
+        HCI_READ_AFH_CHANNEL_ASSESSMENT_MODE_COMMAND,
+        HCI_WRITE_AFH_CHANNEL_ASSESSMENT_MODE_COMMAND,
+        None,
+        None,
+        None,
+        None,
+    ),
+    # Octet 14
+    (
+        None,
+        None,
+        None,
+        HCI_READ_LOCAL_VERSION_INFORMATION_COMMAND,
+        None,
+        HCI_READ_LOCAL_SUPPORTED_FEATURES_COMMAND,
+        HCI_READ_LOCAL_EXTENDED_FEATURES_COMMAND,
+        HCI_READ_BUFFER_SIZE_COMMAND
+    ),
+    # Octet 15
+    (
+        None,
+        HCI_READ_BD_ADDR_COMMAND,
+        HCI_READ_FAILED_CONTACT_COUNTER_COMMAND,
+        HCI_RESET_FAILED_CONTACT_COUNTER_COMMAND,
+        HCI_READ_LINK_QUALITY_COMMAND,
+        HCI_READ_RSSI_COMMAND,
+        HCI_READ_AFH_CHANNEL_MAP_COMMAND,
+        HCI_READ_CLOCK_COMMAND
+    ),
+    # Octet  16
+    (
+        HCI_READ_LOOPBACK_MODE_COMMAND,
+        HCI_WRITE_LOOPBACK_MODE_COMMAND,
+        HCI_ENABLE_DEVICE_UNDER_TEST_MODE_COMMAND,
+        HCI_SETUP_SYNCHRONOUS_CONNECTION_COMMAND,
+        HCI_ACCEPT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND,
+        HCI_REJECT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND,
+        None,
+        None,
+    ),
+    # Octet 17
+    (
+        HCI_READ_EXTENDED_INQUIRY_RESPONSE_COMMAND,
+        HCI_WRITE_EXTENDED_INQUIRY_RESPONSE_COMMAND,
+        HCI_REFRESH_ENCRYPTION_KEY_COMMAND,
+        None,
+        HCI_SNIFF_SUBRATING_COMMAND,
+        HCI_READ_SIMPLE_PAIRING_MODE_COMMAND,
+        HCI_WRITE_SIMPLE_PAIRING_MODE_COMMAND,
+        HCI_READ_LOCAL_OOB_DATA_COMMAND
+    ),
+    # Octet 18
+    (
+        HCI_READ_INQUIRY_RESPONSE_TRANSMIT_POWER_LEVEL_COMMAND,
+        HCI_WRITE_INQUIRY_TRANSMIT_POWER_LEVEL_COMMAND,
+        HCI_READ_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND,
+        HCI_WRITE_DEFAULT_ERRONEOUS_DATA_REPORTING_COMMAND,
+        None,
+        None,
+        None,
+        HCI_IO_CAPABILITY_REQUEST_REPLY_COMMAND
+    ),
+    # Octet 19
+    (
+        HCI_USER_CONFIRMATION_REQUEST_REPLY_COMMAND,
+        HCI_USER_CONFIRMATION_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_USER_PASSKEY_REQUEST_REPLY_COMMAND,
+        HCI_USER_PASSKEY_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_REMOTE_OOB_DATA_REQUEST_REPLY_COMMAND,
+        HCI_WRITE_SIMPLE_PAIRING_DEBUG_MODE_COMMAND,
+        HCI_ENHANCED_FLUSH_COMMAND,
+        HCI_REMOTE_OOB_DATA_REQUEST_NEGATIVE_REPLY_COMMAND
+    ),
+    # Octet 20
+    (
+        None,
+        None,
+        HCI_SEND_KEYPRESS_NOTIFICATION_COMMAND,
+        HCI_IO_CAPABILITY_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_READ_ENCRYPTION_KEY_SIZE_COMMAND,
+        None,
+        None,
+        None,
+    ),
+    # Octet 21
+    (
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    # Octet 22
+    (
+        None,
+        None,
+        HCI_SET_EVENT_MASK_PAGE_2_COMMAND,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    # Octet 23
+    (
+        HCI_READ_FLOW_CONTROL_MODE_COMMAND,
+        HCI_WRITE_FLOW_CONTROL_MODE_COMMAND,
+        HCI_READ_DATA_BLOCK_SIZE_COMMAND,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    # Octet 24
+    (
+        HCI_READ_ENHANCED_TRANSMIT_POWER_LEVEL_COMMAND,
+        None,
+        None,
+        None,
+        None,
+        HCI_READ_LE_HOST_SUPPORT_COMMAND,
+        HCI_WRITE_LE_HOST_SUPPORT_COMMAND,
+        None,
+    ),
+    # Octet 25
+    (
+        HCI_LE_SET_EVENT_MASK_COMMAND,
+        HCI_LE_READ_BUFFER_SIZE_COMMAND,
+        HCI_LE_READ_LOCAL_SUPPORTED_FEATURES_COMMAND,
+        None,
+        HCI_LE_SET_RANDOM_ADDRESS_COMMAND,
+        HCI_LE_SET_ADVERTISING_PARAMETERS_COMMAND,
+        HCI_LE_READ_ADVERTISING_PHYSICAL_CHANNEL_TX_POWER_COMMAND,
+        HCI_LE_SET_ADVERTISING_DATA_COMMAND,
+    ),
+    # Octet 26
+    (
+        HCI_LE_SET_SCAN_RESPONSE_DATA_COMMAND,
+        HCI_LE_SET_ADVERTISING_ENABLE_COMMAND,
+        HCI_LE_SET_SCAN_PARAMETERS_COMMAND,
+        HCI_LE_SET_SCAN_ENABLE_COMMAND,
+        HCI_LE_CREATE_CONNECTION_COMMAND,
+        HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
+        HCI_LE_READ_FILTER_ACCEPT_LIST_SIZE_COMMAND,
+        HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND
+    ),
+    # Octet 27
+    (
+        HCI_LE_ADD_DEVICE_TO_FILTER_ACCEPT_LIST_COMMAND,
+        HCI_LE_REMOVE_DEVICE_FROM_FILTER_ACCEPT_LIST_COMMAND,
+        HCI_LE_CONNECTION_UPDATE_COMMAND,
+        HCI_LE_SET_HOST_CHANNEL_CLASSIFICATION_COMMAND,
+        HCI_LE_READ_CHANNEL_MAP_COMMAND,
+        HCI_LE_READ_REMOTE_FEATURES_COMMAND,
+        HCI_LE_ENCRYPT_COMMAND,
+        HCI_LE_RAND_COMMAND
+    ),
+    # Octet 28
+    (
+        HCI_LE_ENABLE_ENCRYPTION_COMMAND,
+        HCI_LE_LONG_TERM_KEY_REQUEST_REPLY_COMMAND,
+        HCI_LE_LONG_TERM_KEY_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_LE_READ_SUPPORTED_STATES_COMMAND,
+        HCI_LE_RECEIVER_TEST_COMMAND,
+        HCI_LE_TRANSMITTER_TEST_COMMAND,
+        HCI_LE_TEST_END_COMMAND,
+        None,
+    ),
+    # Octet 29
+    (
+        None,
+        None,
+        None,
+        HCI_ENHANCED_SETUP_SYNCHRONOUS_CONNECTION_COMMAND,
+        HCI_ENHANCED_ACCEPT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND,
+        HCI_READ_LOCAL_SUPPORTED_CODECS_COMMAND,
+        HCI_SET_MWS_CHANNEL_PARAMETERS_COMMAND,
+        HCI_SET_EXTERNAL_FRAME_CONFIGURATION_COMMAND
+    ),
+    # Octet 30
+    (
+        HCI_SET_MWS_SIGNALING_COMMAND,
+        HCI_SET_MWS_TRANSPORT_LAYER_COMMAND,
+        HCI_SET_MWS_SCAN_FREQUENCY_TABLE_COMMAND,
+        HCI_GET_MWS_TRANSPORT_LAYER_CONFIGURATION_COMMAND,
+        HCI_SET_MWS_PATTERN_CONFIGURATION_COMMAND,
+        HCI_SET_TRIGGERED_CLOCK_CAPTURE_COMMAND,
+        HCI_TRUNCATED_PAGE_COMMAND,
+        HCI_TRUNCATED_PAGE_CANCEL_COMMAND
+    ),
+    # Octet 31
+    (
+        HCI_SET_CONNECTIONLESS_PERIPHERAL_BROADCAST_COMMAND,
+        HCI_SET_CONNECTIONLESS_PERIPHERAL_BROADCAST_RECEIVE_COMMAND,
+        HCI_START_SYNCHRONIZATION_TRAIN_COMMAND,
+        HCI_RECEIVE_SYNCHRONIZATION_TRAIN_COMMAND,
+        HCI_SET_RESERVED_LT_ADDR_COMMAND,
+        HCI_DELETE_RESERVED_LT_ADDR_COMMAND,
+        HCI_SET_CONNECTIONLESS_PERIPHERAL_BROADCAST_DATA_COMMAND,
+        HCI_READ_SYNCHRONIZATION_TRAIN_PARAMETERS_COMMAND
+    ),
+    # Octet 32
+    (
+        HCI_WRITE_SYNCHRONIZATION_TRAIN_PARAMETERS_COMMAND,
+        HCI_REMOTE_OOB_EXTENDED_DATA_REQUEST_REPLY_COMMAND,
+        HCI_READ_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND,
+        HCI_WRITE_SECURE_CONNECTIONS_HOST_SUPPORT_COMMAND,
+        HCI_READ_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND,
+        HCI_WRITE_AUTHENTICATED_PAYLOAD_TIMEOUT_COMMAND,
+        HCI_READ_LOCAL_OOB_EXTENDED_DATA_COMMAND,
+        HCI_WRITE_SECURE_CONNECTIONS_TEST_MODE_COMMAND
+    ),
+    # Octet 33
+    (
+        HCI_READ_EXTENDED_PAGE_TIMEOUT_COMMAND,
+        HCI_WRITE_EXTENDED_PAGE_TIMEOUT_COMMAND,
+        HCI_READ_EXTENDED_INQUIRY_LENGTH_COMMAND,
+        HCI_WRITE_EXTENDED_INQUIRY_LENGTH_COMMAND,
+        HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_REPLY_COMMAND,
+        HCI_LE_REMOTE_CONNECTION_PARAMETER_REQUEST_NEGATIVE_REPLY_COMMAND,
+        HCI_LE_SET_DATA_LENGTH_COMMAND,
+        HCI_LE_READ_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND
+    ),
+    # Octet 34
+    (
+        HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND,
+        HCI_LE_READ_LOCAL_P_256_PUBLIC_KEY_COMMAND,
+        HCI_LE_GENERATE_DHKEY_COMMAND,
+        HCI_LE_ADD_DEVICE_TO_RESOLVING_LIST_COMMAND,
+        HCI_LE_REMOVE_DEVICE_FROM_RESOLVING_LIST_COMMAND,
+        HCI_LE_CLEAR_RESOLVING_LIST_COMMAND,
+        HCI_LE_READ_RESOLVING_LIST_SIZE_COMMAND,
+        HCI_LE_READ_PEER_RESOLVABLE_ADDRESS_COMMAND
+    ),
+    # Octet 35
+    (
+        HCI_LE_READ_LOCAL_RESOLVABLE_ADDRESS_COMMAND,
+        HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE_COMMAND,
+        HCI_LE_SET_RESOLVABLE_PRIVATE_ADDRESS_TIMEOUT_COMMAND,
+        HCI_LE_READ_MAXIMUM_DATA_LENGTH_COMMAND,
+        HCI_LE_READ_PHY_COMMAND,
+        HCI_LE_SET_DEFAULT_PHY_COMMAND,
+        HCI_LE_SET_PHY_COMMAND,
+        HCI_LE_RECEIVER_TEST_V2_COMMAND
+    ),
+    # Octet 36
+    (
+        HCI_LE_TRANSMITTER_TEST_V2_COMMAND,
+        HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS_COMMAND,
+        HCI_LE_SET_EXTENDED_ADVERTISING_PARAMETERS_COMMAND,
+        HCI_LE_SET_EXTENDED_ADVERTISING_DATA_COMMAND,
+        HCI_LE_SET_EXTENDED_SCAN_RESPONSE_DATA_COMMAND,
+        HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND,
+        HCI_LE_READ_MAXIMUM_ADVERTISING_DATA_LENGTH_COMMAND,
+        HCI_LE_READ_NUMBER_OF_SUPPORTED_ADVERTISING_SETS_COMMAND,
+    ),
+    # Octet 37
+    (
+        HCI_LE_REMOVE_ADVERTISING_SET_COMMAND,
+        HCI_LE_CLEAR_ADVERTISING_SETS_COMMAND,
+        HCI_LE_SET_PERIODIC_ADVERTISING_PARAMETERS_COMMAND,
+        HCI_LE_SET_PERIODIC_ADVERTISING_DATA_COMMAND,
+        HCI_LE_SET_PERIODIC_ADVERTISING_ENABLE_COMMAND,
+        HCI_LE_SET_EXTENDED_SCAN_PARAMETERS_COMMAND,
+        HCI_LE_SET_EXTENDED_SCAN_ENABLE_COMMAND,
+        HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND
+    ),
+    # Octet 38
+    (
+        HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_COMMAND,
+        HCI_LE_PERIODIC_ADVERTISING_CREATE_SYNC_CANCEL_COMMAND,
+        HCI_LE_PERIODIC_ADVERTISING_TERMINATE_SYNC_COMMAND,
+        HCI_LE_ADD_DEVICE_TO_PERIODIC_ADVERTISER_LIST_COMMAND,
+        HCI_LE_REMOVE_DEVICE_FROM_PERIODIC_ADVERTISER_LIST_COMMAND,
+        HCI_LE_CLEAR_PERIODIC_ADVERTISER_LIST_COMMAND,
+        HCI_LE_READ_PERIODIC_ADVERTISER_LIST_SIZE_COMMAND,
+        HCI_LE_READ_TRANSMIT_POWER_COMMAND
+    ),
+    # Octet 39
+    (
+        HCI_LE_READ_RF_PATH_COMPENSATION_COMMAND,
+        HCI_LE_WRITE_RF_PATH_COMPENSATION_COMMAND,
+        HCI_LE_SET_PRIVACY_MODE_COMMAND,
+        HCI_LE_RECEIVER_TEST_V3_COMMAND,
+        HCI_LE_TRANSMITTER_TEST_V3_COMMAND,
+        HCI_LE_SET_CONNECTIONLESS_CTE_TRANSMIT_PARAMETERS_COMMAND,
+        HCI_LE_SET_CONNECTIONLESS_CTE_TRANSMIT_ENABLE_COMMAND,
+        HCI_LE_SET_CONNECTIONLESS_IQ_SAMPLING_ENABLE_COMMAND,
+    ),
+    # Octet 40
+    (
+        HCI_LE_SET_CONNECTION_CTE_RECEIVE_PARAMETERS_COMMAND,
+        HCI_LE_SET_CONNECTION_CTE_TRANSMIT_PARAMETERS_COMMAND,
+        HCI_LE_CONNECTION_CTE_REQUEST_ENABLE_COMMAND,
+        HCI_LE_CONNECTION_CTE_RESPONSE_ENABLE_COMMAND,
+        HCI_LE_READ_ANTENNA_INFORMATION_COMMAND,
+        HCI_LE_SET_PERIODIC_ADVERTISING_RECEIVE_ENABLE_COMMAND,
+        HCI_LE_PERIODIC_ADVERTISING_SYNC_TRANSFER_COMMAND,
+        HCI_LE_PERIODIC_ADVERTISING_SET_INFO_TRANSFER_COMMAND
+    ),
+    # Octet 41
+    (
+        HCI_LE_SET_PERIODIC_ADVERTISING_SYNC_TRANSFER_PARAMETERS_COMMAND,
+        HCI_LE_SET_DEFAULT_PERIODIC_ADVERTISING_SYNC_TRANSFER_PARAMETERS_COMMAND,
+        HCI_LE_GENERATE_DHKEY_V2_COMMAND,
+        HCI_READ_LOCAL_SIMPLE_PAIRING_OPTIONS_COMMAND,
+        HCI_LE_MODIFY_SLEEP_CLOCK_ACCURACY_COMMAND,
+        HCI_LE_READ_BUFFER_SIZE_V2_COMMAND,
+        HCI_LE_READ_ISO_TX_SYNC_COMMAND,
+        HCI_LE_SET_CIG_PARAMETERS_COMMAND
+    ),
+    # Octet 42
+    (
+        HCI_LE_SET_CIG_PARAMETERS_TEST_COMMAND,
+        HCI_LE_CREATE_CIS_COMMAND,
+        HCI_LE_REMOVE_CIG_COMMAND,
+        HCI_LE_ACCEPT_CIS_REQUEST_COMMAND,
+        HCI_LE_REJECT_CIS_REQUEST_COMMAND,
+        HCI_LE_CREATE_BIG_COMMAND,
+        HCI_LE_CREATE_BIG_TEST_COMMAND,
+        HCI_LE_TERMINATE_BIG_COMMAND,
+    ),
+    # Octet 43
+    (
+        HCI_LE_BIG_CREATE_SYNC_COMMAND,
+        HCI_LE_BIG_TERMINATE_SYNC_COMMAND,
+        HCI_LE_REQUEST_PEER_SCA_COMMAND,
+        HCI_LE_SETUP_ISO_DATA_PATH_COMMAND,
+        HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND,
+        HCI_LE_ISO_TRANSMIT_TEST_COMMAND,
+        HCI_LE_ISO_RECEIVE_TEST_COMMAND,
+        HCI_LE_ISO_READ_TEST_COUNTERS_COMMAND
+    ),
+    # Octet 44
+    (
+        HCI_LE_ISO_TEST_END_COMMAND,
+        HCI_LE_SET_HOST_FEATURE_COMMAND,
+        HCI_LE_READ_ISO_LINK_QUALITY_COMMAND,
+        HCI_LE_ENHANCED_READ_TRANSMIT_POWER_LEVEL_COMMAND,
+        HCI_LE_READ_REMOTE_TRANSMIT_POWER_LEVEL_COMMAND,
+        HCI_LE_SET_PATH_LOSS_REPORTING_PARAMETERS_COMMAND,
+        HCI_LE_SET_PATH_LOSS_REPORTING_ENABLE_COMMAND,
+        HCI_LE_SET_TRANSMIT_POWER_REPORTING_ENABLE_COMMAND
+    ),
+    # Octet 45
+    (
+        HCI_LE_TRANSMITTER_TEST_V4_COMMAND,
+        HCI_SET_ECOSYSTEM_BASE_INTERVAL_COMMAND,
+        HCI_READ_LOCAL_SUPPORTED_CODECS_V2_COMMAND,
+        HCI_READ_LOCAL_SUPPORTED_CODEC_CAPABILITIES_COMMAND,
+        HCI_READ_LOCAL_SUPPORTED_CONTROLLER_DELAY_COMMAND,
+        HCI_CONFIGURE_DATA_PATH_COMMAND,
+        HCI_LE_SET_DATA_RELATED_ADDRESS_CHANGES_COMMAND,
+        HCI_SET_MIN_ENCRYPTION_KEY_SIZE_COMMAND
+    ),
+    # Octet 46
+    (
+        HCI_LE_SET_DEFAULT_SUBRATE_COMMAND,
+        HCI_LE_SUBRATE_REQUEST_COMMAND,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+)
+
+# LE Supported Features
+HCI_LE_ENCRYPTION_LE_SUPPORTED_FEATURE                                = 0
+HCI_CONNECTION_PARAMETERS_REQUEST_PROCEDURE_LE_SUPPORTED_FEATURE      = 1
+HCI_EXTENDED_REJECT_INDICATION_LE_SUPPORTED_FEATURE                   = 2
+HCI_PERIPHERAL_INITIATED_FEATURE_EXCHANGE_LE_SUPPORTED_FEATURE        = 3
+HCI_LE_PING_LE_SUPPORTED_FEATURE                                      = 4
+HCI_LE_DATA_PACKET_LENGTH_EXTENSION_LE_SUPPORTED_FEATURE              = 5
+HCI_LL_PRIVACY_LE_SUPPORTED_FEATURE                                   = 6
+HCI_EXTENDED_SCANNER_FILTER_POLICIES_LE_SUPPORTED_FEATURE             = 7
+HCI_LE_2M_PHY_LE_SUPPORTED_FEATURE                                    = 8
+HCI_STABLE_MODULATION_INDEX_TRANSMITTER_LE_SUPPORTED_FEATURE          = 9
+HCI_STABLE_MODULATION_INDEX_RECEIVER_LE_SUPPORTED_FEATURE             = 10
+HCI_LE_CODED_PHY_LE_SUPPORTED_FEATURE                                 = 11
+HCI_LE_EXTENDED_ADVERTISING_LE_SUPPORTED_FEATURE                      = 12
+HCI_LE_PERIODIC_ADVERTISING_LE_SUPPORTED_FEATURE                      = 13
+HCI_CHANNEL_SELECTION_ALGORITHM_2_LE_SUPPORTED_FEATURE                = 14
+HCI_LE_POWER_CLASS_1_LE_SUPPORTED_FEATURE                             = 15
+HCI_MINIMUM_NUMBER_OF_USED_CHANNELS_PROCEDURE_LE_SUPPORTED_FEATURE    = 16
+HCI_CONNECTION_CTE_REQUEST_LE_SUPPORTED_FEATURE                       = 17
+HCI_CONNECTION_CTE_RESPONSE_LE_SUPPORTED_FEATURE                      = 18
+HCI_CONNECTIONLESS_CTE_TRANSMITTER_LE_SUPPORTED_FEATURE               = 19
+HCI_CONNECTIONLESS_CTR_RECEIVER_LE_SUPPORTED_FEATURE                  = 20
+HCI_ANTENNA_SWITCHING_DURING_CTE_TRANSMISSION_LE_SUPPORTED_FEATURE    = 21
+HCI_ANTENNA_SWITCHING_DURING_CTE_RECEPTION_LE_SUPPORTED_FEATURE       = 22
+HCI_RECEIVING_CONSTANT_TONE_EXTENSIONS_LE_SUPPORTED_FEATURE           = 23
+HCI_PERIODIC_ADVERTISING_SYNC_TRANSFER_SENDER_LE_SUPPORTED_FEATURE    = 24
+HCI_PERIODIC_ADVERTISING_SYNC_TRANSFER_RECIPIENT_LE_SUPPORTED_FEATURE = 25
+HCI_SLEEP_CLOCK_ACCURACY_UPDATES_LE_SUPPORTED_FEATURE                 = 26
+HCI_REMOTE_PUBLIC_KEY_VALIDATION_LE_SUPPORTED_FEATURE                 = 27
+HCI_CONNECTED_ISOCHRONOUS_STREAM_CENTRAL_LE_SUPPORTED_FEATURE         = 28
+HCI_CONNECTED_ISOCHRONOUS_STREAM_PERIPHERAL_LE_SUPPORTED_FEATURE      = 29
+HCI_ISOCHRONOUS_BROADCASTER_LE_SUPPORTED_FEATURE                      = 30
+HCI_SYNCHRONIZED_RECEIVER_LE_SUPPORTED_FEATURE                        = 31
+HCI_CONNECTED_ISOCHRONOUS_STREAM_LE_SUPPORTED_FEATURE                 = 32
+HCI_LE_POWER_CONTROL_REQUEST_LE_SUPPORTED_FEATURE                     = 33
+HCI_LE_POWER_CONTROL_REQUEST_DUP_LE_SUPPORTED_FEATURE                 = 34
+HCI_LE_PATH_LOSS_MONITORING_LE_SUPPORTED_FEATURE                      = 35
+HCI_PERIODIC_ADVERTISING_ADI_SUPPORT_LE_SUPPORTED_FEATURE             = 36
+HCI_CONNECTION_SUBRATING_LE_SUPPORTED_FEATURE                         = 37
+HCI_CONNECTION_SUBRATING_HOST_SUPPORT_LE_SUPPORTED_FEATURE            = 38
+HCI_CHANNEL_CLASSIFICATION_LE_SUPPORTED_FEATURE                       = 39
+
+HCI_LE_SUPPORTED_FEATURES_NAMES = {
+    flag: feature_name for (feature_name, flag) in globals().items()
+    if feature_name.startswith('HCI_') and feature_name.endswith('_LE_SUPPORTED_FEATURE')
+}
+
 # -----------------------------------------------------------------------------
 STATUS_SPEC = {'size': 1, 'mapper': lambda x: HCI_Constant.status_name(x)}
 
@@ -784,6 +1398,16 @@ class HCI_Error(ProtocolError):
 
 
 # -----------------------------------------------------------------------------
+class HCI_StatusError(ProtocolError):
+    def __init__(self, response):
+        super().__init__(
+            response.status,
+            error_namespace=HCI_Command.command_name(response.command_opcode),
+            error_name=HCI_Constant.status_name(response.status)
+        )
+
+
+# -----------------------------------------------------------------------------
 # Generic HCI object
 # -----------------------------------------------------------------------------
 class HCI_Object:
@@ -805,7 +1429,7 @@ class HCI_Object:
     def dict_from_bytes(data, offset, fields):
         result = collections.OrderedDict()
         for (field_name, field_type) in fields:
-            # The field_type may be a dictionnary with a mapper, parser, and/or size
+            # The field_type may be a dictionary with a mapper, parser, and/or size
             if type(field_type) is dict:
                 if 'size' in field_type:
                     field_type = field_type['size']
@@ -867,7 +1491,7 @@ class HCI_Object:
     def dict_to_bytes(object, fields):
         result = bytearray()
         for (field_name, field_type) in fields:
-            # The field_type may be a dictionnary with a mapper, parser, serializer, and/or size
+            # The field_type may be a dictionary with a mapper, parser, serializer, and/or size
             serializer = None
             if type(field_type) is dict:
                 if 'serializer' in field_type:
@@ -926,9 +1550,9 @@ class HCI_Object:
 
         return bytes(result)
 
-    @staticmethod
-    def from_bytes(data, offset, fields):
-        return HCI_Object(fields, **HCI_Object.dict_from_bytes(data, offset, fields))
+    @classmethod
+    def from_bytes(cls, data, offset, fields):
+        return cls(fields, **cls.dict_from_bytes(data, offset, fields))
 
     def to_bytes(self):
         return HCI_Object.dict_to_bytes(self.__dict__, self.fields)
@@ -1033,6 +1657,14 @@ class Address:
         return name_or_number(Address.ADDRESS_TYPE_NAMES, address_type)
 
     @staticmethod
+    def from_string_for_transport(string, transport):
+        if transport == BT_BR_EDR_TRANSPORT:
+            address_type = Address.PUBLIC_DEVICE_ADDRESS
+        else:
+            address_type = Address.RANDOM_DEVICE_ADDRESS
+        return Address(string, address_type)
+
+    @staticmethod
     def parse_address(data, offset):
         # Fix the type to a default value. This is used for parsing type-less Classic addresses
         return Address.parse_address_with_type(data, offset, Address.PUBLIC_DEVICE_ADDRESS)
@@ -1072,6 +1704,9 @@ class Address:
 
         self.address_type = address_type
 
+    def clone(self):
+        return Address(self.address_bytes, self.address_type)
+
     @property
     def is_public(self):
         return self.address_type == self.PUBLIC_DEVICE_ADDRESS or self.address_type == self.PUBLIC_IDENTITY_ADDRESS
@@ -1108,8 +1743,35 @@ class Address:
         '''
         String representation of the address, MSB first
         '''
-        return ':'.join([f'{x:02X}' for x in reversed(self.address_bytes)])
+        str = ':'.join([f'{x:02X}' for x in reversed(self.address_bytes)])
+        if not self.is_public:
+            return str
+        return str + '/P'
 
+
+# Predefined address values
+Address.NIL = Address(b"\xff\xff\xff\xff\xff\xff", Address.PUBLIC_DEVICE_ADDRESS)
+Address.ANY = Address(b"\x00\x00\x00\x00\x00\x00", Address.PUBLIC_DEVICE_ADDRESS)
+
+# -----------------------------------------------------------------------------
+class OwnAddressType:
+    PUBLIC = 0
+    RANDOM = 1
+    RESOLVABLE_OR_PUBLIC = 2
+    RESOLVABLE_OR_RANDOM = 3
+
+    TYPE_NAMES = {
+        PUBLIC:               'PUBLIC',
+        RANDOM:               'RANDOM',
+        RESOLVABLE_OR_PUBLIC: 'RESOLVABLE_OR_PUBLIC',
+        RESOLVABLE_OR_RANDOM: 'RESOLVABLE_OR_RANDOM'
+    }
+
+    @staticmethod
+    def type_name(type):
+        return name_or_number(OwnAddressType.TYPE_NAMES, type)
+
+    TYPE_SPEC = {'size': 1, 'mapper': lambda x: OwnAddressType.type_name(x)}
 
 # -----------------------------------------------------------------------------
 class HCI_Packet:
@@ -1162,14 +1824,15 @@ class HCI_Command(HCI_Packet):
             cls.name = cls.__name__.upper()
             cls.op_code = key_with_value(HCI_COMMAND_NAMES, cls.name)
             if cls.op_code is None:
-                raise KeyError('command not found in HCI_COMMAND_NAMES')
+                raise KeyError(f'command {cls.name} not found in HCI_COMMAND_NAMES')
             cls.fields = fields
             cls.return_parameters_fields = return_parameters_fields
 
             # Patch the __init__ method to fix the op_code
-            def init(self, parameters=None, **kwargs):
-                return HCI_Command.__init__(self, cls.op_code, parameters, **kwargs)
-            cls.__init__ = init
+            if fields is not None:
+                def init(self, parameters=None, **kwargs):
+                    return HCI_Command.__init__(self, cls.op_code, parameters, **kwargs)
+                cls.__init__ = init
 
             # Register a factory for this class
             HCI_Command.command_classes[cls.op_code] = cls
@@ -1192,11 +1855,13 @@ class HCI_Command(HCI_Packet):
             return HCI_Command(op_code, parameters)
 
         # Create a new instance
-        self = cls.__new__(cls)
-        HCI_Command.__init__(self, op_code, parameters)
-        if fields := getattr(self, 'fields', None):
+        if (fields := getattr(cls, 'fields', None)) is not None:
+            self = cls.__new__(cls)
+            HCI_Command.__init__(self, op_code, parameters)
             HCI_Object.init_from_bytes(self, parameters, 0, fields)
-        return self
+            return self
+        else:
+            return cls.from_parameters(parameters)
 
     @staticmethod
     def command_name(op_code):
@@ -1282,6 +1947,22 @@ class HCI_Disconnect_Command(HCI_Command):
 
 
 # -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address)
+    ],
+    return_parameters_fields=[
+        ('status',  STATUS_SPEC),
+        ('bd_addr', Address.parse_address)
+    ]
+)
+class HCI_Create_Connection_Cancel_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.7 Create Connection Cancel Command
+    '''
+
+
+# -----------------------------------------------------------------------------
 @HCI_Command.command([
     ('bd_addr', Address.parse_address),
     ('role',    1)
@@ -1289,6 +1970,17 @@ class HCI_Disconnect_Command(HCI_Command):
 class HCI_Accept_Connection_Request_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.1.8 Accept Connection Request Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('bd_addr', Address.parse_address),
+    ('reason',  {'size': 1, 'mapper': HCI_Constant.error_name})
+])
+class HCI_Reject_Connection_Request_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.9 Reject Connection Request Command
     '''
 
 
@@ -1697,7 +2389,7 @@ class HCI_Read_Local_Name_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command([
-    ('conn_accept_timeout', 2)
+    ('connection_accept_timeout', 2)
 ])
 class HCI_Write_Connection_Accept_Timeout_Command(HCI_Command):
     '''
@@ -1802,9 +2494,10 @@ class HCI_Write_Voice_Setting_Command(HCI_Command):
 
 
 # -----------------------------------------------------------------------------
+@HCI_Command.command()
 class HCI_Read_Synchronous_Flow_Control_Enable_Command(HCI_Command):
     '''
-    See Bluetooth spec @ 7.3.36 Write Synchronous Flow Control Enable Command
+    See Bluetooth spec @ 7.3.36 Read Synchronous Flow Control Enable Command
     '''
 
 
@@ -2007,12 +2700,12 @@ class HCI_Write_Authenticated_Payload_Timeout_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command(return_parameters_fields=[
-    ('status',             STATUS_SPEC),
-    ('hci_version',        1),
-    ('hci_revsion',        2),
-    ('lmp_pal_version',    1),
-    ('manufacturer_name',  2),
-    ('lmp_pal_subversion', 2)
+    ('status',              STATUS_SPEC),
+    ('hci_version',         1),
+    ('hci_subversion',      2),
+    ('lmp_version',         1),
+    ('company_identifier',  2),
+    ('lmp_subversion',      2)
 ])
 class HCI_Read_Local_Version_Information_Command(HCI_Command):
     '''
@@ -2093,6 +2786,23 @@ class HCI_Read_Local_Supported_Codecs_Command(HCI_Command):
 # -----------------------------------------------------------------------------
 @HCI_Command.command(
     fields=[
+        ('handle', 2)
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('handle', 2),
+        ('rssi',   -1)
+    ]
+)
+class HCI_Read_RSSI_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.5.4 Read RSSI Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
         ('connection_handle', 2)
     ],
     return_parameters_fields=[
@@ -2130,6 +2840,17 @@ class HCI_LE_Read_Buffer_Size_Command(HCI_Command):
 
 
 # -----------------------------------------------------------------------------
+@HCI_Command.command(return_parameters_fields=[
+    ('status',      STATUS_SPEC),
+    ('le_features', 8)
+])
+class HCI_LE_Read_Local_Supported_Features_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.3 LE Read Local Supported Features Command
+    '''
+
+
+# -----------------------------------------------------------------------------
 @HCI_Command.command([
     ('random_address', lambda data, offset: Address.parse_address_with_type(data, offset, Address.RANDOM_DEVICE_ADDRESS))
 ])
@@ -2144,7 +2865,7 @@ class HCI_LE_Set_Random_Address_Command(HCI_Command):
     ('advertising_interval_min',  2),
     ('advertising_interval_max',  2),
     ('advertising_type',          {'size': 1, 'mapper': lambda x: HCI_LE_Set_Advertising_Parameters_Command.advertising_type_name(x)}),
-    ('own_address_type',          Address.ADDRESS_TYPE_SPEC),
+    ('own_address_type',          OwnAddressType.TYPE_SPEC),
     ('peer_address_type',         Address.ADDRESS_TYPE_SPEC),
     ('peer_address',              Address.parse_address_preceded_by_type),
     ('advertising_channel_map',   1),
@@ -2155,18 +2876,18 @@ class HCI_LE_Set_Advertising_Parameters_Command(HCI_Command):
     See Bluetooth spec @ 7.8.5 LE Set Advertising Parameters Command
     '''
 
-    ADV_IND         = 0x00
-    ADV_DIRECT_IND  = 0x01
-    ADV_SCAN_IND    = 0x02
-    ADV_NONCONN_IND = 0x03
-    ADV_DIRECT_IND  = 0x04
+    ADV_IND                 = 0x00
+    ADV_DIRECT_IND          = 0x01
+    ADV_SCAN_IND            = 0x02
+    ADV_NONCONN_IND         = 0x03
+    ADV_DIRECT_IND_LOW_DUTY = 0x04
 
     ADVERTISING_TYPE_NAMES = {
-        ADV_IND:         'ADV_IND',
-        ADV_DIRECT_IND:  'ADV_DIRECT_IND',
-        ADV_SCAN_IND:    'ADV_SCAN_IND',
-        ADV_NONCONN_IND: 'ADV_NONCONN_IND',
-        ADV_DIRECT_IND:  'ADV_DIRECT_IND'
+        ADV_IND:                 'ADV_IND',
+        ADV_DIRECT_IND:          'ADV_DIRECT_IND',
+        ADV_SCAN_IND:            'ADV_SCAN_IND',
+        ADV_NONCONN_IND:         'ADV_NONCONN_IND',
+        ADV_DIRECT_IND_LOW_DUTY: 'ADV_DIRECT_IND_LOW_DUTY'
     }
 
     @classmethod
@@ -2176,9 +2897,9 @@ class HCI_LE_Set_Advertising_Parameters_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command()
-class HCI_LE_Read_Advertising_Channel_Tx_Power_Command(HCI_Command):
+class HCI_LE_Read_Advertising_Physical_Channel_Tx_Power_Command(HCI_Command):
     '''
-    See Bluetooth spec @ 7.8.6 LE Read Advertising Channel Tx Power Command
+    See Bluetooth spec @ 7.8.6 LE Read Advertising Physical Channel Tx Power Command
     '''
 
 
@@ -2223,7 +2944,7 @@ class HCI_LE_Set_Advertising_Enable_Command(HCI_Command):
     ('le_scan_type',           1),
     ('le_scan_interval',       2),
     ('le_scan_window',         2),
-    ('own_address_type',       Address.ADDRESS_TYPE_SPEC),
+    ('own_address_type',       OwnAddressType.TYPE_SPEC),
     ('scanning_filter_policy', 1)
 ])
 class HCI_LE_Set_Scan_Parameters_Command(HCI_Command):
@@ -2257,13 +2978,13 @@ class HCI_LE_Set_Scan_Enable_Command(HCI_Command):
     ('initiator_filter_policy', 1),
     ('peer_address_type',       Address.ADDRESS_TYPE_SPEC),
     ('peer_address',            Address.parse_address_preceded_by_type),
-    ('own_address_type',        Address.ADDRESS_TYPE_SPEC),
-    ('conn_interval_min',       2),
-    ('conn_interval_max',       2),
-    ('conn_latency',            2),
+    ('own_address_type',        OwnAddressType.TYPE_SPEC),
+    ('connection_interval_min', 2),
+    ('connection_interval_max', 2),
+    ('max_latency',             2),
     ('supervision_timeout',     2),
-    ('minimum_ce_length',       2),
-    ('maximum_ce_length',       2)
+    ('min_ce_length',           2),
+    ('max_ce_length',           2)
 ])
 class HCI_LE_Create_Connection_Command(HCI_Command):
     '''
@@ -2281,28 +3002,17 @@ class HCI_LE_Create_Connection_Cancel_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command()
-class HCI_LE_Read_White_List_Size_Command(HCI_Command):
+class HCI_LE_Read_Filter_Accept_List_Size_Command(HCI_Command):
     '''
-    See Bluetooth spec @ 7.8.14 LE Read White List Size Command
+    See Bluetooth spec @ 7.8.14 LE Read Filter Accept List Size Command
     '''
 
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command()
-class HCI_LE_Clear_White_List_Command(HCI_Command):
+class HCI_LE_Clear_Filter_Accept_List_Command(HCI_Command):
     '''
-    See Bluetooth spec @ 7.8.15 LE Clear White List Command
-    '''
-
-
-# -----------------------------------------------------------------------------
-@HCI_Command.command([
-    ('address_type', Address.ADDRESS_TYPE_SPEC),
-    ('address',      Address.parse_address_preceded_by_type)
-])
-class HCI_LE_Add_Device_To_White_List_Command(HCI_Command):
-    '''
-    See Bluetooth spec @ 7.8.16 LE Add Device To White List Command
+    See Bluetooth spec @ 7.8.15 LE Clear Filter Accept List Command
     '''
 
 
@@ -2311,21 +3021,32 @@ class HCI_LE_Add_Device_To_White_List_Command(HCI_Command):
     ('address_type', Address.ADDRESS_TYPE_SPEC),
     ('address',      Address.parse_address_preceded_by_type)
 ])
-class HCI_LE_Remove_Device_From_White_List_Command(HCI_Command):
+class HCI_LE_Add_Device_To_Filter_Accept_List_Command(HCI_Command):
     '''
-    See Bluetooth spec @ 7.8.17 LE Remove Device From White List Command
+    See Bluetooth spec @ 7.8.16 LE Add Device To Filter Accept List Command
     '''
 
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command([
-    ('connection_handle',   2),
-    ('conn_interval_min',   2),
-    ('conn_interval_max',   2),
-    ('conn_latency',        2),
-    ('supervision_timeout', 2),
-    ('minimum_ce_length',   2),
-    ('maximum_ce_length',   2)
+    ('address_type', Address.ADDRESS_TYPE_SPEC),
+    ('address',      Address.parse_address_preceded_by_type)
+])
+class HCI_LE_Remove_Device_From_Filter_Accept_List_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.17 LE Remove Device From Filter Accept List Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('connection_handle',       2),
+    ('connection_interval_min', 2),
+    ('connection_interval_max', 2),
+    ('max_latency',             2),
+    ('supervision_timeout',     2),
+    ('min_ce_length',           2),
+    ('max_ce_length',           2)
 ])
 class HCI_LE_Connection_Update_Command(HCI_Command):
     '''
@@ -2350,10 +3071,10 @@ class HCI_LE_Read_Remote_Features_Command(HCI_Command):
     ('encrypted_diversifier', 2),
     ('long_term_key',         16)
 ])
-class HCI_LE_Start_Encryption_Command(HCI_Command):
+class HCI_LE_Enable_Encryption_Command(HCI_Command):
     '''
-    See Bluetooth spec @ 7.8.24 LE Start Encryption Command
-    (renamed to "LE Enable Encryption Command" in version 5.2 of the specification)
+    See Bluetooth spec @ 7.8.24 LE Enable Encryption Command
+    (renamed from "LE Start Encryption Command" in version prior to 5.2 of the specification)
     '''
 
 
@@ -2391,10 +3112,10 @@ class HCI_LE_Read_Supported_States_Command(HCI_Command):
     ('connection_handle', 2),
     ('interval_min',      2),
     ('interval_max',      2),
-    ('latency',           2),
+    ('max_latency',       2),
     ('timeout',           2),
-    ('minimum_ce_length', 2),
-    ('maximum_ce_length', 2)
+    ('min_ce_length',     2),
+    ('max_ce_length',     2)
 ])
 class HCI_LE_Remote_Connection_Parameter_Request_Reply_Command(HCI_Command):
     '''
@@ -2410,6 +3131,36 @@ class HCI_LE_Remote_Connection_Parameter_Request_Reply_Command(HCI_Command):
 class HCI_LE_Remote_Connection_Parameter_Request_Negative_Reply_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.8.32 LE Remote Connection Parameter Request Negative Reply Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('connection_handle', 2),
+        ('tx_octets',         2),
+        ('tx_time',           2),
+    ],
+    return_parameters_fields=[
+        ('status',            STATUS_SPEC),
+        ('connection_handle', 2)
+    ]
+)
+class HCI_LE_Set_Data_Length_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.33 LE Set Data Length Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(return_parameters_fields=[
+    ('status',                  STATUS_SPEC),
+    ('suggested_max_tx_octets', 2),
+    ('suggested_max_tx_time',   2),
+])
+class HCI_LE_Read_Suggested_Default_Data_Length_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.34 LE Read Suggested Default Data Length Command
     '''
 
 
@@ -2447,18 +3198,6 @@ class HCI_LE_Clear_Resolving_List_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command([
-    ('all_phys', 1),
-    ('tx_phys',  1),
-    ('rx_phys',  1)
-])
-class HCI_LE_Set_Default_PHY_Command(HCI_Command):
-    '''
-    See Bluetooth spec @ 7.8.48 LE Set Default PHY Command
-    '''
-
-
-# -----------------------------------------------------------------------------
-@HCI_Command.command([
     ('address_resolution_enable', 1)
 ])
 class HCI_LE_Set_Address_Resolution_Enable_Command(HCI_Command):
@@ -2474,6 +3213,549 @@ class HCI_LE_Set_Address_Resolution_Enable_Command(HCI_Command):
 class HCI_LE_Set_Resolvable_Private_Address_Timeout_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.8.45 LE Set Resolvable Private Address Timeout Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(return_parameters_fields=[
+    ('status',                  STATUS_SPEC),
+    ('supported_max_tx_octets', 2),
+    ('supported_max_tx_time',   2),
+    ('supported_max_rx_octets', 2),
+    ('supported_max_rx_time',   2)
+])
+class HCI_LE_Read_Maximum_Data_Length_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.46 LE Read Maximum Data Length Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('connection_handle', 2)
+    ],
+    return_parameters_fields=[
+        ('status',            STATUS_SPEC),
+        ('connection_handle', 2),
+        ('tx_phy',            {'size': 1, 'mapper': HCI_Constant.le_phy_name}),
+        ('rx_phy',            {'size': 1, 'mapper': HCI_Constant.le_phy_name})
+    ])
+class HCI_LE_Read_PHY_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.47 LE Read PHY Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('all_phys', {'size': 1, 'mapper': lambda x: bit_flags_to_strings(x, HCI_LE_Set_Default_PHY_Command.ANY_PHY_BIT_NAMES)}),
+    ('tx_phys',  {'size': 1, 'mapper': lambda x: bit_flags_to_strings(x, HCI_LE_PHY_BIT_NAMES)}),
+    ('rx_phys',  {'size': 1, 'mapper': lambda x: bit_flags_to_strings(x, HCI_LE_PHY_BIT_NAMES)})
+])
+class HCI_LE_Set_Default_PHY_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.48 LE Set Default PHY Command
+    '''
+    ANY_TX_PHY_BIT = 0
+    ANY_RX_PHY_BIT = 1
+
+    ANY_PHY_BIT_NAMES = ['Any TX', 'Any RX']
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('connection_handle', 2),
+    ('all_phys',          {'size': 1, 'mapper': lambda x: bit_flags_to_strings(x, HCI_LE_Set_PHY_Command.ANY_PHY_BIT_NAMES)}),
+    ('tx_phys',           {'size': 1, 'mapper': lambda x: bit_flags_to_strings(x, HCI_LE_PHY_BIT_NAMES)}),
+    ('rx_phys',           {'size': 1, 'mapper': lambda x: bit_flags_to_strings(x, HCI_LE_PHY_BIT_NAMES)}),
+    ('phy_options',       2)
+])
+class HCI_LE_Set_PHY_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.49 LE Set PHY Command
+    '''
+    ANY_TX_PHY_BIT = 0
+    ANY_RX_PHY_BIT = 1
+
+    ANY_PHY_BIT_NAMES = ['Any TX', 'Any RX']
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('advertising_handle', 1),
+    ('random_address', lambda data, offset: Address.parse_address_with_type(data, offset, Address.RANDOM_DEVICE_ADDRESS))
+])
+class HCI_LE_Set_Advertising_Set_Random_Address_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.52 LE Set Advertising Set Random Address Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('advertising_handle',               1),
+        ('advertising_event_properties',     {'size': 2, 'mapper': lambda x: HCI_LE_Set_Extended_Advertising_Parameters_Command.advertising_properties_string(x)}),
+        ('primary_advertising_interval_min', 3),
+        ('primary_advertising_interval_max', 3),
+        ('primary_advertising_channel_map',  {'size': 1, 'mapper': lambda x: HCI_LE_Set_Extended_Advertising_Parameters_Command.channel_map_string(x)}),
+        ('own_address_type',                 OwnAddressType.TYPE_SPEC),
+        ('peer_address_type',                Address.ADDRESS_TYPE_SPEC),
+        ('peer_address',                     Address.parse_address_preceded_by_type),
+        ('advertising_filter_policy',        1),
+        ('advertising_tx_power',             1),
+        ('primary_advertising_phy',          {'size': 1, 'mapper': HCI_Constant.le_phy_name}),
+        ('secondary_advertising_max_skip',   1),
+        ('secondary_advertising_phy',        {'size': 1, 'mapper': HCI_Constant.le_phy_name}),
+        ('advertising_sid',                  1),
+        ('scan_request_notification_enable', 1)
+    ],
+    return_parameters_fields=[
+        ('status',                      STATUS_SPEC),
+        ('selected_tx__power', 1)
+    ]
+)
+class HCI_LE_Set_Extended_Advertising_Parameters_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.53 LE Set Extended Advertising Parameters Command
+    '''
+
+    CONNECTABLE_ADVERTISING                          = 0
+    SCANNABLE_ADVERTISING                            = 1
+    DIRECTED_ADVERTISING                             = 2
+    HIGH_DUTY_CYCLE_DIRECTED_CONNECTABLE_ADVERTISING = 3
+    USE_LEGACY_ADVERTISING_PDUS                      = 4
+    ANONYMOUS_ADVERTISING                            = 5
+    INCLUDE_TX_POWER                                 = 6
+
+    ADVERTISING_PROPERTIES_NAMES = (
+        'CONNECTABLE_ADVERTISING',
+        'SCANNABLE_ADVERTISING',
+        'DIRECTED_ADVERTISING',
+        'HIGH_DUTY_CYCLE_DIRECTED_CONNECTABLE_ADVERTISING',
+        'USE_LEGACY_ADVERTISING_PDUS',
+        'ANONYMOUS_ADVERTISING',
+        'INCLUDE_TX_POWER'
+    )
+
+    CHANNEL_37 = 0
+    CHANNEL_38 = 1
+    CHANNEL_39 = 2
+
+    CHANNEL_NAMES = ('37', '38', '39')
+
+    @classmethod
+    def advertising_properties_string(cls, properties):
+        return f'[{",".join(bit_flags_to_strings(properties, cls.ADVERTISING_PROPERTIES_NAMES))}]'
+
+    @classmethod
+    def channel_map_string(cls, channel_map):
+        return f'[{",".join(bit_flags_to_strings(channel_map, cls.CHANNEL_NAMES))}]'
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('advertising_handle',  1),
+    ('operation',           {'size': 1, 'mapper': lambda x: HCI_LE_Set_Extended_Advertising_Data_Command.operation_name(x)}),
+    ('fragment_preference', 1),
+    ('advertising_data', {
+        'parser':     HCI_Object.parse_length_prefixed_bytes,
+        'serializer': functools.partial(HCI_Object.serialize_length_prefixed_bytes)
+    })
+])
+class HCI_LE_Set_Extended_Advertising_Data_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.54 LE Set Extended Advertising Data Command
+    '''
+
+    INTERMEDIATE_FRAGMENT = 0x00
+    FIRST_FRAGMENT        = 0x01
+    LAST_FRAGMENT         = 0x02
+    COMPLETE_DATA         = 0x03
+    UNCHANGED_DATA        = 0x04
+
+    OPERATION_NAMES = {
+        INTERMEDIATE_FRAGMENT: 'INTERMEDIATE_FRAGMENT',
+        FIRST_FRAGMENT:        'FIRST_FRAGMENT',
+        LAST_FRAGMENT:         'LAST_FRAGMENT',
+        COMPLETE_DATA:         'COMPLETE_DATA',
+        UNCHANGED_DATA:        'UNCHANGED_DATA'
+    }
+
+    @classmethod
+    def operation_name(cls, operation):
+        return name_or_number(cls.OPERATION_NAMES, operation)
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('advertising_handle',  1),
+    ('operation',           {'size': 1, 'mapper': lambda x: HCI_LE_Set_Extended_Advertising_Data_Command.operation_name(x)}),
+    ('fragment_preference', 1),
+    ('scan_response_data', {
+        'parser':     HCI_Object.parse_length_prefixed_bytes,
+        'serializer': functools.partial(HCI_Object.serialize_length_prefixed_bytes)
+    })
+])
+class HCI_LE_Set_Extended_Scan_Response_Data_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.55 LE Set Extended Scan Response Data Command
+    '''
+
+    INTERMEDIATE_FRAGMENT = 0x00
+    FIRST_FRAGMENT        = 0x01
+    LAST_FRAGMENT         = 0x02
+    COMPLETE_DATA         = 0x03
+
+    OPERATION_NAMES = {
+        INTERMEDIATE_FRAGMENT: 'INTERMEDIATE_FRAGMENT',
+        FIRST_FRAGMENT:        'FIRST_FRAGMENT',
+        LAST_FRAGMENT:         'LAST_FRAGMENT',
+        COMPLETE_DATA:         'COMPLETE_DATA'
+    }
+
+    @classmethod
+    def operation_name(cls, operation):
+        return name_or_number(cls.OPERATION_NAMES, operation)
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(fields=None)
+class HCI_LE_Set_Extended_Advertising_Enable_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.56 LE Set Extended Advertising Enable Command
+    '''
+
+    @classmethod
+    def from_parameters(cls, parameters):
+        enable   = parameters[0]
+        num_sets = parameters[1]
+        advertising_handles             = []
+        durations                       = []
+        max_extended_advertising_events = []
+        offset = 2
+        for _ in range(num_sets):
+            advertising_handles.append(parameters[offset])
+            durations.append(struct.unpack_from('<H', parameters, offset + 1)[0])
+            max_extended_advertising_events.append(parameters[offset + 3])
+            offset += 4
+
+        return cls(enable, advertising_handles, durations, max_extended_advertising_events)
+
+    def __init__(self, enable, advertising_handles, durations, max_extended_advertising_events):
+        super().__init__(HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND)
+        self.enable                          = enable
+        self.advertising_handles             = advertising_handles
+        self.durations                       = durations
+        self.max_extended_advertising_events = max_extended_advertising_events
+
+        self.parameters = bytes([enable, len(advertising_handles)]) + b''.join([
+            struct.pack(
+                '<BHB',
+                advertising_handles[i],
+                durations[i],
+                max_extended_advertising_events[i]
+            )
+            for i in range(len(advertising_handles))
+        ])
+
+    def __str__(self):
+        fields = [('enable:', self.enable)]
+        for i in range(len(self.advertising_handles)):
+            fields.append((f'advertising_handle[{i}]:             ', self.advertising_handles[i]))
+            fields.append((f'duration[{i}]:                       ', self.durations[i]))
+            fields.append((f'max_extended_advertising_events[{i}]:', self.max_extended_advertising_events[i]))
+
+        return color(self.name, 'green') + ':\n' + '\n'.join(
+            [color(field[0], 'cyan') + ' ' + str(field[1]) for field in fields]
+        )
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(return_parameters_fields=[
+    ('status',                      STATUS_SPEC),
+    ('max_advertising_data_length', 2)
+])
+class HCI_LE_Read_Maximum_Advertising_Data_Length_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.57 LE Read Maximum Advertising Data Length Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(return_parameters_fields=[
+    ('status',                         STATUS_SPEC),
+    ('num_supported_advertising_sets', 1)
+])
+class HCI_LE_Read_Number_Of_Supported_Advertising_Sets_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.58 LE Read Number of Supported Advertising Sets Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('advertising_handle', 1)
+])
+class HCI_LE_Remove_Advertising_Set_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.59 LE Remove Advertising Set Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command()
+class HCI_LE_Clear_Advertising_Sets_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.60 LE Clear Advertising Sets Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('enable',             1),
+    ('advertising_handle', 1)
+])
+class HCI_LE_Set_Periodic_Advertising_Enable_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.63 LE Set Periodic Advertising Enable Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(fields=None)
+class HCI_LE_Set_Extended_Scan_Parameters_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.64 LE Set Extended Scan Parameters Command
+    '''
+    PASSIVE_SCANNING = 0
+    ACTIVE_SCANNING  = 1
+
+    BASIC_UNFILTERED_POLICY    = 0x00
+    BASIC_FILTERED_POLICY      = 0x01
+    EXTENDED_UNFILTERED_POLICY = 0x02
+    EXTENDED_FILTERED_POLICY   = 0x03
+
+    @classmethod
+    def from_parameters(cls, parameters):
+        own_address_type       = parameters[0]
+        scanning_filter_policy = parameters[1]
+        scanning_phys          = parameters[2]
+
+        phy_bits_set = bin(scanning_phys).count('1')
+        scan_types     = []
+        scan_intervals = []
+        scan_windows   = []
+        for i in range(phy_bits_set):
+            scan_types.append(parameters[3 + (5 * i)])
+            scan_intervals.append(struct.unpack_from('<H', parameters, 3 + (5 * i) + 1)[0])
+            scan_windows.append(struct.unpack_from('<H', parameters, 3 + (5 * i) + 3)[0])
+
+        return cls(
+            own_address_type       = own_address_type,
+            scanning_filter_policy = scanning_filter_policy,
+            scanning_phys          = scanning_phys,
+            scan_types             = scan_types,
+            scan_intervals         = scan_intervals,
+            scan_windows           = scan_windows
+        )
+
+    def __init__(
+        self,
+        own_address_type,
+        scanning_filter_policy,
+        scanning_phys,
+        scan_types,
+        scan_intervals,
+        scan_windows
+    ):
+        super().__init__(HCI_LE_SET_EXTENDED_SCAN_PARAMETERS_COMMAND)
+        self.own_address_type       = own_address_type
+        self.scanning_filter_policy = scanning_filter_policy
+        self.scanning_phys          = scanning_phys
+        self.scan_types             = scan_types
+        self.scan_intervals         = scan_intervals
+        self.scan_windows           = scan_windows
+
+        self.parameters = bytes([own_address_type, scanning_filter_policy, scanning_phys])
+        phy_bits_set = bin(scanning_phys).count('1')
+        for i in range(phy_bits_set):
+            self.parameters += struct.pack('<BHH', scan_types[i], scan_intervals[i], scan_windows[i])
+
+    def __str__(self):
+        scanning_phys_strs = bit_flags_to_strings(self.scanning_phys, HCI_LE_PHY_BIT_NAMES)
+        fields = [
+            ('own_address_type:      ', Address.address_type_name(self.own_address_type)),
+            ('scanning_filter_policy:', self.scanning_filter_policy),
+            ('scanning_phys:         ', ','.join(scanning_phys_strs)),
+        ]
+        for (i, scanning_phy_str) in enumerate(scanning_phys_strs):
+            fields.append((f'{scanning_phy_str}.scan_type:    ', 'PASSIVE' if self.scan_types[i] == self.PASSIVE_SCANNING else 'ACTIVE'))
+            fields.append((f'{scanning_phy_str}.scan_interval:', self.scan_intervals[i])),
+            fields.append((f'{scanning_phy_str}.scan_window:  ', self.scan_windows[i]))
+
+        return color(self.name, 'green') + ':\n' + '\n'.join(
+            [color(field[0], 'cyan') + ' ' + str(field[1]) for field in fields]
+        )
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('enable',            1),
+    ('filter_duplicates', 1),
+    ('duration',          2),
+    ('period',            2)
+])
+class HCI_LE_Set_Extended_Scan_Enable_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.65 LE Set Extended Scan Enable Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(fields=None)
+class HCI_LE_Extended_Create_Connection_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.66 LE Extended Create Connection Command
+    '''
+
+    @classmethod
+    def from_parameters(cls, parameters):
+        initiator_filter_policy = parameters[0]
+        own_address_type        = parameters[1]
+        peer_address_type       = parameters[2]
+        peer_address            = Address.parse_address_preceded_by_type(parameters, 3)[1]
+        initiating_phys         = parameters[9]
+
+        phy_bits_set = bin(initiating_phys).count('1')
+
+        def read_parameter_list(offset):
+            return [struct.unpack_from('<H', parameters, offset + 16 * i)[0] for i in range(phy_bits_set)]
+
+        return cls(
+            initiator_filter_policy  = initiator_filter_policy,
+            own_address_type         = own_address_type,
+            peer_address_type        = peer_address_type,
+            peer_address             = peer_address,
+            initiating_phys          = initiating_phys,
+            scan_intervals           = read_parameter_list(10),
+            scan_windows             = read_parameter_list(12),
+            connection_interval_mins = read_parameter_list(14),
+            connection_interval_maxs = read_parameter_list(16),
+            max_latencies            = read_parameter_list(18),
+            supervision_timeouts     = read_parameter_list(20),
+            min_ce_lengths           = read_parameter_list(22),
+            max_ce_lengths           = read_parameter_list(24)
+        )
+
+    def __init__(
+        self,
+        initiator_filter_policy,
+        own_address_type,
+        peer_address_type,
+        peer_address,
+        initiating_phys,
+        scan_intervals,
+        scan_windows,
+        connection_interval_mins,
+        connection_interval_maxs,
+        max_latencies,
+        supervision_timeouts,
+        min_ce_lengths,
+        max_ce_lengths
+    ):
+        super().__init__(HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND)
+        self.initiator_filter_policy  = initiator_filter_policy
+        self.own_address_type         = own_address_type
+        self.peer_address_type        = peer_address_type
+        self.peer_address             = peer_address
+        self.initiating_phys          = initiating_phys
+        self.scan_intervals           = scan_intervals
+        self.scan_windows             = scan_windows
+        self.connection_interval_mins = connection_interval_mins
+        self.connection_interval_maxs = connection_interval_maxs
+        self.max_latencies            = max_latencies
+        self.supervision_timeouts     = supervision_timeouts
+        self.min_ce_lengths           = min_ce_lengths
+        self.max_ce_lengths           = max_ce_lengths
+
+        self.parameters = bytes([
+            initiator_filter_policy,
+            own_address_type,
+            peer_address_type
+        ]) + bytes(peer_address) + bytes([initiating_phys])
+
+        phy_bits_set = bin(initiating_phys).count('1')
+        for i in range(phy_bits_set):
+            self.parameters += struct.pack(
+                '<HHHHHHHH',
+                scan_intervals[i],
+                scan_windows[i],
+                connection_interval_mins[i],
+                connection_interval_maxs[i],
+                max_latencies[i],
+                supervision_timeouts[i],
+                min_ce_lengths[i],
+                max_ce_lengths[i]
+            )
+
+    def __str__(self):
+        initiating_phys_strs = bit_flags_to_strings(self.initiating_phys, HCI_LE_PHY_BIT_NAMES)
+        fields = [
+            ('initiator_filter_policy:', self.initiator_filter_policy),
+            ('own_address_type:       ', OwnAddressType.type_name(self.own_address_type)),
+            ('peer_address_type:      ', Address.address_type_name(self.peer_address_type)),
+            ('peer_address:           ', str(self.peer_address)),
+            ('initiating_phys:        ', ','.join(initiating_phys_strs)),
+        ]
+        for (i, initiating_phys_str) in enumerate(initiating_phys_strs):
+            fields.append((f'{initiating_phys_str}.scan_interval:          ', self.scan_intervals[i])),
+            fields.append((f'{initiating_phys_str}.scan_window:            ', self.scan_windows[i])),
+            fields.append((f'{initiating_phys_str}.connection_interval_min:', self.connection_interval_mins[i])),
+            fields.append((f'{initiating_phys_str}.connection_interval_max:', self.connection_interval_maxs[i])),
+            fields.append((f'{initiating_phys_str}.max_latency:            ', self.max_latencies[i])),
+            fields.append((f'{initiating_phys_str}.supervision_timeout:    ', self.supervision_timeouts[i])),
+            fields.append((f'{initiating_phys_str}.min_ce_length:          ', self.min_ce_lengths[i])),
+            fields.append((f'{initiating_phys_str}.max_ce_length:          ', self.max_ce_lengths[i]))
+
+        return color(self.name, 'green') + ':\n' + '\n'.join(
+            [color(field[0], 'cyan') + ' ' + str(field[1]) for field in fields]
+        )
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('peer_identity_address_type', Address.ADDRESS_TYPE_SPEC),
+    ('peer_identity_address',      Address.parse_address_preceded_by_type),
+    ('privacy_mode',               {'size': 1, 'mapper': lambda x: HCI_LE_Set_Privacy_Mode_Command.privacy_mode_name(x)})
+])
+class HCI_LE_Set_Privacy_Mode_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.77 LE Set Privacy Mode Command
+    '''
+
+    NETWORK_PRIVACY_MODE = 0x00
+    DEVICE_PRIVACY_MODE  = 0x01
+
+    PRIVACY_MODE_NAMES = {
+        NETWORK_PRIVACY_MODE: 'NETWORK_PRIVACY_MODE',
+        DEVICE_PRIVACY_MODE:  'DEVICE_PRIVACY_MODE'
+    }
+
+    @classmethod
+    def privacy_mode_name(cls, privacy_mode):
+        return name_or_number(cls.PRIVACY_MODE_NAMES, privacy_mode)
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command([
+    ('bit_number', 1),
+    ('bit_value',  1)
+])
+class HCI_LE_Set_Host_Feature_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.8.115 LE Set Host Feature Command
     '''
 
 
@@ -2575,6 +3857,9 @@ class HCI_Event(HCI_Packet):
         parameters = b'' if self.parameters is None else self.parameters
         return bytes([HCI_EVENT_PACKET, self.event_code, len(parameters)]) + parameters
 
+    def __bytes__(self):
+        return self.to_bytes()
+
     def __str__(self):
         result = color(self.name, 'magenta')
         if fields := getattr(self, 'fields', None):
@@ -2649,15 +3934,15 @@ class HCI_LE_Meta_Event(HCI_Event):
 
 # -----------------------------------------------------------------------------
 @HCI_LE_Meta_Event.event([
-    ('status',                STATUS_SPEC),
-    ('connection_handle',     2),
-    ('role',                  {'size': 1, 'mapper': lambda x: 'CENTRAL' if x == 0 else 'PERIPHERAL'}),
-    ('peer_address_type',     Address.ADDRESS_TYPE_SPEC),
-    ('peer_address',          Address.parse_address_preceded_by_type),
-    ('conn_interval',         2),
-    ('conn_latency',          2),
-    ('supervision_timeout',   2),
-    ('master_clock_accuracy', 1)
+    ('status',                 STATUS_SPEC),
+    ('connection_handle',      2),
+    ('role',                   {'size': 1, 'mapper': lambda x: 'CENTRAL' if x == 0 else 'PERIPHERAL'}),
+    ('peer_address_type',      Address.ADDRESS_TYPE_SPEC),
+    ('peer_address',           Address.parse_address_preceded_by_type),
+    ('connection_interval',    2),
+    ('peripheral_latency',     2),
+    ('supervision_timeout',    2),
+    ('central_clock_accuracy', 1)
 ])
 class HCI_LE_Connection_Complete_Event(HCI_LE_Meta_Event):
     '''
@@ -2687,29 +3972,44 @@ class HCI_LE_Advertising_Report_Event(HCI_LE_Meta_Event):
         SCAN_RSP:        'SCAN_RSP'          # Scan Response
     }
 
-    REPORT_FIELDS = [
-        ('event_type',   1),
-        ('address_type', Address.ADDRESS_TYPE_SPEC),
-        ('address',      Address.parse_address_preceded_by_type),
-        ('data',         {'parser': HCI_Object.parse_length_prefixed_bytes, 'serializer': HCI_Object.serialize_length_prefixed_bytes}),
-        ('rssi',         -1)
-    ]
+    class Report(HCI_Object):
+        FIELDS = [
+            ('event_type',   1),
+            ('address_type', Address.ADDRESS_TYPE_SPEC),
+            ('address',      Address.parse_address_preceded_by_type),
+            ('data',         {'parser': HCI_Object.parse_length_prefixed_bytes, 'serializer': HCI_Object.serialize_length_prefixed_bytes}),
+            ('rssi',         -1)
+        ]
+
+        @classmethod
+        def from_parameters(cls, parameters, offset):
+            return cls.from_bytes(parameters, offset, cls.FIELDS)
+
+        def event_type_string(self):
+            return HCI_LE_Advertising_Report_Event.event_type_name(self.event_type)
+
+        def to_string(self, prefix):
+            return super().to_string(prefix, {
+                'event_type': HCI_LE_Advertising_Report_Event.event_type_name,
+                'address_type': Address.address_type_name,
+                'data': lambda x: str(AdvertisingData.from_bytes(x))
+            })
 
     @classmethod
     def event_type_name(cls, event_type):
         return name_or_number(cls.EVENT_TYPE_NAMES, event_type)
 
-    @staticmethod
-    def from_parameters(parameters):
+    @classmethod
+    def from_parameters(cls, parameters):
         num_reports = parameters[1]
         reports = []
         offset = 2
         for _ in range(num_reports):
-            report = HCI_Object.from_bytes(parameters, offset, HCI_LE_Advertising_Report_Event.REPORT_FIELDS)
+            report = cls.Report.from_parameters(parameters, offset)
             offset += 10 + len(report.data)
             reports.append(report)
 
-        return HCI_LE_Advertising_Report_Event(reports)
+        return cls(reports)
 
     def __init__(self, reports):
         self.reports = reports[:]
@@ -2720,11 +4020,7 @@ class HCI_LE_Advertising_Report_Event(HCI_LE_Meta_Event):
         super().__init__(self.subevent_code, parameters)
 
     def __str__(self):
-        reports = '\n'.join([report.to_string('  ', {
-            'event_type':   self.event_type_name,
-            'address_type': Address.address_type_name,
-            'data': lambda x: str(AdvertisingData.from_bytes(x))
-        }) for report in self.reports])
+        reports = '\n'.join([f'{i}:\n{report.to_string("  ")}' for i, report in enumerate(self.reports)])
         return f'{color(self.subevent_name(self.subevent_code), "magenta")}:\n{reports}'
 
 
@@ -2735,8 +4031,8 @@ HCI_Event.meta_event_classes[HCI_LE_ADVERTISING_REPORT_EVENT] = HCI_LE_Advertisi
 @HCI_LE_Meta_Event.event([
     ('status',              STATUS_SPEC),
     ('connection_handle',   2),
-    ('conn_interval',       2),
-    ('conn_latency',        2),
+    ('connection_interval', 2),
+    ('peripheral_latency',  2),
     ('supervision_timeout', 2)
 ])
 class HCI_LE_Connection_Update_Complete_Event(HCI_LE_Meta_Event):
@@ -2774,7 +4070,7 @@ class HCI_LE_Long_Term_Key_Request_Event(HCI_LE_Meta_Event):
     ('connection_handle', 2),
     ('interval_min',      2),
     ('interval_max',      2),
-    ('latency',           2),
+    ('max_latency',       2),
     ('timeout',           2)
 ])
 class HCI_LE_Remote_Connection_Parameter_Request_Event(HCI_LE_Meta_Event):
@@ -2806,10 +4102,10 @@ class HCI_LE_Data_Length_Change_Event(HCI_LE_Meta_Event):
     ('peer_address',                     Address.parse_address_preceded_by_type),
     ('local_resolvable_private_address', Address.parse_address),
     ('peer_resolvable_private_address',  Address.parse_address),
-    ('conn_interval',                    2),
-    ('conn_latency',                     2),
+    ('connection_interval',              2),
+    ('peripheral_latency',               2),
     ('supervision_timeout',              2),
-    ('master_clock_accuracy',            1)
+    ('central_clock_accuracy',           1)
 ])
 class HCI_LE_Enhanced_Connection_Complete_Event(HCI_LE_Meta_Event):
     '''
@@ -2828,6 +4124,124 @@ class HCI_LE_PHY_Update_Complete_Event(HCI_LE_Meta_Event):
     '''
     See Bluetooth spec @ 7.7.65.12 LE PHY Update Complete Event
     '''
+
+
+# -----------------------------------------------------------------------------
+class HCI_LE_Extended_Advertising_Report_Event(HCI_LE_Meta_Event):
+    '''
+    See Bluetooth spec @ 7.7.65.13 LE Extended Advertising Report Event
+    '''
+    subevent_code = HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT
+
+    # Event types flags
+    CONNECTABLE_ADVERTISING     = 0
+    SCANNABLE_ADVERTISING       = 1
+    DIRECTED_ADVERTISING        = 2
+    SCAN_RESPONSE               = 3
+    LEGACY_ADVERTISING_PDU_USED = 4
+
+    DATA_COMPLETE                             = 0x00
+    DATA_INCOMPLETE_MORE_TO_COME              = 0x01
+    DATA_INCOMPLETE_TRUNCATED_NO_MORE_TO_COME = 0x02
+
+    EVENT_TYPE_FLAG_NAMES = (
+        'CONNECTABLE_ADVERTISING',
+        'SCANNABLE_ADVERTISING',
+        'DIRECTED_ADVERTISING',
+        'SCAN_RESPONSE',
+        'LEGACY_ADVERTISING_PDU_USED'
+    )
+
+    LEGACY_PDU_TYPE_MAP = {
+        0b0011: HCI_LE_Advertising_Report_Event.ADV_IND,
+        0b0101: HCI_LE_Advertising_Report_Event.ADV_DIRECT_IND,
+        0b0010: HCI_LE_Advertising_Report_Event.ADV_SCAN_IND,
+        0b0000: HCI_LE_Advertising_Report_Event.ADV_NONCONN_IND,
+        0b1011: HCI_LE_Advertising_Report_Event.SCAN_RSP,
+        0b1010: HCI_LE_Advertising_Report_Event.SCAN_RSP
+    }
+
+    NO_ADI_FIELD_PROVIDED              = 0xFF
+    TX_POWER_INFORMATION_NOT_AVAILABLE = 0x7F
+    RSSI_NOT_AVAILABLE                 = 0x7F
+    ANONYMOUS_ADDRESS_TYPE             = 0xFF
+    UNRESOLVED_RESOLVABLE_ADDRESS_TYPE = 0xFE
+
+    class Report(HCI_Object):
+        FIELDS = [
+            ('event_type',                    2),
+            ('address_type',                  Address.ADDRESS_TYPE_SPEC),
+            ('address',                       Address.parse_address_preceded_by_type),
+            ('primary_phy',                   {'size': 1, 'mapper': HCI_Constant.le_phy_name}),
+            ('secondary_phy',                 {'size': 1, 'mapper': HCI_Constant.le_phy_name}),
+            ('advertising_sid',               1),
+            ('tx_power',                      1),
+            ('rssi',                          -1),
+            ('periodic_advertising_interval', 2),
+            ('direct_address_type',           Address.ADDRESS_TYPE_SPEC),
+            ('direct_address',                Address.parse_address_preceded_by_type),
+            ('data',                          {'parser': HCI_Object.parse_length_prefixed_bytes, 'serializer': HCI_Object.serialize_length_prefixed_bytes}),
+        ]
+
+        @classmethod
+        def from_parameters(cls, parameters, offset):
+            return cls.from_bytes(parameters, offset, cls.FIELDS)
+
+        def event_type_string(self):
+            return HCI_LE_Extended_Advertising_Report_Event.event_type_string(self.event_type)
+
+        def to_string(self, prefix):
+            return super().to_string(prefix, {
+                'event_type': HCI_LE_Extended_Advertising_Report_Event.event_type_string,
+                'address_type': Address.address_type_name,
+                'data': lambda x: str(AdvertisingData.from_bytes(x))
+            })
+
+    @staticmethod
+    def event_type_string(event_type):
+        event_type_flags = bit_flags_to_strings(
+            event_type & 0x1F,
+            HCI_LE_Extended_Advertising_Report_Event.EVENT_TYPE_FLAG_NAMES,
+        )
+        event_type_flags.append(('COMPLETE', 'INCOMPLETE+', 'INCOMPLETE#', '?')[(event_type >> 5) & 3])
+
+        if event_type & (1 << HCI_LE_Extended_Advertising_Report_Event.LEGACY_ADVERTISING_PDU_USED):
+            legacy_pdu_type = HCI_LE_Extended_Advertising_Report_Event.LEGACY_PDU_TYPE_MAP.get(event_type & 0x0F)
+            if legacy_pdu_type is not None:
+                legacy_info_string = f'({HCI_LE_Advertising_Report_Event.event_type_name(legacy_pdu_type)})'
+            else:
+                legacy_info_string = ''
+        else:
+            legacy_info_string = ''
+
+        return f'0x{event_type:04X} [{",".join(event_type_flags)}]{legacy_info_string}'
+
+    @classmethod
+    def from_parameters(cls, parameters):
+        num_reports = parameters[1]
+        reports = []
+        offset = 2
+        for _ in range(num_reports):
+            report = cls.Report.from_parameters(parameters, offset)
+            offset += 24 + len(report.data)
+            reports.append(report)
+
+        return cls(reports)
+
+    def __init__(self, reports):
+        self.reports = reports[:]
+
+        # Serialize the fields
+        parameters = bytes([HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT, len(reports)]) + b''.join([bytes(report) for report in reports])
+
+        super().__init__(self.subevent_code, parameters)
+
+    def __str__(self):
+        reports = '\n'.join([f'{i}:\n{report.to_string("  ")}' for i, report in enumerate(self.reports)])
+        return f'{color(self.subevent_name(self.subevent_code), "magenta")}:\n{reports}'
+
+
+HCI_Event.meta_event_classes[HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT] = HCI_LE_Extended_Advertising_Report_Event
 
 
 # -----------------------------------------------------------------------------
@@ -2982,7 +4396,7 @@ class HCI_Encryption_Change_Event(HCI_Event):
     E0_OR_AES_CCM = 0x01
     AES_CCM       = 0x02
 
-    ENCYRPTION_ENABLED_NAMES = {
+    ENCRYPTION_ENABLED_NAMES = {
         OFF:           'OFF',
         E0_OR_AES_CCM: 'E0_OR_AES_CCM',
         AES_CCM:       'AES_CCM'
@@ -2990,7 +4404,7 @@ class HCI_Encryption_Change_Event(HCI_Event):
 
     @staticmethod
     def encryption_enabled_name(encryption_enabled):
-        return name_or_number(HCI_Encryption_Change_Event.ENCYRPTION_ENABLED_NAMES, encryption_enabled)
+        return name_or_number(HCI_Encryption_Change_Event.ENCRYPTION_ENABLED_NAMES, encryption_enabled)
 
 
 # -----------------------------------------------------------------------------
@@ -3250,7 +4664,7 @@ class HCI_Page_Scan_Repetition_Mode_Change_Event(HCI_Event):
 
 # -----------------------------------------------------------------------------
 @HCI_Event.registered
-class HCI_Inquiry_Result_With_Rssi_Event(HCI_Event):
+class HCI_Inquiry_Result_With_RSSI_Event(HCI_Event):
     '''
     See Bluetooth spec @ 7.7.33 Inquiry Result with RSSI Event
     '''
@@ -3270,11 +4684,11 @@ class HCI_Inquiry_Result_With_Rssi_Event(HCI_Event):
         responses = []
         offset = 1
         for _ in range(num_responses):
-            response = HCI_Object.from_bytes(parameters, offset, HCI_Inquiry_Result_With_Rssi_Event.RESPONSE_FIELDS)
+            response = HCI_Object.from_bytes(parameters, offset, HCI_Inquiry_Result_With_RSSI_Event.RESPONSE_FIELDS)
             offset += 14
             responses.append(response)
 
-        return HCI_Inquiry_Result_With_Rssi_Event(responses)
+        return HCI_Inquiry_Result_With_RSSI_Event(responses)
 
     def __init__(self, responses):
         self.responses = responses[:]
@@ -3337,7 +4751,7 @@ class HCI_Synchronous_Connection_Complete_Event(HCI_Event):
         U_LAW_LOG_AIR_MODE:        'u-law log',
         A_LAW_LOG_AIR_MORE:        'A-law log',
         CVSD_AIR_MODE:             'CVSD',
-        TRANSPARENT_DATA_AIR_MODE: 'Transparend Data'
+        TRANSPARENT_DATA_AIR_MODE: 'Transparent Data'
     }
 
     @staticmethod
@@ -3455,6 +4869,17 @@ class HCI_Simple_Pairing_Complete_Event(HCI_Event):
 class HCI_Link_Supervision_Timeout_Changed_Event(HCI_Event):
     '''
     See Bluetooth spec @ 7.7.46 Link Supervision Timeout Changed Event
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Event.event([
+    ('bd_addr', Address.parse_address),
+    ('passkey', 4)
+])
+class HCI_User_Passkey_Notification_Event(HCI_Event):
+    '''
+    See Bluetooth spec @ 7.7.48 User Passkey Notification Event
     '''
 
 
