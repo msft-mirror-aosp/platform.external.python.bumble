@@ -22,7 +22,4 @@ python_library_host {
         "bumble/profiles/*.py",
         "bumble/transport/*.py",
     ],
-    libs: [
-        "py-cryptography",
-    ],
 }
