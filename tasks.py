@@ -52,8 +52,9 @@ build_tasks.add_task(mkdocs, name="mkdocs")
 test_tasks = Collection()
 ns.add_collection(test_tasks, name="test")
 
-@task
-def test(ctx, filter=None, junit=False, install=False):
+
+@task(incrementable=["verbose"])
+def test(ctx, filter=None, junit=False, install=False, html=False, verbose=0):
     # Install the package before running the tests
     if install:
         ctx.run("python -m pip install .[test]")
@@ -62,8 +63,12 @@ def test(ctx, filter=None, junit=False, install=False):
     if junit:
         args += "--junit-xml test-results.xml"
     if filter is not None:
-        args += " -k '{}'".format(filter)
-    ctx.run("python -m pytest {} {}".format(os.path.join(ROOT_DIR, "tests"), args))
+        args += f" -k '{filter}'"
+    if html:
+        args += " --html results.html"
+    if verbose > 0:
+        args += f" -{'v' * verbose}"
+    ctx.run(f"python -m pytest {os.path.join(ROOT_DIR, 'tests')} {args}")
 
 test_tasks.add_task(test, default=True)
 
