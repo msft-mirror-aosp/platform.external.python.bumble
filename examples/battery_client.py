@@ -20,7 +20,7 @@ import sys
 import os
 import logging
 from colors import color
-from bumble.device import Device, Peer
+from bumble.device import Device
 from bumble.transport import open_transport
 from bumble.profiles.battery_service import BatteryServiceProxy
 
@@ -55,7 +55,9 @@ async def main():
             # Subscribe to and read the battery level
             if battery_service.battery_level:
                 await battery_service.battery_level.subscribe(
-                    lambda value: print(f'{color("Battery Level Update:", "green")} {value}')
+                    lambda value: print(
+                        f'{color("Battery Level Update:", "green")} {value}'
+                    )
                 )
                 value = await battery_service.battery_level.read_value()
                 print(f'{color("Initial Battery Level:", "green")} {value}')
@@ -64,5 +66,5 @@ async def main():
 
 
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
