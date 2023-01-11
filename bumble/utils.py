@@ -19,6 +19,8 @@ import asyncio
 import logging
 import traceback
 import collections
+import sys
+from typing import Awaitable
 from functools import wraps
 from colors import color
 from pyee import EventEmitter
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 def setup_event_forwarding(emitter, forwarder, event_name):
     def emit(*args, **kwargs):
         forwarder.emit(event_name, *args, **kwargs)
+
     emitter.on(event_name, emit)
 
 
@@ -44,6 +47,8 @@ def composite_listener(cls):
     registers/deregisters all methods named `on_<event_name>` as a listener for
     the <event_name> event with an emitter.
     """
+    # pylint: disable=protected-access
+
     def register(self, emitter):
         for method_name in dir(cls):
             if method_name.startswith('on_'):
@@ -54,13 +59,42 @@ def composite_listener(cls):
             if method_name.startswith('on_'):
                 emitter.remove_listener(method_name[3:], getattr(self, method_name))
 
-    cls._bumble_register_composite   = register
+    cls._bumble_register_composite = register
     cls._bumble_deregister_composite = deregister
     return cls
 
 
 # -----------------------------------------------------------------------------
-class CompositeEventEmitter(EventEmitter):
+class AbortableEventEmitter(EventEmitter):
+    def abort_on(self, event: str, awaitable: Awaitable):
+        """
+        Set a coroutine or future to abort when an event occur.
+        """
+        future = asyncio.ensure_future(awaitable)
+        if future.done():
+            return future
+
+        def on_event(*_):
+            msg = f'abort: {event} event occurred.'
+            if isinstance(future, asyncio.Task):
+                # python < 3.9 does not support passing a message on `Task.cancel`
+                if sys.version_info < (3, 9, 0):
+                    future.cancel()
+                else:
+                    future.cancel(msg)
+            else:
+                future.set_exception(asyncio.CancelledError(msg))
+
+        def on_done(_):
+            self.remove_listener(event, on_event)
+
+        self.on(event, on_event)
+        future.add_done_callback(on_done)
+        return future
+
+
+# -----------------------------------------------------------------------------
+class CompositeEventEmitter(AbortableEventEmitter):
     def __init__(self):
         super().__init__()
         self._listener = None
@@ -71,6 +105,7 @@ class CompositeEventEmitter(EventEmitter):
 
     @listener.setter
     def listener(self, listener):
+        # pylint: disable=protected-access
         if self._listener:
             # Call the deregistration methods for each base class that has them
             for cls in self._listener.__class__.mro():
@@ -110,7 +145,9 @@ class AsyncRunner:
                 try:
                     await item
                 except Exception as error:
-                    logger.warning(f'{color("!!! Exception in work queue:", "red")} {error}')
+                    logger.warning(
+                        f'{color("!!! Exception in work queue:", "red")} {error}'
+                    )
 
     # Shared default queue
     default_queue = WorkQueue()
@@ -131,7 +168,10 @@ class AsyncRunner:
                         try:
                             await coroutine
                         except Exception:
-                            logger.warning(f'{color("!!! Exception in wrapper:", "red")} {traceback.format_exc()}')
+                            logger.warning(
+                                f'{color("!!! Exception in wrapper:", "red")} '
+                                f'{traceback.format_exc()}'
+                            )
 
                     asyncio.create_task(run())
                 else:
@@ -150,18 +190,26 @@ class FlowControlAsyncPipe:
     paused (by calling a function passed in when the pipe is created) if the
     amount of queued data exceeds a specified threshold.
     """
-    def __init__(self, pause_source, resume_source, write_to_sink=None, drain_sink=None, threshold=0):
-        self.pause_source  = pause_source
+
+    def __init__(
+        self,
+        pause_source,
+        resume_source,
+        write_to_sink=None,
+        drain_sink=None,
+        threshold=0,
+    ):
+        self.pause_source = pause_source
         self.resume_source = resume_source
         self.write_to_sink = write_to_sink
-        self.drain_sink    = drain_sink
-        self.threshold     = threshold
-        self.queue         = collections.deque()  # Queue of packets
-        self.queued_bytes  = 0                    # Number of bytes in the queue
+        self.drain_sink = drain_sink
+        self.threshold = threshold
+        self.queue = collections.deque()  # Queue of packets
+        self.queued_bytes = 0  # Number of bytes in the queue
         self.ready_to_pump = asyncio.Event()
-        self.paused        = False
+        self.paused = False
         self.source_paused = False
-        self.pump_task     = None
+        self.pump_task = None
 
     def start(self):
         if self.pump_task is None:
