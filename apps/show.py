@@ -27,13 +27,14 @@ from bumble.helpers import PacketTracer
 # -----------------------------------------------------------------------------
 class SnoopPacketReader:
     '''
-    Reader that reads HCI packets from a "snoop" file (based on RFC 1761, but not exactly the same...)
+    Reader that reads HCI packets from a "snoop" file (based on RFC 1761, but not
+    exactly the same...)
     '''
 
-    DATALINK_H1   = 1001
-    DATALINK_H4   = 1002
+    DATALINK_H1 = 1001
+    DATALINK_H4 = 1002
     DATALINK_BSCP = 1003
-    DATALINK_H5   = 1004
+    DATALINK_H5 = 1004
 
     def __init__(self, source):
         self.source = source
@@ -41,9 +42,13 @@ class SnoopPacketReader:
         # Read the header
         identification_pattern = source.read(8)
         if identification_pattern.hex().lower() != '6274736e6f6f7000':
-            raise ValueError('not a valid snoop file, unexpected identification pattern')
-        (self.version_number, self.data_link_type) = struct.unpack('>II', source.read(8))
-        if self.data_link_type != self.DATALINK_H4 and self.data_link_type != self.DATALINK_H1:
+            raise ValueError(
+                'not a valid snoop file, unexpected identification pattern'
+            )
+        (self.version_number, self.data_link_type) = struct.unpack(
+            '>II', source.read(8)
+        )
+        if self.data_link_type not in (self.DATALINK_H4, self.DATALINK_H1):
             raise ValueError(f'datalink type {self.data_link_type} not supported')
 
     def next_packet(self):
@@ -55,9 +60,9 @@ class SnoopPacketReader:
             original_length,
             included_length,
             packet_flags,
-            cumulative_drops,
-            timestamp_seconds,
-            timestamp_microsecond
+            _cumulative_drops,
+            _timestamp_seconds,
+            _timestamp_microsecond,
         ) = struct.unpack('>IIIIII', header)
 
         # Abort on truncated packets
@@ -79,24 +84,34 @@ class SnoopPacketReader:
                 else:
                     packet_type = hci.HCI_ACL_DATA_PACKET
 
-            return (packet_flags & 1, bytes([packet_type]) + self.source.read(included_length))
-        else:
-            return (packet_flags & 1, self.source.read(included_length))
+            return (
+                packet_flags & 1,
+                bytes([packet_type]) + self.source.read(included_length),
+            )
+
+        return (packet_flags & 1, self.source.read(included_length))
 
 
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 @click.command()
-@click.option('--format', type=click.Choice(['h4', 'snoop']), default='h4', help='Format of the input file')
+@click.option(
+    '--format',
+    type=click.Choice(['h4', 'snoop']),
+    default='h4',
+    help='Format of the input file',
+)
 @click.argument('filename')
+# pylint: disable=redefined-builtin
 def main(format, filename):
     input = open(filename, 'rb')
     if format == 'h4':
         packet_reader = PacketReader(input)
 
         def read_next_packet():
-            (0, packet_reader.next_packet())
+            return (0, packet_reader.next_packet())
+
     else:
         packet_reader = SnoopPacketReader(input)
         read_next_packet = packet_reader.next_packet
@@ -112,9 +127,8 @@ def main(format, filename):
 
         except Exception as error:
             print(color(f'!!! {error}', 'red'))
-            pass
 
 
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    main()
+    main()  # pylint: disable=no-value-for-parameter

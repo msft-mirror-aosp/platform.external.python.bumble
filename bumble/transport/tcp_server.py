@@ -45,12 +45,12 @@ async def open_tcp_server_transport(spec):
     class TcpServerProtocol:
         def __init__(self, packet_source, packet_sink):
             self.packet_source = packet_source
-            self.packet_sink   = packet_sink
+            self.packet_sink = packet_sink
 
         # Called when a new connection is established
         def connection_made(self, transport):
-            peername = transport.get_extra_info('peername')
-            logger.debug('connection from {}'.format(peername))
+            peer_name = transport.get_extra_info('peer_name')
+            logger.debug(f'connection from {peer_name}')
             self.packet_sink.transport = transport
 
         # Called when the client is disconnected
@@ -78,7 +78,7 @@ async def open_tcp_server_transport(spec):
 
     local_host, local_port = spec.split(':')
     packet_source = StreamPacketSource()
-    packet_sink   = TcpServerPacketSink()
+    packet_sink = TcpServerPacketSink()
     await asyncio.get_running_loop().create_server(
         lambda: TcpServerProtocol(packet_source, packet_sink),
         host=local_host if local_host != '_' else None,
