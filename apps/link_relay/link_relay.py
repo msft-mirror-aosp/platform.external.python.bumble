@@ -16,7 +16,6 @@
 # Imports
 # ----------------------------------------------------------------------------
 import sys
-import websockets
 import logging
 import json
 import asyncio
@@ -25,6 +24,7 @@ import uuid
 import os
 from urllib.parse import urlparse
 from colors import color
+import websockets
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -65,9 +65,9 @@ class Connection:
     """
 
     def __init__(self, room, websocket):
-        self.room      = room
+        self.room = room
         self.websocket = websocket
-        self.address   = str(uuid.uuid4())
+        self.address = str(uuid.uuid4())
 
     async def send_message(self, message):
         try:
@@ -98,7 +98,11 @@ class Connection:
         self.address = address
 
     def __str__(self):
-        return f'Connection(address="{self.address}", client={self.websocket.remote_address[0]}:{self.websocket.remote_address[1]})'
+        return (
+            f'Connection(address="{self.address}", '
+            f'client={self.websocket.remote_address[0]}:'
+            f'{self.websocket.remote_address[1]})'
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -110,9 +114,9 @@ class Room:
     """
 
     def __init__(self, relay, name):
-        self.relay       = relay
-        self.name        = name
-        self.observers   = []
+        self.relay = relay
+        self.name = name
+        self.observers = []
         self.connections = []
 
     async def add_connection(self, connection):
@@ -139,13 +143,15 @@ class Room:
 
             # Parse the message to decide how to handle it
             if message.startswith('@'):
-                # This is a targetted message
-                await self.on_targetted_message(connection, message)
+                # This is a targeted message
+                await self.on_targeted_message(connection, message)
             elif message.startswith('/'):
                 # This is an RPC request
                 await self.on_rpc_request(connection, message)
             else:
-                await connection.send_message(f'result:{error_to_json("error: invalid message")}')
+                await connection.send_message(
+                    f'result:{error_to_json("error: invalid message")}'
+                )
 
     async def broadcast_message(self, sender, message):
         '''
@@ -155,7 +161,9 @@ class Room:
 
     async def on_rpc_request(self, connection, message):
         command, *params = message.split(' ', 1)
-        if handler := getattr(self, f'on_{command[1:].lower().replace("-","_")}_command', None):
+        if handler := getattr(
+            self, f'on_{command[1:].lower().replace("-","_")}_command', None
+        ):
             try:
                 result = await handler(connection, params)
             except Exception as error:
@@ -165,7 +173,7 @@ class Room:
 
         await connection.send_message(result or 'result:{}')
 
-    async def on_targetted_message(self, connection, message):
+    async def on_targeted_message(self, connection, message):
         target, *payload = message.split(' ', 1)
         if not payload:
             return error_to_json('missing arguments')
@@ -174,7 +182,8 @@ class Room:
 
         # Determine what targets to send to
         if target == '*':
-            # Send to all connections in the room except the connection from which the message was received
+            # Send to all connections in the room except the connection from which the
+            # message was received
             connections = [c for c in self.connections if c != connection]
         else:
             connections = self.find_connections_by_address(target)
@@ -192,7 +201,9 @@ class Room:
         current_address = connection.address
         new_address = params[0]
         connection.set_address(new_address)
-        await self.broadcast_message(connection, f'address-changed:from={current_address},to={new_address}')
+        await self.broadcast_message(
+            connection, f'address-changed:from={current_address},to={new_address}'
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -210,9 +221,10 @@ class Relay:
     def start(self):
         logger.info(f'Starting Relay on port {self.port}')
 
+        # pylint: disable-next=no-member
         return websockets.serve(self.serve, '0.0.0.0', self.port, ping_interval=None)
 
-    async def serve_as_controller(connection):
+    async def serve_as_controller(self, connection):
         pass
 
     async def serve(self, websocket, path):
@@ -246,24 +258,24 @@ def main():
         print('ERROR: Python 3.6.1 or higher is required')
         sys.exit(1)
 
-    logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'INFO').upper())
+    logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'INFO').upper())
 
     # Parse arguments
     arg_parser = argparse.ArgumentParser(description='Bumble Link Relay')
     arg_parser.add_argument('--log-level', default='INFO', help='logger level')
     arg_parser.add_argument('--log-config', help='logger config file (YAML)')
-    arg_parser.add_argument('--port',
-                            type = int,
-                            default = DEFAULT_RELAY_PORT,
-                            help = 'Port to listen on')
+    arg_parser.add_argument(
+        '--port', type=int, default=DEFAULT_RELAY_PORT, help='Port to listen on'
+    )
     args = arg_parser.parse_args()
 
     # Setup logger
     if args.log_config:
-        from logging import config
+        from logging import config  # pylint: disable=import-outside-toplevel
+
         config.fileConfig(args.log_config)
     else:
-        logging.basicConfig(level = getattr(logging, args.log_level.upper()))
+        logging.basicConfig(level=getattr(logging, args.log_level.upper()))
 
     # Start a relay
     relay = Relay(args.port)

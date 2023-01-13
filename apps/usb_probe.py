@@ -28,18 +28,19 @@
 # -----------------------------------------------------------------------------
 import os
 import logging
-import sys
 import click
 import usb1
 from colors import color
+
+from bumble.transport.usb import load_libusb
 
 
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-USB_DEVICE_CLASS_DEVICE                          = 0x00
-USB_DEVICE_CLASS_WIRELESS_CONTROLLER             = 0xE0
-USB_DEVICE_SUBCLASS_RF_CONTROLLER                = 0x01
+USB_DEVICE_CLASS_DEVICE = 0x00
+USB_DEVICE_CLASS_WIRELESS_CONTROLLER = 0xE0
+USB_DEVICE_SUBCLASS_RF_CONTROLLER = 0x01
 USB_DEVICE_PROTOCOL_BLUETOOTH_PRIMARY_CONTROLLER = 0x01
 
 USB_DEVICE_CLASSES = {
@@ -69,22 +70,22 @@ USB_DEVICE_CLASSES = {
                 0x01: 'Bluetooth',
                 0x02: 'UWB',
                 0x03: 'Remote NDIS',
-                0x04: 'Bluetooth AMP'
+                0x04: 'Bluetooth AMP',
             }
-        }
+        },
     ),
     0xEF: 'Miscellaneous',
     0xFE: 'Application Specific',
-    0xFF: 'Vendor Specific'
+    0xFF: 'Vendor Specific',
 }
 
-USB_ENDPOINT_IN    = 0x80
+USB_ENDPOINT_IN = 0x80
 USB_ENDPOINT_TYPES = ['CONTROL', 'ISOCHRONOUS', 'BULK', 'INTERRUPT']
 
 USB_BT_HCI_CLASS_TUPLE = (
     USB_DEVICE_CLASS_WIRELESS_CONTROLLER,
     USB_DEVICE_SUBCLASS_RF_CONTROLLER,
-    USB_DEVICE_PROTOCOL_BLUETOOTH_PRIMARY_CONTROLLER
+    USB_DEVICE_PROTOCOL_BLUETOOTH_PRIMARY_CONTROLLER,
 )
 
 
@@ -94,19 +95,26 @@ def show_device_details(device):
         print(f'  Configuration {configuration.getConfigurationValue()}')
         for interface in configuration:
             for setting in interface:
-                alternateSetting = setting.getAlternateSetting()
-                suffix = f'/{alternateSetting}' if interface.getNumSettings() > 1 else ''
+                alternate_setting = setting.getAlternateSetting()
+                suffix = (
+                    f'/{alternate_setting}' if interface.getNumSettings() > 1 else ''
+                )
                 (class_string, subclass_string) = get_class_info(
-                    setting.getClass(),
-                    setting.getSubClass(),
-                    setting.getProtocol()
+                    setting.getClass(), setting.getSubClass(), setting.getProtocol()
                 )
                 details = f'({class_string}, {subclass_string})'
                 print(f'      Interface: {setting.getNumber()}{suffix} {details}')
                 for endpoint in setting:
                     endpoint_type = USB_ENDPOINT_TYPES[endpoint.getAttributes() & 3]
-                    endpoint_direction = 'OUT' if (endpoint.getAddress() & USB_ENDPOINT_IN == 0) else 'IN'
-                    print(f'        Endpoint 0x{endpoint.getAddress():02X}: {endpoint_type} {endpoint_direction}')
+                    endpoint_direction = (
+                        'OUT'
+                        if (endpoint.getAddress() & USB_ENDPOINT_IN == 0)
+                        else 'IN'
+                    )
+                    print(
+                        f'        Endpoint 0x{endpoint.getAddress():02X}: '
+                        f'{endpoint_type} {endpoint_direction}'
+                    )
 
 
 # -----------------------------------------------------------------------------
@@ -116,7 +124,7 @@ def get_class_info(cls, subclass, protocol):
     if class_info is None:
         class_string = f'0x{cls:02X}'
     else:
-        if type(class_info) is tuple:
+        if isinstance(class_info, tuple):
             class_string = class_info[0]
             subclass_info = class_info[1].get(subclass)
             if subclass_info:
@@ -135,7 +143,11 @@ def get_class_info(cls, subclass, protocol):
 # -----------------------------------------------------------------------------
 def is_bluetooth_hci(device):
     # Check if the device class indicates a match
-    if (device.getDeviceClass(), device.getDeviceSubClass(), device.getDeviceProtocol()) == USB_BT_HCI_CLASS_TUPLE:
+    if (
+        device.getDeviceClass(),
+        device.getDeviceSubClass(),
+        device.getDeviceProtocol(),
+    ) == USB_BT_HCI_CLASS_TUPLE:
         return True
 
     # If the device class is 'Device', look for a matching interface
@@ -143,7 +155,11 @@ def is_bluetooth_hci(device):
         for configuration in device:
             for interface in configuration:
                 for setting in interface:
-                    if (setting.getClass(), setting.getSubClass(), setting.getProtocol()) == USB_BT_HCI_CLASS_TUPLE:
+                    if (
+                        setting.getClass(),
+                        setting.getSubClass(),
+                        setting.getProtocol(),
+                    ) == USB_BT_HCI_CLASS_TUPLE:
                         return True
 
     return False
@@ -153,23 +169,22 @@ def is_bluetooth_hci(device):
 @click.command()
 @click.option('--verbose', is_flag=True, default=False, help='Print more details')
 def main(verbose):
-    logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'WARNING').upper())
+    logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'WARNING').upper())
 
+    load_libusb()
     with usb1.USBContext() as context:
         bluetooth_device_count = 0
         devices = {}
 
         for device in context.getDeviceIterator(skip_on_error=True):
-            device_class    = device.getDeviceClass()
+            device_class = device.getDeviceClass()
             device_subclass = device.getDeviceSubClass()
             device_protocol = device.getDeviceProtocol()
 
             device_id = (device.getVendorID(), device.getProductID())
 
             (device_class_string, device_subclass_string) = get_class_info(
-                device_class,
-                device_subclass,
-                device_protocol
+                device_class, device_subclass, device_protocol
             )
 
             try:
@@ -198,7 +213,9 @@ def main(verbose):
 
             # Compute the different ways this can be referenced as a Bumble transport
             bumble_transport_names = []
-            basic_transport_name = f'usb:{device.getVendorID():04X}:{device.getProductID():04X}'
+            basic_transport_name = (
+                f'usb:{device.getVendorID():04X}:{device.getProductID():04X}'
+            )
 
             if device_is_bluetooth_hci:
                 bumble_transport_names.append(f'usb:{bluetooth_device_count - 1}')
@@ -206,17 +223,39 @@ def main(verbose):
             if device_id not in devices:
                 bumble_transport_names.append(basic_transport_name)
             else:
-                bumble_transport_names.append(f'{basic_transport_name}#{len(devices[device_id])}')
+                bumble_transport_names.append(
+                    f'{basic_transport_name}#{len(devices[device_id])}'
+                )
 
             if device_serial_number is not None:
-                if device_id not in devices or device_serial_number not in devices[device_id]:
-                    bumble_transport_names.append(f'{basic_transport_name}/{device_serial_number}')
+                if (
+                    device_id not in devices
+                    or device_serial_number not in devices[device_id]
+                ):
+                    bumble_transport_names.append(
+                        f'{basic_transport_name}/{device_serial_number}'
+                    )
 
             # Print the results
-            print(color(f'ID {device.getVendorID():04X}:{device.getProductID():04X}', fg=fg_color, bg=bg_color))
+            print(
+                color(
+                    f'ID {device.getVendorID():04X}:{device.getProductID():04X}',
+                    fg=fg_color,
+                    bg=bg_color,
+                )
+            )
             if bumble_transport_names:
-                print(color('  Bumble Transport Names:', 'blue'), ' or '.join(color(x, 'cyan' if device_is_bluetooth_hci else 'red') for x in bumble_transport_names))
-            print(color('  Bus/Device:            ', 'green'), f'{device.getBusNumber():03}/{device.getDeviceAddress():03}')
+                print(
+                    color('  Bumble Transport Names:', 'blue'),
+                    ' or '.join(
+                        color(x, 'cyan' if device_is_bluetooth_hci else 'red')
+                        for x in bumble_transport_names
+                    ),
+                )
+            print(
+                color('  Bus/Device:            ', 'green'),
+                f'{device.getBusNumber():03}/{device.getDeviceAddress():03}',
+            )
             print(color('  Class:                 ', 'green'), device_class_string)
             print(color('  Subclass/Protocol:     ', 'green'), device_subclass_string)
             if device_serial_number is not None:
@@ -236,4 +275,4 @@ def main(verbose):
 
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    main()
+    main()  # pylint: disable=no-value-for-parameter
