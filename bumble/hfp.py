@@ -34,16 +34,16 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 class HfpProtocol:
     def __init__(self, dlc):
-        self.dlc             = dlc
-        self.buffer          = ''
-        self.lines           = collections.deque()
+        self.dlc = dlc
+        self.buffer = ''
+        self.lines = collections.deque()
         self.lines_available = asyncio.Event()
 
         dlc.sink = self.feed
 
     def feed(self, data):
         # Convert the data to a string if needed
-        if type(data) == bytes:
+        if isinstance(data, bytes):
             data = data.decode('utf-8')
 
         logger.debug(f'<<< Data received: {data}')
@@ -52,7 +52,7 @@ class HfpProtocol:
         self.buffer += data
         while (separator := self.buffer.find('\r')) >= 0:
             line = self.buffer[:separator].strip()
-            self.buffer = self.buffer[separator + 1:]
+            self.buffer = self.buffer[separator + 1 :]
             if len(line) > 0:
                 self.on_line(line)
 
@@ -79,16 +79,16 @@ class HfpProtocol:
     async def initialize_service(self):
         # Perform Service Level Connection Initialization
         self.send_command_line('AT+BRSF=2072')  # Retrieve Supported Features
-        line = await(self.next_line())
-        line = await(self.next_line())
+        await (self.next_line())
+        await (self.next_line())
 
         self.send_command_line('AT+CIND=?')
-        line = await(self.next_line())
-        line = await(self.next_line())
+        await (self.next_line())
+        await (self.next_line())
 
         self.send_command_line('AT+CIND?')
-        line = await(self.next_line())
-        line = await(self.next_line())
+        await (self.next_line())
+        await (self.next_line())
 
         self.send_command_line('AT+CMER=3,0,0,1')
-        line = await(self.next_line())
+        await (self.next_line())
