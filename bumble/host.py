@@ -141,7 +141,7 @@ class Host(AbortableEventEmitter):
         if controller_sink:
             self.set_packet_sink(controller_sink)
 
-    async def flush(self):
+    async def flush(self) -> None:
         # Make sure no command is pending
         await self.command_semaphore.acquire()
 
@@ -660,7 +660,7 @@ class Host(AbortableEventEmitter):
                 connection_handle=event.connection_handle,
                 interval_min=event.interval_min,
                 interval_max=event.interval_max,
-                latency=event.latency,
+                max_latency=event.max_latency,
                 timeout=event.timeout,
                 min_ce_length=0,
                 max_ce_length=0,
