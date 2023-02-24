@@ -1,4 +1,4 @@
-# Copyright 2021-2022 Google LLC
+# Copyright 2021-2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,10 @@ import grpc
 
 from .common import PumpedTransport, PumpedPacketSource, PumpedPacketSink
 from .emulated_bluetooth_pb2_grpc import EmulatedBluetoothServiceStub
-from .emulated_bluetooth_packets_pb2 import HCIPacket
 from .emulated_bluetooth_vhci_pb2_grpc import VhciForwardingServiceStub
+
+# pylint: disable-next=no-name-in-module
+from .emulated_bluetooth_packets_pb2 import HCIPacket
 
 
 # -----------------------------------------------------------------------------
@@ -59,15 +61,10 @@ async def open_android_emulator_transport(spec):
             return bytes([packet.type]) + packet.packet
 
         async def write(self, packet):
-            await self.hci_device.write(
-                HCIPacket(
-                    type   = packet[0],
-                    packet = packet[1:]
-                )
-            )
+            await self.hci_device.write(HCIPacket(type=packet[0], packet=packet[1:]))
 
     # Parse the parameters
-    mode        = 'host'
+    mode = 'host'
     server_host = 'localhost'
     server_port = 8554
     if spec is not None:
@@ -100,7 +97,7 @@ async def open_android_emulator_transport(spec):
     transport = PumpedTransport(
         PumpedPacketSource(hci_device.read),
         PumpedPacketSink(hci_device.write),
-        channel.close
+        channel.close,
     )
     transport.start()
 

@@ -19,8 +19,8 @@ import asyncio
 import os
 import logging
 import click
-import aioconsole
 from colors import color
+from prompt_toolkit.shortcuts import PromptSession
 
 from bumble.device import Device, Peer
 from bumble.transport import open_transport_or_link
@@ -33,30 +33,57 @@ from bumble.gatt import (
     GATT_GENERIC_ACCESS_SERVICE,
     Service,
     Characteristic,
-    CharacteristicValue
+    CharacteristicValue,
 )
 from bumble.att import (
     ATT_Error,
     ATT_INSUFFICIENT_AUTHENTICATION_ERROR,
-    ATT_INSUFFICIENT_ENCRYPTION_ERROR
+    ATT_INSUFFICIENT_ENCRYPTION_ERROR,
 )
 
 
 # -----------------------------------------------------------------------------
-class Delegate(PairingDelegate):
-    def __init__(self, mode, connection, capability_string, prompt):
-        super().__init__({
-            'keyboard':         PairingDelegate.KEYBOARD_INPUT_ONLY,
-            'display':          PairingDelegate.DISPLAY_OUTPUT_ONLY,
-            'display+keyboard': PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
-            'display+yes/no':   PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
-            'none':             PairingDelegate.NO_OUTPUT_NO_INPUT
-        }[capability_string.lower()])
+class Waiter:
+    instance = None
 
-        self.mode      = mode
-        self.peer      = Peer(connection)
+    def __init__(self):
+        self.done = asyncio.get_running_loop().create_future()
+
+    def terminate(self):
+        self.done.set_result(None)
+
+    async def wait_until_terminated(self):
+        return await self.done
+
+
+# -----------------------------------------------------------------------------
+class Delegate(PairingDelegate):
+    def __init__(self, mode, connection, capability_string, do_prompt):
+        super().__init__(
+            {
+                'keyboard': PairingDelegate.KEYBOARD_INPUT_ONLY,
+                'display': PairingDelegate.DISPLAY_OUTPUT_ONLY,
+                'display+keyboard': PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
+                'display+yes/no': PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
+                'none': PairingDelegate.NO_OUTPUT_NO_INPUT,
+            }[capability_string.lower()]
+        )
+
+        self.mode = mode
+        self.peer = Peer(connection)
         self.peer_name = None
-        self.prompt    = prompt
+        self.do_prompt = do_prompt
+
+    def print(self, message):
+        print(color(message, 'yellow'))
+
+    async def prompt(self, message):
+        # Wait a bit to allow some of the log lines to print before we prompt
+        await asyncio.sleep(1)
+
+        session = PromptSession(message)
+        response = await session.prompt_async()
+        return response.lower().strip()
 
     async def update_peer_name(self):
         if self.peer_name is not None:
@@ -71,87 +98,83 @@ class Delegate(PairingDelegate):
             self.peer_name = '[?]'
 
     async def accept(self):
-        if self.prompt:
+        if self.do_prompt:
             await self.update_peer_name()
 
-            # Wait a bit to allow some of the log lines to print before we prompt
-            await asyncio.sleep(1)
-
             # Prompt for acceptance
-            print(color('###-----------------------------------', 'yellow'))
-            print(color(f'### Pairing request from {self.peer_name}', 'yellow'))
-            print(color('###-----------------------------------', 'yellow'))
+            self.print('###-----------------------------------')
+            self.print(f'### Pairing request from {self.peer_name}')
+            self.print('###-----------------------------------')
             while True:
-                response = await aioconsole.ainput(color('>>> Accept? ', 'yellow'))
-                response = response.lower().strip()
+                response = await self.prompt('>>> Accept? ')
+
                 if response == 'yes':
                     return True
-                elif response == 'no':
+
+                if response == 'no':
                     return False
-        else:
-            # Accept silently
-            return True
+
+        # Accept silently
+        return True
 
     async def compare_numbers(self, number, digits):
         await self.update_peer_name()
 
-        # Wait a bit to allow some of the log lines to print before we prompt
-        await asyncio.sleep(1)
-
         # Prompt for a numeric comparison
-        print(color('###-----------------------------------', 'yellow'))
-        print(color(f'### Pairing with {self.peer_name}', 'yellow'))
-        print(color('###-----------------------------------', 'yellow'))
+        self.print('###-----------------------------------')
+        self.print(f'### Pairing with {self.peer_name}')
+        self.print('###-----------------------------------')
         while True:
-            response = await aioconsole.ainput(color(f'>>> Does the other device display {number:0{digits}}? ', 'yellow'))
-            response = response.lower().strip()
+            response = await self.prompt(
+                f'>>> Does the other device display {number:0{digits}}? '
+            )
+
             if response == 'yes':
                 return True
-            elif response == 'no':
+
+            if response == 'no':
                 return False
 
     async def get_number(self):
         await self.update_peer_name()
 
-        # Wait a bit to allow some of the log lines to print before we prompt
-        await asyncio.sleep(1)
-
         # Prompt for a PIN
         while True:
             try:
-                print(color('###-----------------------------------', 'yellow'))
-                print(color(f'### Pairing with {self.peer_name}', 'yellow'))
-                print(color('###-----------------------------------', 'yellow'))
-                return int(await aioconsole.ainput(color('>>> Enter PIN: ', 'yellow')))
+                self.print('###-----------------------------------')
+                self.print(f'### Pairing with {self.peer_name}')
+                self.print('###-----------------------------------')
+                return int(await self.prompt('>>> Enter PIN: '))
             except ValueError:
                 pass
 
     async def display_number(self, number, digits):
         await self.update_peer_name()
 
-        # Wait a bit to allow some of the log lines to print before we prompt
-        await asyncio.sleep(1)
-
         # Display a PIN code
-        print(color('###-----------------------------------', 'yellow'))
-        print(color(f'### Pairing with {self.peer_name}', 'yellow'))
-        print(color(f'### PIN: {number:0{digits}}', 'yellow'))
-        print(color('###-----------------------------------', 'yellow'))
+        self.print('###-----------------------------------')
+        self.print(f'### Pairing with {self.peer_name}')
+        self.print(f'### PIN: {number:0{digits}}')
+        self.print('###-----------------------------------')
 
 
 # -----------------------------------------------------------------------------
 async def get_peer_name(peer, mode):
     if mode == 'classic':
         return await peer.request_name()
-    else:
-        # Try to get the peer name from GATT
-        services = await peer.discover_service(GATT_GENERIC_ACCESS_SERVICE)
-        if not services:
-            return None
 
-        values = await peer.read_characteristics_by_uuid(GATT_DEVICE_NAME_CHARACTERISTIC, services[0])
-        if values:
-            return values[0].decode('utf-8')
+    # Try to get the peer name from GATT
+    services = await peer.discover_service(GATT_GENERIC_ACCESS_SERVICE)
+    if not services:
+        return None
+
+    values = await peer.read_characteristics_by_uuid(
+        GATT_DEVICE_NAME_CHARACTERISTIC, services[0]
+    )
+    if values:
+        return values[0].decode('utf-8')
+
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -164,12 +187,12 @@ def read_with_error(connection):
 
     if AUTHENTICATION_ERROR_RETURNED[0]:
         return bytes([1])
-    else:
-        AUTHENTICATION_ERROR_RETURNED[0] = True
-        raise ATT_Error(ATT_INSUFFICIENT_AUTHENTICATION_ERROR)
+
+    AUTHENTICATION_ERROR_RETURNED[0] = True
+    raise ATT_Error(ATT_INSUFFICIENT_AUTHENTICATION_ERROR)
 
 
-def write_with_error(connection, value):
+def write_with_error(connection, _value):
     if not connection.is_encrypted:
         raise ATT_Error(ATT_INSUFFICIENT_ENCRYPTION_ERROR)
 
@@ -183,14 +206,14 @@ def on_connection(connection, request):
     print(color(f'<<< Connection: {connection}', 'green'))
 
     # Listen for pairing events
-    connection.on('pairing_start',   on_pairing_start)
-    connection.on('pairing',         on_pairing)
+    connection.on('pairing_start', on_pairing_start)
+    connection.on('pairing', on_pairing)
     connection.on('pairing_failure', on_pairing_failure)
 
     # Listen for encryption changes
     connection.on(
         'connection_encryption_change',
-        lambda: on_connection_encryption_change(connection)
+        lambda: on_connection_encryption_change(connection),
     )
 
     # Request pairing if needed
@@ -202,7 +225,12 @@ def on_connection(connection, request):
 # -----------------------------------------------------------------------------
 def on_connection_encryption_change(connection):
     print(color('@@@-----------------------------------', 'blue'))
-    print(color(f'@@@ Connection is {"" if connection.is_encrypted else "not"}encrypted', 'blue'))
+    print(
+        color(
+            f'@@@ Connection is {"" if connection.is_encrypted else "not"}encrypted',
+            'blue',
+        )
+    )
     print(color('@@@-----------------------------------', 'blue'))
 
 
@@ -219,6 +247,7 @@ def on_pairing(keys):
     print(color('*** Paired!', 'cyan'))
     keys.print(prefix=color('*** ', 'cyan'))
     print(color('***-----------------------------------', 'cyan'))
+    Waiter.instance.terminate()
 
 
 # -----------------------------------------------------------------------------
@@ -226,6 +255,7 @@ def on_pairing_failure(reason):
     print(color('***-----------------------------------', 'red'))
     print(color(f'*** Pairing failed: {smp_error_name(reason)}', 'red'))
     print(color('***-----------------------------------', 'red'))
+    Waiter.instance.terminate()
 
 
 # -----------------------------------------------------------------------------
@@ -241,8 +271,10 @@ async def pair(
     keystore_file,
     device_config,
     hci_transport,
-    address_or_name
+    address_or_name,
 ):
+    Waiter.instance = Waiter()
+
     print('<<< connecting to HCI...')
     async with await open_transport_or_link(hci_transport) as (hci_source, hci_sink):
         print('<<< connected')
@@ -272,9 +304,11 @@ async def pair(
                             '552957FB-CF1F-4A31-9535-E78847E1A714',
                             Characteristic.READ | Characteristic.WRITE,
                             Characteristic.READABLE | Characteristic.WRITEABLE,
-                            CharacteristicValue(read=read_with_error, write=write_with_error)
+                            CharacteristicValue(
+                                read=read_with_error, write=write_with_error
+                            ),
                         )
-                    ]
+                    ],
                 )
             )
 
@@ -288,10 +322,7 @@ async def pair(
 
         # Set up a pairing config factory
         device.pairing_config_factory = lambda connection: PairingConfig(
-            sc,
-            mitm,
-            bond,
-            Delegate(mode, connection, io, prompt)
+            sc, mitm, bond, Delegate(mode, connection, io, prompt)
         )
 
         # Connect to a peer or wait for a connection
@@ -314,26 +345,97 @@ async def pair(
             # Advertise so that peers can find us and connect
             await device.start_advertising(auto_restart=True)
 
-        await hci_source.wait_for_termination()
+        # Run until the user asks to exit
+        await Waiter.instance.wait_until_terminated()
+
+
+# -----------------------------------------------------------------------------
+class LogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+
+    def emit(self, record):
+        message = self.format(record)
+        print(message)
 
 
 # -----------------------------------------------------------------------------
 @click.command()
-@click.option('--mode', type=click.Choice(['le', 'classic']), default='le', show_default=True)
-@click.option('--sc', type=bool, default=True, help='Use the Secure Connections protocol', show_default=True)
-@click.option('--mitm', type=bool, default=True, help='Request MITM protection', show_default=True)
-@click.option('--bond', type=bool, default=True, help='Enable bonding', show_default=True)
-@click.option('--io', type=click.Choice(['keyboard', 'display', 'display+keyboard', 'display+yes/no', 'none']), default='display+keyboard', show_default=True)
+@click.option(
+    '--mode', type=click.Choice(['le', 'classic']), default='le', show_default=True
+)
+@click.option(
+    '--sc',
+    type=bool,
+    default=True,
+    help='Use the Secure Connections protocol',
+    show_default=True,
+)
+@click.option(
+    '--mitm', type=bool, default=True, help='Request MITM protection', show_default=True
+)
+@click.option(
+    '--bond', type=bool, default=True, help='Enable bonding', show_default=True
+)
+@click.option(
+    '--io',
+    type=click.Choice(
+        ['keyboard', 'display', 'display+keyboard', 'display+yes/no', 'none']
+    ),
+    default='display+keyboard',
+    show_default=True,
+)
 @click.option('--prompt', is_flag=True, help='Prompt to accept/reject pairing request')
-@click.option('--request', is_flag=True, help='Request that the connecting peer initiate pairing')
+@click.option(
+    '--request', is_flag=True, help='Request that the connecting peer initiate pairing'
+)
 @click.option('--print-keys', is_flag=True, help='Print the bond keys before pairing')
-@click.option('--keystore-file', help='File in which to store the pairing keys')
+@click.option(
+    '--keystore-file',
+    metavar='<filename>',
+    help='File in which to store the pairing keys',
+)
 @click.argument('device-config')
 @click.argument('hci_transport')
 @click.argument('address-or-name', required=False)
-def main(mode, sc, mitm, bond, io, prompt, request, print_keys, keystore_file, device_config, hci_transport, address_or_name):
-    logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'INFO').upper())
-    asyncio.run(pair(mode, sc, mitm, bond, io, prompt, request, print_keys, keystore_file, device_config, hci_transport, address_or_name))
+def main(
+    mode,
+    sc,
+    mitm,
+    bond,
+    io,
+    prompt,
+    request,
+    print_keys,
+    keystore_file,
+    device_config,
+    hci_transport,
+    address_or_name,
+):
+    # Setup logging
+    log_handler = LogHandler()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
+    root_logger.setLevel(os.environ.get('BUMBLE_LOGLEVEL', 'INFO').upper())
+
+    # Pair
+    asyncio.run(
+        pair(
+            mode,
+            sc,
+            mitm,
+            bond,
+            io,
+            prompt,
+            request,
+            print_keys,
+            keystore_file,
+            device_config,
+            hci_transport,
+            address_or_name,
+        )
+    )
 
 
 # -----------------------------------------------------------------------------

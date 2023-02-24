@@ -24,6 +24,7 @@ import asyncio
 import logging
 import os
 import json
+from typing import Optional
 from colors import color
 
 from .hci import Address
@@ -39,10 +40,10 @@ logger = logging.getLogger(__name__)
 class PairingKeys:
     class Key:
         def __init__(self, value, authenticated=False, ediv=None, rand=None):
-            self.value         = value
+            self.value = value
             self.authenticated = authenticated
-            self.ediv          = ediv
-            self.rand          = rand
+            self.ediv = ediv
+            self.rand = rand
 
         @classmethod
         def from_dict(cls, key_dict):
@@ -65,31 +66,33 @@ class PairingKeys:
             return key_dict
 
     def __init__(self):
-        self.address_type   = None
-        self.ltk            = None
-        self.ltk_central    = None
+        self.address_type = None
+        self.ltk = None
+        self.ltk_central = None
         self.ltk_peripheral = None
-        self.irk            = None
-        self.csrk           = None
-        self.link_key       = None  # Classic
+        self.irk = None
+        self.csrk = None
+        self.link_key = None  # Classic
 
     @staticmethod
     def key_from_dict(keys_dict, key_name):
         key_dict = keys_dict.get(key_name)
-        if key_dict is not None:
-            return PairingKeys.Key.from_dict(key_dict)
+        if key_dict is None:
+            return None
+
+        return PairingKeys.Key.from_dict(key_dict)
 
     @staticmethod
     def from_dict(keys_dict):
         keys = PairingKeys()
 
-        keys.address_type   = keys_dict.get('address_type')
-        keys.ltk            = PairingKeys.key_from_dict(keys_dict, 'ltk')
-        keys.ltk_central    = PairingKeys.key_from_dict(keys_dict, 'ltk_central')
+        keys.address_type = keys_dict.get('address_type')
+        keys.ltk = PairingKeys.key_from_dict(keys_dict, 'ltk')
+        keys.ltk_central = PairingKeys.key_from_dict(keys_dict, 'ltk_central')
         keys.ltk_peripheral = PairingKeys.key_from_dict(keys_dict, 'ltk_peripheral')
-        keys.irk            = PairingKeys.key_from_dict(keys_dict, 'irk')
-        keys.csrk           = PairingKeys.key_from_dict(keys_dict, 'csrk')
-        keys.link_key       = PairingKeys.key_from_dict(keys_dict, 'link_key')
+        keys.irk = PairingKeys.key_from_dict(keys_dict, 'irk')
+        keys.csrk = PairingKeys.key_from_dict(keys_dict, 'csrk')
+        keys.link_key = PairingKeys.key_from_dict(keys_dict, 'link_key')
 
         return keys
 
@@ -121,13 +124,13 @@ class PairingKeys:
 
     def print(self, prefix=''):
         keys_dict = self.to_dict()
-        for (property, value) in keys_dict.items():
-            if type(value) is dict:
-                print(f'{prefix}{color(property, "cyan")}:')
+        for (container_property, value) in keys_dict.items():
+            if isinstance(value, dict):
+                print(f'{prefix}{color(container_property, "cyan")}:')
                 for (key_property, key_value) in value.items():
                     print(f'{prefix}  {color(key_property, "green")}: {key_value}')
             else:
-                print(f'{prefix}{color(property, "cyan")}: {value}')
+                print(f'{prefix}{color(container_property, "cyan")}: {value}')
 
 
 # -----------------------------------------------------------------------------
@@ -138,7 +141,7 @@ class KeyStore:
     async def update(self, name, keys):
         pass
 
-    async def get(self, name):
+    async def get(self, _name):
         return PairingKeys()
 
     async def get_all(self):
@@ -166,7 +169,7 @@ class KeyStore:
         separator = ''
         for (name, keys) in entries:
             print(separator + prefix + color(name, 'yellow'))
-            keys.print(prefix = prefix + '  ')
+            keys.print(prefix=prefix + '  ')
             separator = '\n'
 
     @staticmethod
@@ -183,9 +186,9 @@ class KeyStore:
 
 # -----------------------------------------------------------------------------
 class JsonKeyStore(KeyStore):
-    APP_NAME          = 'Bumble'
-    APP_AUTHOR        = 'Google'
-    KEYS_DIR          = 'Pairing'
+    APP_NAME = 'Bumble'
+    APP_AUTHOR = 'Google'
+    KEYS_DIR = 'Pairing'
     DEFAULT_NAMESPACE = '__DEFAULT__'
 
     def __init__(self, namespace, filename=None):
@@ -193,10 +196,13 @@ class JsonKeyStore(KeyStore):
 
         if filename is None:
             # Use a default for the current user
+
+            # Import here because this may not exist on all platforms
+            # pylint: disable=import-outside-toplevel
             import appdirs
+
             self.directory_name = os.path.join(
-                appdirs.user_data_dir(self.APP_NAME, self.APP_AUTHOR),
-                self.KEYS_DIR
+                appdirs.user_data_dir(self.APP_NAME, self.APP_AUTHOR), self.KEYS_DIR
             )
             json_filename = f'{self.namespace}.json'.lower().replace(':', '-')
             self.filename = os.path.join(self.directory_name, json_filename)
@@ -211,7 +217,7 @@ class JsonKeyStore(KeyStore):
         params = device_config.keystore.split(':', 1)[1:]
         namespace = str(device_config.address)
         if params:
-            filename = params[1]
+            filename = params[0]
         else:
             filename = None
 
@@ -219,7 +225,7 @@ class JsonKeyStore(KeyStore):
 
     async def load(self):
         try:
-            with open(self.filename, 'r') as json_file:
+            with open(self.filename, 'r', encoding='utf-8') as json_file:
                 return json.load(json_file)
         except FileNotFoundError:
             return {}
@@ -231,13 +237,13 @@ class JsonKeyStore(KeyStore):
 
         # Save to a temporary file
         temp_filename = self.filename + '.tmp'
-        with open(temp_filename, 'w') as output:
+        with open(temp_filename, 'w', encoding='utf-8') as output:
             json.dump(db, output, sort_keys=True, indent=4)
 
         # Atomically replace the previous file
         os.rename(temp_filename, self.filename)
 
-    async def delete(self, name):
+    async def delete(self, name: str) -> None:
         db = await self.load()
 
         namespace = db.get(self.namespace)
@@ -262,7 +268,9 @@ class JsonKeyStore(KeyStore):
         if namespace is None:
             return []
 
-        return [(name, PairingKeys.from_dict(keys)) for (name, keys) in namespace.items()]
+        return [
+            (name, PairingKeys.from_dict(keys)) for (name, keys) in namespace.items()
+        ]
 
     async def delete_all(self):
         db = await self.load()
@@ -271,7 +279,7 @@ class JsonKeyStore(KeyStore):
 
         await self.save(db)
 
-    async def get(self, name):
+    async def get(self, name: str) -> Optional[PairingKeys]:
         db = await self.load()
 
         namespace = db.get(self.namespace)

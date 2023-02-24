@@ -29,18 +29,6 @@ from collections import OrderedDict
 import click
 import colors
 
-from bumble.core import UUID, AdvertisingData, TimeoutError, BT_LE_TRANSPORT
-from bumble.device import ConnectionParametersPreferences, Device, Connection, Peer
-from bumble.utils import AsyncRunner
-from bumble.transport import open_transport_or_link
-from bumble.gatt import Characteristic
-from bumble.hci import (
-    HCI_Constant,
-    HCI_LE_1M_PHY,
-    HCI_LE_2M_PHY,
-    HCI_LE_CODED_PHY,
-)
-
 from prompt_toolkit import Application
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import Completer, Completion, NestedCompleter
@@ -60,36 +48,44 @@ from prompt_toolkit.layout import (
     FormattedTextControl,
     FloatContainer,
     ConditionalContainer,
-    Dimension
+    Dimension,
 )
+
+from bumble import __version__
+import bumble.core
+from bumble.core import UUID, AdvertisingData, BT_LE_TRANSPORT
+from bumble.device import ConnectionParametersPreferences, Device, Connection, Peer
+from bumble.utils import AsyncRunner
+from bumble.transport import open_transport_or_link
+from bumble.gatt import Characteristic, Service, CharacteristicDeclaration, Descriptor
+from bumble.hci import (
+    HCI_Constant,
+    HCI_LE_1M_PHY,
+    HCI_LE_2M_PHY,
+    HCI_LE_CODED_PHY,
+)
+
 
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-BUMBLE_USER_DIR            = os.path.expanduser('~/.bumble')
-DEFAULT_RSSI_BAR_WIDTH     = 20
+BUMBLE_USER_DIR = os.path.expanduser('~/.bumble')
+DEFAULT_RSSI_BAR_WIDTH = 20
 DEFAULT_CONNECTION_TIMEOUT = 30.0
-DISPLAY_MIN_RSSI           = -100
-DISPLAY_MAX_RSSI           = -30
-RSSI_MONITOR_INTERVAL      = 5.0  # Seconds
-
-
-# -----------------------------------------------------------------------------
-# Globals
-# -----------------------------------------------------------------------------
-App = None
+DISPLAY_MIN_RSSI = -100
+DISPLAY_MAX_RSSI = -30
+RSSI_MONITOR_INTERVAL = 5.0  # Seconds
 
 
 # -----------------------------------------------------------------------------
 # Utils
 # -----------------------------------------------------------------------------
 
+
 def le_phy_name(phy_id):
-    return {
-        HCI_LE_1M_PHY:    '1M',
-        HCI_LE_2M_PHY:    '2M',
-        HCI_LE_CODED_PHY: 'CODED'
-    }.get(phy_id, HCI_Constant.le_phy_name(phy_id))
+    return {HCI_LE_1M_PHY: '1M', HCI_LE_2M_PHY: '2M', HCI_LE_CODED_PHY: 'CODED'}.get(
+        phy_id, HCI_Constant.le_phy_name(phy_id)
+    )
 
 
 def rssi_bar(rssi):
@@ -104,19 +100,19 @@ def rssi_bar(rssi):
 def parse_phys(phys):
     if phys.lower() == '*':
         return None
-    else:
-        phy_list = []
-        elements = phys.lower().split(',')
-        for element in elements:
-            if element == '1m':
-                phy_list.append(HCI_LE_1M_PHY)
-            elif element == '2m':
-                phy_list.append(HCI_LE_2M_PHY)
-            elif element == 'coded':
-                phy_list.append(HCI_LE_CODED_PHY)
-            else:
-                raise ValueError('invalid PHY name')
-        return phy_list
+
+    phy_list = []
+    elements = phys.lower().split(',')
+    for element in elements:
+        if element == '1m':
+            phy_list.append(HCI_LE_1M_PHY)
+        elif element == '2m':
+            phy_list.append(HCI_LE_2M_PHY)
+        elif element == 'coded':
+            phy_list.append(HCI_LE_CODED_PHY)
+        else:
+            raise ValueError('invalid PHY name')
+    return phy_list
 
 
 # -----------------------------------------------------------------------------
@@ -124,20 +120,22 @@ def parse_phys(phys):
 # -----------------------------------------------------------------------------
 class ConsoleApp:
     def __init__(self):
-        self.known_addresses  = set()
+        self.known_addresses = set()
         self.known_attributes = []
-        self.device           = None
-        self.connected_peer   = None
-        self.top_tab          = 'device'
-        self.monitor_rssi     = False
-        self.connection_rssi  = None
+        self.device = None
+        self.connected_peer = None
+        self.top_tab = 'device'
+        self.monitor_rssi = False
+        self.connection_rssi = None
 
-        style = Style.from_dict({
-            'output-field': 'bg:#000044 #ffffff',
-            'input-field':  'bg:#000000 #ffffff',
-            'line':         '#004400',
-            'error':        'fg:ansired'
-        })
+        style = Style.from_dict(
+            {
+                'output-field': 'bg:#000044 #ffffff',
+                'input-field': 'bg:#000000 #ffffff',
+                'line': '#004400',
+                'error': 'fg:ansired',
+            }
+        )
 
         class LiveCompleter(Completer):
             def __init__(self, words):
@@ -149,52 +147,37 @@ class ConsoleApp:
                     yield Completion(word, start_position=-len(prefix))
 
         def make_completer():
-            return NestedCompleter.from_nested_dict({
-                'scan': {
-                    'on': None,
-                    'off': None,
-                    'clear': None
-                },
-                'advertise': {
-                    'on': None,
-                    'off': None
-                },
-                'rssi': {
-                    'on': None,
-                    'off': None
-                },
-                'show': {
-                    'scan': None,
-                    'services': None,
-                    'attributes': None,
-                    'log': None,
-                    'device': None
-                },
-                'filter': {
-                    'address': None,
-                },
-                'connect': LiveCompleter(self.known_addresses),
-                'update-parameters': None,
-                'encrypt': None,
-                'disconnect': None,
-                'discover': {
-                    'services': None,
-                    'attributes': None
-                },
-                'request-mtu': None,
-                'read': LiveCompleter(self.known_attributes),
-                'write': LiveCompleter(self.known_attributes),
-                'subscribe': LiveCompleter(self.known_attributes),
-                'unsubscribe': LiveCompleter(self.known_attributes),
-                'set-phy': {
-                    '1m': None,
-                    '2m': None,
-                    'coded': None
-                },
-                'set-default-phy': None,
-                'quit': None,
-                'exit': None
-            })
+            return NestedCompleter.from_nested_dict(
+                {
+                    'scan': {'on': None, 'off': None, 'clear': None},
+                    'advertise': {'on': None, 'off': None},
+                    'rssi': {'on': None, 'off': None},
+                    'show': {
+                        'scan': None,
+                        'log': None,
+                        'device': None,
+                        'local-services': None,
+                        'remote-services': None,
+                    },
+                    'filter': {
+                        'address': None,
+                    },
+                    'connect': LiveCompleter(self.known_addresses),
+                    'update-parameters': None,
+                    'encrypt': None,
+                    'disconnect': None,
+                    'discover': {'services': None, 'attributes': None},
+                    'request-mtu': None,
+                    'read': LiveCompleter(self.known_attributes),
+                    'write': LiveCompleter(self.known_attributes),
+                    'subscribe': LiveCompleter(self.known_attributes),
+                    'unsubscribe': LiveCompleter(self.known_attributes),
+                    'set-phy': {'1m': None, '2m': None, 'coded': None},
+                    'set-default-phy': None,
+                    'quit': None,
+                    'exit': None,
+                }
+            )
 
         self.input_field = TextArea(
             height=1,
@@ -202,49 +185,55 @@ class ConsoleApp:
             multiline=False,
             wrap_lines=False,
             completer=make_completer(),
-            history=FileHistory(os.path.join(BUMBLE_USER_DIR, 'history'))
+            history=FileHistory(os.path.join(BUMBLE_USER_DIR, 'history')),
         )
 
         self.input_field.accept_handler = self.accept_input
 
         self.output_height = Dimension(min=7, max=7, weight=1)
         self.output_lines = []
-        self.output = FormattedTextControl(get_cursor_position=lambda: Point(0, max(0, len(self.output_lines) - 1)))
+        self.output = FormattedTextControl(
+            get_cursor_position=lambda: Point(0, max(0, len(self.output_lines) - 1))
+        )
         self.output_max_lines = 20
         self.scan_results_text = FormattedTextControl()
-        self.services_text = FormattedTextControl()
-        self.attributes_text = FormattedTextControl()
+        self.local_services_text = FormattedTextControl()
+        self.remote_services_text = FormattedTextControl()
         self.device_text = FormattedTextControl()
-        self.log_text = FormattedTextControl(get_cursor_position=lambda: Point(0, max(0, len(self.log_lines) - 1)))
+        self.log_text = FormattedTextControl(
+            get_cursor_position=lambda: Point(0, max(0, len(self.log_lines) - 1))
+        )
         self.log_height = Dimension(min=7, weight=4)
         self.log_max_lines = 100
         self.log_lines = []
 
-        container = HSplit([
-            ConditionalContainer(
-                Frame(Window(self.scan_results_text), title='Scan Results'),
-                filter=Condition(lambda: self.top_tab == 'scan')
-            ),
-            ConditionalContainer(
-                Frame(Window(self.services_text), title='Services'),
-                filter=Condition(lambda: self.top_tab == 'services')
-            ),
-            ConditionalContainer(
-                Frame(Window(self.attributes_text), title='Attributes'),
-                filter=Condition(lambda: self.top_tab == 'attributes')
-            ),
-            ConditionalContainer(
-                Frame(Window(self.log_text, height=self.log_height), title='Log'),
-                filter=Condition(lambda: self.top_tab == 'log')
-            ),
-            ConditionalContainer(
-                Frame(Window(self.device_text), title='Device'),
-                filter=Condition(lambda: self.top_tab == 'device')
-            ),
-            Frame(Window(self.output, height=self.output_height)),
-            FormattedTextToolbar(text=self.get_status_bar_text, style='reverse'),
-            self.input_field
-        ])
+        container = HSplit(
+            [
+                ConditionalContainer(
+                    Frame(Window(self.scan_results_text), title='Scan Results'),
+                    filter=Condition(lambda: self.top_tab == 'scan'),
+                ),
+                ConditionalContainer(
+                    Frame(Window(self.local_services_text), title='Local Services'),
+                    filter=Condition(lambda: self.top_tab == 'local-services'),
+                ),
+                ConditionalContainer(
+                    Frame(Window(self.remote_services_text), title='Remove Services'),
+                    filter=Condition(lambda: self.top_tab == 'remote-services'),
+                ),
+                ConditionalContainer(
+                    Frame(Window(self.log_text, height=self.log_height), title='Log'),
+                    filter=Condition(lambda: self.top_tab == 'log'),
+                ),
+                ConditionalContainer(
+                    Frame(Window(self.device_text), title='Device'),
+                    filter=Condition(lambda: self.top_tab == 'device'),
+                ),
+                Frame(Window(self.output, height=self.output_height)),
+                FormattedTextToolbar(text=self.get_status_bar_text, style='reverse'),
+                self.input_field,
+            ]
+        )
 
         container = FloatContainer(
             container,
@@ -259,17 +248,16 @@ class ConsoleApp:
 
         layout = Layout(container, focused_element=self.input_field)
 
-        kb = KeyBindings()
-        @kb.add("c-c")
-        @kb.add("c-q")
+        key_bindings = KeyBindings()
+
+        @key_bindings.add("c-c")
+        @key_bindings.add("c-q")
         def _(event):
             event.app.exit()
 
+        # pylint: disable=invalid-name
         self.ui = Application(
-            layout=layout,
-            style=style,
-            key_bindings=kb,
-            full_screen=True
+            layout=layout, style=style, key_bindings=key_bindings, full_screen=True
         )
 
     async def run_async(self, device_config, transport):
@@ -277,16 +265,23 @@ class ConsoleApp:
 
         async with await open_transport_or_link(transport) as (hci_source, hci_sink):
             if device_config:
-                self.device = Device.from_config_file_with_hci(device_config, hci_source, hci_sink)
+                self.device = Device.from_config_file_with_hci(
+                    device_config, hci_source, hci_sink
+                )
             else:
-                random_address = f"{random.randint(192,255):02X}"  # address is static random
-                for c in random.sample(range(255), 5):
-                    random_address += f":{c:02X}"
+                random_address = (
+                    f"{random.randint(192,255):02X}"  # address is static random
+                )
+                for random_byte in random.sample(range(255), 5):
+                    random_address += f":{random_byte:02X}"
                 self.append_to_log(f"Setting random address: {random_address}")
-                self.device = Device.with_hci('Bumble', random_address, hci_source, hci_sink)
+                self.device = Device.with_hci(
+                    'Bumble', random_address, hci_source, hci_sink
+                )
             self.device.listener = DeviceListener(self)
             await self.device.power_on()
             self.show_device(self.device)
+            self.show_local_services(self.device.gatt_server.attributes)
 
             # Run the UI
             await self.ui.run_async()
@@ -296,7 +291,7 @@ class ConsoleApp:
     def add_known_address(self, address):
         self.known_addresses.add(address)
 
-    def accept_input(self, buff):
+    def accept_input(self, _):
         if len(self.input_field.text) == 0:
             return
         self.append_to_output([('', '* '), ('ansicyan', self.input_field.text)], False)
@@ -315,13 +310,27 @@ class ConsoleApp:
                 connection_state = 'CONNECTING'
             elif self.connected_peer:
                 connection = self.connected_peer.connection
-                connection_parameters = f'{connection.parameters.connection_interval}/{connection.parameters.peripheral_latency}/{connection.parameters.supervision_timeout}'
+                connection_parameters = (
+                    f'{connection.parameters.connection_interval}/'
+                    f'{connection.parameters.peripheral_latency}/'
+                    f'{connection.parameters.supervision_timeout}'
+                )
                 if connection.transport == BT_LE_TRANSPORT:
-                    phy_state = f' RX={le_phy_name(connection.phy.rx_phy)}/TX={le_phy_name(connection.phy.tx_phy)}'
+                    phy_state = (
+                        f' RX={le_phy_name(connection.phy.rx_phy)}/'
+                        f'TX={le_phy_name(connection.phy.tx_phy)}'
+                    )
                 else:
                     phy_state = ''
-                connection_state = f'{connection.peer_address} {connection_parameters} {connection.data_length}{phy_state}'
-                encryption_state = 'ENCRYPTED' if connection.is_encrypted else 'NOT ENCRYPTED'
+                connection_state = (
+                    f'{connection.peer_address} '
+                    f'{connection_parameters} '
+                    f'{connection.data_length}'
+                    f'{phy_state}'
+                )
+                encryption_state = (
+                    'ENCRYPTED' if connection.is_encrypted else 'NOT ENCRYPTED'
+                )
                 att_mtu = f'ATT_MTU: {connection.att_mtu}'
 
         return [
@@ -333,10 +342,10 @@ class ConsoleApp:
             ('', '  '),
             ('ansicyan', f' {att_mtu} '),
             ('', '  '),
-            ('ansiyellow', f' {rssi} ')
+            ('ansiyellow', f' {rssi} '),
         ]
 
-    def show_error(self, title, details = None):
+    def show_error(self, title, details=None):
         appended = [('class:error', title)]
         if details:
             appended.append(('', f' {details}'))
@@ -351,35 +360,45 @@ class ConsoleApp:
         self.scan_results_text.text = ANSI('\n'.join(lines))
         self.ui.invalidate()
 
-    def show_services(self, services):
+    def show_remote_services(self, services):
         lines = []
         del self.known_attributes[:]
         for service in services:
-            lines.append(('ansicyan', str(service) + '\n'))
+            lines.append(("ansicyan", f"{service}\n"))
 
             for characteristic in service.characteristics:
-                lines.append(('ansimagenta', '  ' + str(characteristic) + '\n'))
-                self.known_attributes.append(f'{service.uuid.to_hex_str()}.{characteristic.uuid.to_hex_str()}')
+                lines.append(('ansimagenta', f'  {characteristic} + \n'))
+                self.known_attributes.append(
+                    f'{service.uuid.to_hex_str()}.{characteristic.uuid.to_hex_str()}'
+                )
                 self.known_attributes.append(f'*.{characteristic.uuid.to_hex_str()}')
                 self.known_attributes.append(f'#{characteristic.handle:X}')
                 for descriptor in characteristic.descriptors:
-                    lines.append(('ansigreen', '    ' + str(descriptor) + '\n'))
+                    lines.append(("ansigreen", f"    {descriptor}\n"))
 
-        self.services_text.text = lines
+        self.remote_services_text.text = lines
         self.ui.invalidate()
 
-    def show_attributes(self, attributes):
+    def show_local_services(self, attributes):
         lines = []
-
         for attribute in attributes:
-            lines.append(('ansicyan', f'{attribute}\n'))
+            if isinstance(attribute, Service):
+                lines.append(("ansicyan", f"{attribute}\n"))
+            elif isinstance(attribute, (Characteristic, CharacteristicDeclaration)):
+                lines.append(("ansimagenta", f"  {attribute}\n"))
+            elif isinstance(attribute, Descriptor):
+                lines.append(("ansigreen", f"    {attribute}\n"))
+            else:
+                lines.append(("ansiyellow", f"{attribute}\n"))
 
-        self.attributes_text.text = lines
+        self.local_services_text.text = lines
         self.ui.invalidate()
 
     def show_device(self, device):
         lines = []
 
+        lines.append(('ansicyan', 'Bumble Version:       '))
+        lines.append(('', f'{__version__}\n'))
         lines.append(('ansicyan', 'Name:                 '))
         lines.append(('', f'{device.name}\n'))
         lines.append(('ansicyan', 'Public Address:       '))
@@ -407,7 +426,10 @@ class ConsoleApp:
         advertising_interval = (
             device.advertising_interval_min
             if device.advertising_interval_min == device.advertising_interval_max
-            else f"{device.advertising_interval_min} to {device.advertising_interval_max}"
+            else (
+                f'{device.advertising_interval_min} to '
+                f'{device.advertising_interval_max}'
+            )
         )
         lines.append(('ansicyan', 'Advertising Interval: '))
         lines.append(('', f'{advertising_interval}\n'))
@@ -416,9 +438,9 @@ class ConsoleApp:
         self.ui.invalidate()
 
     def append_to_output(self, line, invalidate=True):
-        if type(line) is str:
+        if isinstance(line, str):
             line = [('', line)]
-        self.output_lines = self.output_lines[-self.output_max_lines:]
+        self.output_lines = self.output_lines[-self.output_max_lines :]
         self.output_lines.append(line)
         formatted_text = []
         for line in self.output_lines:
@@ -430,7 +452,7 @@ class ConsoleApp:
 
     def append_to_log(self, lines, invalidate=True):
         self.log_lines.extend(lines.split('\n'))
-        self.log_lines = self.log_lines[-self.log_max_lines:]
+        self.log_lines = self.log_lines[-self.log_max_lines :]
         self.log_text.text = ANSI('\n'.join(self.log_lines))
         if invalidate:
             self.ui.invalidate()
@@ -454,7 +476,7 @@ class ConsoleApp:
                 await self.connected_peer.discover_descriptors(characteristic)
         self.append_to_output('discovery completed')
 
-        self.show_services(self.connected_peer.services)
+        self.show_remote_services(self.connected_peer.services)
 
     async def discover_attributes(self):
         if not self.connected_peer:
@@ -486,6 +508,8 @@ class ConsoleApp:
                         if characteristic.handle == attribute_handle:
                             return characteristic
 
+        return None
+
     async def rssi_monitor_loop(self):
         while True:
             if self.monitor_rssi and self.connected_peer:
@@ -515,7 +539,11 @@ class ConsoleApp:
         elif params[0] == 'on':
             if len(params) == 2:
                 if not params[1].startswith("filter="):
-                    self.show_error('invalid syntax', 'expected address filter=key1:value1,key2:value,... available filters: address')
+                    self.show_error(
+                        'invalid syntax',
+                        'expected address filter=key1:value1,key2:value,... '
+                        'available filters: address',
+                    )
                 # regex: (word):(any char except ,)
                 matches = re.findall(r"(\w+):([^,]+)", params[1])
                 for match in matches:
@@ -557,8 +585,7 @@ class ConsoleApp:
             connection_parameters_preferences = None
         else:
             connection_parameters_preferences = {
-                phy: ConnectionParametersPreferences()
-                for phy in phys
+                phy: ConnectionParametersPreferences() for phy in phys
             }
 
         if self.device.is_scanning:
@@ -570,13 +597,13 @@ class ConsoleApp:
             await self.device.connect(
                 params[0],
                 connection_parameters_preferences=connection_parameters_preferences,
-                timeout=DEFAULT_CONNECTION_TIMEOUT
+                timeout=DEFAULT_CONNECTION_TIMEOUT,
             )
             self.top_tab = 'services'
-        except TimeoutError:
+        except bumble.core.TimeoutError:
             self.show_error('connection timed out')
 
-    async def do_disconnect(self, params):
+    async def do_disconnect(self, _):
         if self.device.is_le_connecting:
             await self.device.cancel_connection()
         else:
@@ -588,7 +615,11 @@ class ConsoleApp:
 
     async def do_update_parameters(self, params):
         if len(params) != 1 or len(params[0].split('/')) != 3:
-            self.show_error('invalid syntax', 'expected update-parameters <interval-min>-<interval-max>/<max-latency>/<supervision>')
+            self.show_error(
+                'invalid syntax',
+                'expected update-parameters <interval-min>-<interval-max>'
+                '/<max-latency>/<supervision>',
+            )
             return
 
         if not self.connected_peer:
@@ -596,17 +627,19 @@ class ConsoleApp:
             return
 
         connection_intervals, max_latency, supervision_timeout = params[0].split('/')
-        connection_interval_min, connection_interval_max = [int(x) for x in connection_intervals.split('-')]
+        connection_interval_min, connection_interval_max = [
+            int(x) for x in connection_intervals.split('-')
+        ]
         max_latency = int(max_latency)
         supervision_timeout = int(supervision_timeout)
         await self.connected_peer.connection.update_parameters(
             connection_interval_min,
             connection_interval_max,
             max_latency,
-            supervision_timeout
+            supervision_timeout,
         )
 
-    async def do_encrypt(self, params):
+    async def do_encrypt(self, _):
         if not self.connected_peer:
             self.show_error('not connected')
             return
@@ -629,17 +662,26 @@ class ConsoleApp:
 
     async def do_show(self, params):
         if params:
-            if params[0] in {'scan', 'services', 'attributes', 'log', 'device'}:
+            if params[0] in {
+                'scan',
+                'log',
+                'device',
+                'local-services',
+                'remote-services',
+            }:
                 self.top_tab = params[0]
                 self.ui.invalidate()
 
-    async def do_get_phy(self, params):
+    async def do_get_phy(self, _):
         if not self.connected_peer:
             self.show_error('not connected')
             return
 
         phy = await self.connected_peer.connection.get_phy()
-        self.append_to_output(f'PHY: RX={HCI_Constant.le_phy_name(phy[0])}, TX={HCI_Constant.le_phy_name(phy[1])}')
+        self.append_to_output(
+            f'PHY: RX={HCI_Constant.le_phy_name(phy[0])}, '
+            f'TX={HCI_Constant.le_phy_name(phy[1])}'
+        )
 
     async def do_request_mtu(self, params):
         if len(params) != 1:
@@ -721,7 +763,9 @@ class ConsoleApp:
             return
 
         await characteristic.subscribe(
-            lambda value: self.append_to_output(f"{characteristic} VALUE: 0x{value.hex()}"),
+            lambda value: self.append_to_output(
+                f"{characteristic} VALUE: 0x{value.hex()}"
+            ),
         )
 
     async def do_unsubscribe(self, params):
@@ -742,7 +786,9 @@ class ConsoleApp:
 
     async def do_set_phy(self, params):
         if len(params) != 1:
-            self.show_error('invalid syntax', 'expected set-phy <tx_rx_phys>|<tx_phys>/<rx_phys>')
+            self.show_error(
+                'invalid syntax', 'expected set-phy <tx_rx_phys>|<tx_phys>/<rx_phys>'
+            )
             return
 
         if not self.connected_peer:
@@ -756,13 +802,15 @@ class ConsoleApp:
             rx_phys = tx_phys
 
         await self.connected_peer.connection.set_phy(
-            tx_phys=parse_phys(tx_phys),
-            rx_phys=parse_phys(rx_phys)
+            tx_phys=parse_phys(tx_phys), rx_phys=parse_phys(rx_phys)
         )
 
     async def do_set_default_phy(self, params):
         if len(params) != 1:
-            self.show_error('invalid syntax', 'expected set-default-phy <tx_rx_phys>|<tx_phys>/<rx_phys>')
+            self.show_error(
+                'invalid syntax',
+                'expected set-default-phy <tx_rx_phys>|<tx_phys>/<rx_phys>',
+            )
             return
 
         if '/' in params[0]:
@@ -772,14 +820,13 @@ class ConsoleApp:
             rx_phys = tx_phys
 
         await self.device.set_default_phy(
-            tx_phys=parse_phys(tx_phys),
-            rx_phys=parse_phys(rx_phys)
+            tx_phys=parse_phys(tx_phys), rx_phys=parse_phys(rx_phys)
         )
 
-    async def do_exit(self, params):
+    async def do_exit(self, _):
         self.ui.exit()
 
-    async def do_quit(self, params):
+    async def do_quit(self, _):
         self.ui.exit()
 
     async def do_filter(self, params):
@@ -788,6 +835,7 @@ class ConsoleApp:
                 self.show_error('invalid syntax', 'expected filter address <pattern>')
                 return
             self.device.listener.address_filter = params[1]
+
 
 # -----------------------------------------------------------------------------
 # Device and Connection Listener
@@ -808,7 +856,9 @@ class DeviceListener(Device.Listener, Connection.Listener):
             self._address_filter = re.compile(r".*")
         else:
             self._address_filter = re.compile(filter_addr)
-        self.scan_results = OrderedDict(filter(lambda x: self.filter_address_match(x), self.scan_results))
+        self.scan_results = OrderedDict(
+            filter(self.filter_address_match, self.scan_results)
+        )
         self.app.show_scan_results(self.scan_results)
 
     def filter_address_match(self, address):
@@ -818,6 +868,7 @@ class DeviceListener(Device.Listener, Connection.Listener):
         return bool(self.address_filter.match(address))
 
     @AsyncRunner.run_in_task()
+    # pylint: disable=invalid-overridden-method
     async def on_connection(self, connection):
         self.app.connected_peer = Peer(connection)
         self.app.connection_rssi = None
@@ -825,24 +876,44 @@ class DeviceListener(Device.Listener, Connection.Listener):
         connection.listener = self
 
     def on_disconnection(self, reason):
-        self.app.append_to_output(f'disconnected from {self.app.connected_peer}, reason: {HCI_Constant.error_name(reason)}')
+        self.app.append_to_output(
+            f'disconnected from {self.app.connected_peer}, '
+            f'reason: {HCI_Constant.error_name(reason)}'
+        )
         self.app.connected_peer = None
         self.app.connection_rssi = None
 
     def on_connection_parameters_update(self):
-        self.app.append_to_output(f'connection parameters update: {self.app.connected_peer.connection.parameters}')
+        self.app.append_to_output(
+            f'connection parameters update: '
+            f'{self.app.connected_peer.connection.parameters}'
+        )
 
     def on_connection_phy_update(self):
-        self.app.append_to_output(f'connection phy update: {self.app.connected_peer.connection.phy}')
+        self.app.append_to_output(
+            f'connection phy update: {self.app.connected_peer.connection.phy}'
+        )
 
     def on_connection_att_mtu_update(self):
-        self.app.append_to_output(f'connection att mtu update: {self.app.connected_peer.connection.att_mtu}')
+        self.app.append_to_output(
+            f'connection att mtu update: {self.app.connected_peer.connection.att_mtu}'
+        )
 
     def on_connection_encryption_change(self):
-        self.app.append_to_output(f'connection encryption change: {"encrypted" if self.app.connected_peer.connection.is_encrypted else "not encrypted"}')
+        encryption_state = (
+            'encrypted'
+            if self.app.connected_peer.connection.is_encrypted
+            else 'not encrypted'
+        )
+        self.app.append_to_output(
+            'connection encryption change: ' f'{encryption_state}'
+        )
 
     def on_connection_data_length_change(self):
-        self.app.append_to_output(f'connection data length change: {self.app.connected_peer.connection.data_length}')
+        self.app.append_to_output(
+            'connection data length change: '
+            f'{self.app.connected_peer.connection.data_length}'
+        )
 
     def on_advertisement(self, advertisement):
         if not self.filter_address_match(str(advertisement.address)):
@@ -851,12 +922,18 @@ class DeviceListener(Device.Listener, Connection.Listener):
         entry_key = f'{advertisement.address}/{advertisement.address.address_type}'
         entry = self.scan_results.get(entry_key)
         if entry:
-            entry.ad_data     = advertisement.data
-            entry.rssi        = advertisement.rssi
+            entry.ad_data = advertisement.data
+            entry.rssi = advertisement.rssi
             entry.connectable = advertisement.is_connectable
         else:
             self.app.add_known_address(str(advertisement.address))
-            self.scan_results[entry_key] = ScanResult(advertisement.address, advertisement.address.address_type, advertisement.data, advertisement.rssi, advertisement.is_connectable)
+            self.scan_results[entry_key] = ScanResult(
+                advertisement.address,
+                advertisement.address.address_type,
+                advertisement.data,
+                advertisement.rssi,
+                advertisement.is_connectable,
+            )
 
         self.app.show_scan_results(self.scan_results)
 
@@ -866,11 +943,11 @@ class DeviceListener(Device.Listener, Connection.Listener):
 # -----------------------------------------------------------------------------
 class ScanResult:
     def __init__(self, address, address_type, ad_data, rssi, connectable):
-        self.address      = address
+        self.address = address
         self.address_type = address_type
-        self.ad_data      = ad_data
-        self.rssi         = rssi
-        self.connectable  = connectable
+        self.ad_data = ad_data
+        self.rssi = rssi
+        self.connectable = connectable
 
     def to_display_string(self):
         address_type_string = ('P', 'R', 'PI', 'RI')[self.address_type]
@@ -892,10 +969,16 @@ class ScanResult:
         else:
             name = ''
 
+        # Remove any '/P' qualifier suffix from the address string
+        address_str = str(self.address).replace('/P', '')
+
         # RSSI bar
         bar_string = rssi_bar(self.rssi)
         bar_padding = ' ' * (DEFAULT_RSSI_BAR_WIDTH + 5 - len(bar_string))
-        return f'{address_color(str(self.address))} [{type_color(address_type_string)}] {bar_string} {bar_padding} {name}'
+        return (
+            f'{address_color(address_str)} [{type_color(address_type_string)}] '
+            f'{bar_string} {bar_padding} {name}'
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -923,7 +1006,7 @@ def main(device_config, transport):
     if not os.path.isdir(BUMBLE_USER_DIR):
         os.mkdir(BUMBLE_USER_DIR)
 
-    # Create an instane of the app
+    # Create an instance of the app
     app = ConsoleApp()
 
     # Setup logging
@@ -940,4 +1023,4 @@ def main(device_config, transport):
 
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    main()  # pylint: disable=no-value-for-parameter
