@@ -18,7 +18,6 @@
 import struct
 import logging
 from collections import namedtuple
-import bitstruct
 
 from .company_ids import COMPANY_IDENTIFIERS
 from .sdp import (
@@ -258,7 +257,6 @@ class SbcMediaCodecInformation(
     A2DP spec - 4.3.2 Codec Specific Information Elements
     '''
 
-    BIT_FIELDS = 'u4u4u4u2u2u8u8'
     SAMPLING_FREQUENCY_BITS = {16000: 1 << 3, 32000: 1 << 2, 44100: 1 << 1, 48000: 1}
     CHANNEL_MODE_BITS = {
         SBC_MONO_CHANNEL_MODE: 1 << 3,
@@ -274,9 +272,22 @@ class SbcMediaCodecInformation(
     }
 
     @staticmethod
-    def from_bytes(data):
+    def from_bytes(data: bytes) -> 'SbcMediaCodecInformation':
+        sampling_frequency = (data[0] >> 4) & 0x0F
+        channel_mode = (data[0] >> 0) & 0x0F
+        block_length = (data[1] >> 4) & 0x0F
+        subbands = (data[1] >> 2) & 0x03
+        allocation_method = (data[1] >> 0) & 0x03
+        minimum_bitpool_value = (data[2] >> 0) & 0xFF
+        maximum_bitpool_value = (data[3] >> 0) & 0xFF
         return SbcMediaCodecInformation(
-            *bitstruct.unpack(SbcMediaCodecInformation.BIT_FIELDS, data)
+            sampling_frequency,
+            channel_mode,
+            block_length,
+            subbands,
+            allocation_method,
+            minimum_bitpool_value,
+            maximum_bitpool_value,
         )
 
     @classmethod
@@ -325,8 +336,17 @@ class SbcMediaCodecInformation(
             maximum_bitpool_value=maximum_bitpool_value,
         )
 
-    def __bytes__(self):
-        return bitstruct.pack(self.BIT_FIELDS, *self)
+    def __bytes__(self) -> bytes:
+        return bytes(
+            [
+                (self.sampling_frequency << 4) | self.channel_mode,
+                (self.block_length << 4)
+                | (self.subbands << 2)
+                | self.allocation_method,
+                self.minimum_bitpool_value,
+                self.maximum_bitpool_value,
+            ]
+        )
 
     def __str__(self):
         channel_modes = ['MONO', 'DUAL_CHANNEL', 'STEREO', 'JOINT_STEREO']
@@ -350,14 +370,13 @@ class SbcMediaCodecInformation(
 class AacMediaCodecInformation(
     namedtuple(
         'AacMediaCodecInformation',
-        ['object_type', 'sampling_frequency', 'channels', 'vbr', 'bitrate'],
+        ['object_type', 'sampling_frequency', 'channels', 'rfa', 'vbr', 'bitrate'],
     )
 ):
     '''
     A2DP spec - 4.5.2 Codec Specific Information Elements
     '''
 
-    BIT_FIELDS = 'u8u12u2p2u1u23'
     OBJECT_TYPE_BITS = {
         MPEG_2_AAC_LC_OBJECT_TYPE: 1 << 7,
         MPEG_4_AAC_LC_OBJECT_TYPE: 1 << 6,
@@ -381,9 +400,15 @@ class AacMediaCodecInformation(
     CHANNELS_BITS = {1: 1 << 1, 2: 1}
 
     @staticmethod
-    def from_bytes(data):
+    def from_bytes(data: bytes) -> 'AacMediaCodecInformation':
+        object_type = data[0]
+        sampling_frequency = (data[1] << 4) | ((data[2] >> 4) & 0x0F)
+        channels = (data[2] >> 2) & 0x03
+        rfa = 0
+        vbr = (data[3] >> 7) & 0x01
+        bitrate = ((data[3] & 0x7F) << 16) | (data[4] << 8) | data[5]
         return AacMediaCodecInformation(
-            *bitstruct.unpack(AacMediaCodecInformation.BIT_FIELDS, data)
+            object_type, sampling_frequency, channels, rfa, vbr, bitrate
         )
 
     @classmethod
@@ -394,6 +419,7 @@ class AacMediaCodecInformation(
             object_type=cls.OBJECT_TYPE_BITS[object_type],
             sampling_frequency=cls.SAMPLING_FREQUENCY_BITS[sampling_frequency],
             channels=cls.CHANNELS_BITS[channels],
+            rfa=0,
             vbr=vbr,
             bitrate=bitrate,
         )
@@ -410,8 +436,17 @@ class AacMediaCodecInformation(
             bitrate=bitrate,
         )
 
-    def __bytes__(self):
-        return bitstruct.pack(self.BIT_FIELDS, *self)
+    def __bytes__(self) -> bytes:
+        return bytes(
+            [
+                self.object_type & 0xFF,
+                (self.sampling_frequency >> 4) & 0xFF,
+                (((self.sampling_frequency & 0x0F) << 4) | (self.channels << 2)) & 0xFF,
+                ((self.vbr << 7) | ((self.bitrate >> 16) & 0x7F)) & 0xFF,
+                ((self.bitrate >> 8) & 0xFF) & 0xFF,
+                self.bitrate & 0xFF,
+            ]
+        )
 
     def __str__(self):
         object_types = [
