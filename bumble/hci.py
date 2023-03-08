@@ -15,12 +15,14 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import struct
 import collections
 import logging
 import functools
-from colors import color
+from typing import Dict, Type, Union
 
+from .colors import color
 from .core import (
     BT_BR_EDR_TRANSPORT,
     AdvertisingData,
@@ -1638,8 +1640,8 @@ class HCI_Object:
             # Map the value if needed
             if value_mappers:
                 value_mapper = value_mappers.get(key, value_mapper)
-                if value_mapper is not None:
-                    value = value_mapper(value)
+            if value_mapper is not None:
+                value = value_mapper(value)
 
             # Get the string representation of the value
             value_str = HCI_Object.format_field_value(
@@ -1690,6 +1692,11 @@ class Address:
         RANDOM_IDENTITY_ADDRESS: 'RANDOM_IDENTITY_ADDRESS',
     }
 
+    # Type declarations
+    NIL: Address
+    ANY: Address
+    ANY_RANDOM: Address
+
     # pylint: disable-next=unnecessary-lambda
     ADDRESS_TYPE_SPEC = {'size': 1, 'mapper': lambda x: Address.address_type_name(x)}
 
@@ -1722,7 +1729,9 @@ class Address:
         address_type = data[offset - 1]
         return Address.parse_address_with_type(data, offset, address_type)
 
-    def __init__(self, address, address_type=RANDOM_DEVICE_ADDRESS):
+    def __init__(
+        self, address: Union[bytes, str], address_type: int = RANDOM_DEVICE_ADDRESS
+    ):
         '''
         Initialize an instance. `address` may be a byte array in little-endian
         format, or a hex string in big-endian format (with optional ':'
@@ -1807,6 +1816,7 @@ class Address:
 # Predefined address values
 Address.NIL = Address(b"\xff\xff\xff\xff\xff\xff", Address.PUBLIC_DEVICE_ADDRESS)
 Address.ANY = Address(b"\x00\x00\x00\x00\x00\x00", Address.PUBLIC_DEVICE_ADDRESS)
+Address.ANY_RANDOM = Address(b"\x00\x00\x00\x00\x00\x00", Address.RANDOM_DEVICE_ADDRESS)
 
 # -----------------------------------------------------------------------------
 class OwnAddressType:
@@ -1873,7 +1883,7 @@ class HCI_Command(HCI_Packet):
     '''
 
     hci_packet_type = HCI_COMMAND_PACKET
-    command_classes = {}
+    command_classes: Dict[int, Type[HCI_Command]] = {}
 
     @staticmethod
     def command(fields=(), return_parameters_fields=()):
@@ -3106,6 +3116,16 @@ class HCI_LE_Read_Remote_Features_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command(
+    return_parameters_fields=[("status", STATUS_SPEC), ("random_number", 8)]
+)
+class HCI_LE_Rand_Command(HCI_Command):
+    """
+    See Bluetooth spec @ 7.8.23 LE Rand Command
+    """
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
     [
         ('connection_handle', 2),
         ('random_number', 8),
@@ -4009,8 +4029,8 @@ class HCI_Event(HCI_Packet):
     '''
 
     hci_packet_type = HCI_EVENT_PACKET
-    event_classes = {}
-    meta_event_classes = {}
+    event_classes: Dict[int, Type[HCI_Event]] = {}
+    meta_event_classes: Dict[int, Type[HCI_LE_Meta_Event]] = {}
 
     @staticmethod
     def event(fields=()):

@@ -18,7 +18,6 @@
 import logging
 
 from .common import Transport, AsyncPipeSink
-from ..link import RemoteLink
 from ..controller import Controller
 
 # -----------------------------------------------------------------------------
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
-async def open_transport(name):
+async def open_transport(name: str) -> Transport:
     '''
     Open a transport by name.
     The name must be <type>:<parameters>
@@ -110,6 +109,8 @@ async def open_transport(name):
 # -----------------------------------------------------------------------------
 async def open_transport_or_link(name):
     if name.startswith('link-relay:'):
+        from ..link import RemoteLink  # lazy import
+
         link = RemoteLink(name[11:])
         await link.wait_until_connected()
         controller = Controller('remote', link=link)
