@@ -20,11 +20,14 @@ import collections
 import logging
 import struct
 
-from colors import color
-
+from bumble.colors import color
 from bumble.l2cap import L2CAP_PDU
+from bumble.snoop import Snooper
+
+from typing import Optional
 
 from .hci import (
+    Address,
     HCI_ACL_DATA_PACKET,
     HCI_COMMAND_COMPLETE_EVENT,
     HCI_COMMAND_PACKET,
@@ -53,7 +56,6 @@ from .hci import (
     HCI_LE_Write_Suggested_Default_Data_Length_Command,
     HCI_Link_Key_Request_Negative_Reply_Command,
     HCI_Link_Key_Request_Reply_Command,
-    HCI_PIN_Code_Request_Negative_Reply_Command,
     HCI_Packet,
     HCI_Read_Buffer_Size_Command,
     HCI_Read_Local_Supported_Commands_Command,
@@ -134,6 +136,7 @@ class Host(AbortableEventEmitter):
         self.long_term_key_provider = None
         self.link_key_provider = None
         self.pairing_io_capability_provider = None  # Classic only
+        self.snooper = None
 
         # Connect to the source and sink if specified
         if controller_source:
@@ -141,7 +144,25 @@ class Host(AbortableEventEmitter):
         if controller_sink:
             self.set_packet_sink(controller_sink)
 
-    async def flush(self):
+    def find_connection_by_bd_addr(
+        self,
+        bd_addr: Address,
+        transport: Optional[int] = None,
+        check_address_type: bool = False,
+    ) -> Optional[Connection]:
+        for connection in self.connections.values():
+            if connection.peer_address.to_bytes() == bd_addr.to_bytes():
+                if (
+                    check_address_type
+                    and connection.peer_address.address_type != bd_addr.address_type
+                ):
+                    continue
+                if transport is None or connection.transport == transport:
+                    return connection
+
+        return None
+
+    async def flush(self) -> None:
         # Make sure no command is pending
         await self.command_semaphore.acquire()
 
@@ -274,6 +295,9 @@ class Host(AbortableEventEmitter):
         self.hci_sink = sink
 
     def send_hci_packet(self, packet):
+        if self.snooper:
+            self.snooper.snoop(bytes(packet), Snooper.Direction.HOST_TO_CONTROLLER)
+
         self.hci_sink.on_packet(packet.to_bytes())
 
     async def send_command(self, command, check_result=False):
@@ -419,6 +443,9 @@ class Host(AbortableEventEmitter):
 
     def on_hci_packet(self, packet):
         logger.debug(f'{color("### CONTROLLER -> HOST", "green")}: {packet}')
+
+        if self.snooper:
+            self.snooper.snoop(bytes(packet), Snooper.Direction.CONTROLLER_TO_HOST)
 
         # If the packet is a command, invoke the handler for this packet
         if packet.hci_packet_type == HCI_COMMAND_PACKET:
@@ -660,7 +687,7 @@ class Host(AbortableEventEmitter):
                 connection_handle=event.connection_handle,
                 interval_min=event.interval_min,
                 interval_max=event.interval_max,
-                latency=event.latency,
+                max_latency=event.max_latency,
                 timeout=event.timeout,
                 min_ce_length=0,
                 max_ce_length=0,
@@ -712,12 +739,17 @@ class Host(AbortableEventEmitter):
                 f'role change for {event.bd_addr}: '
                 f'{HCI_Constant.role_name(event.new_role)}'
             )
-            # TODO: lookup the connection and update the role
+            if connection := self.find_connection_by_bd_addr(
+                event.bd_addr, BT_BR_EDR_TRANSPORT
+            ):
+                connection.role = event.new_role
+            self.emit('role_change', event.bd_addr, event.new_role)
         else:
             logger.debug(
                 f'role change for {event.bd_addr} failed: '
                 f'{HCI_Constant.error_name(event.status)}'
             )
+            self.emit('role_change_failure', event.bd_addr, event.status)
 
     def on_hci_le_data_length_change_event(self, event):
         self.emit(
@@ -787,11 +819,7 @@ class Host(AbortableEventEmitter):
         )
 
     def on_hci_pin_code_request_event(self, event):
-        # For now, just refuse all requests
-        # TODO: delegate the decision
-        self.send_command_sync(
-            HCI_PIN_Code_Request_Negative_Reply_Command(bd_addr=event.bd_addr)
-        )
+        self.emit('pin_code_request', event.bd_addr)
 
     def on_hci_link_key_request_event(self, event):
         async def send_link_key():

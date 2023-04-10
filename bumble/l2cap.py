@@ -15,14 +15,16 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import asyncio
 import logging
 import struct
 
 from collections import deque
-from colors import color
 from pyee import EventEmitter
+from typing import Dict, Type
 
+from .colors import color
 from .core import BT_CENTRAL_ROLE, InvalidStateError, ProtocolError
 from .hci import (
     HCI_LE_Connection_Update_Command,
@@ -184,7 +186,7 @@ class L2CAP_Control_Frame:
     See Bluetooth spec @ Vol 3, Part A - 4 SIGNALING PACKET FORMATS
     '''
 
-    classes = {}
+    classes: Dict[int, Type[L2CAP_Control_Frame]] = {}
     code = 0
     name = None
 
@@ -383,7 +385,7 @@ class L2CAP_Connection_Response(L2CAP_Control_Frame):
 
     CONNECTION_SUCCESSFUL = 0x0000
     CONNECTION_PENDING = 0x0001
-    CONNECTION_REFUSED_LE_PSM_NOT_SUPPORTED = 0x0002
+    CONNECTION_REFUSED_PSM_NOT_SUPPORTED = 0x0002
     CONNECTION_REFUSED_SECURITY_BLOCK = 0x0003
     CONNECTION_REFUSED_NO_RESOURCES_AVAILABLE = 0x0004
     CONNECTION_REFUSED_INVALID_SOURCE_CID = 0x0006
@@ -394,7 +396,7 @@ class L2CAP_Connection_Response(L2CAP_Control_Frame):
     RESULT_NAMES = {
         CONNECTION_SUCCESSFUL: 'CONNECTION_SUCCESSFUL',
         CONNECTION_PENDING: 'CONNECTION_PENDING',
-        CONNECTION_REFUSED_LE_PSM_NOT_SUPPORTED: 'CONNECTION_REFUSED_LE_PSM_NOT_SUPPORTED',
+        CONNECTION_REFUSED_PSM_NOT_SUPPORTED: 'CONNECTION_REFUSED_PSM_NOT_SUPPORTED',
         CONNECTION_REFUSED_SECURITY_BLOCK: 'CONNECTION_REFUSED_SECURITY_BLOCK',
         CONNECTION_REFUSED_NO_RESOURCES_AVAILABLE: 'CONNECTION_REFUSED_NO_RESOURCES_AVAILABLE',
         CONNECTION_REFUSED_INVALID_SOURCE_CID: 'CONNECTION_REFUSED_INVALID_SOURCE_CID',
@@ -794,6 +796,11 @@ class Channel(EventEmitter):
         self.disconnection_result = asyncio.get_running_loop().create_future()
         return await self.disconnection_result
 
+    def abort(self):
+        if self.state == self.OPEN:
+            self.change_state(self.CLOSED)
+            self.emit('close')
+
     def send_configure_request(self):
         options = L2CAP_Control_Frame.encode_configuration_options(
             [
@@ -1102,6 +1109,10 @@ class LeConnectionOrientedChannel(EventEmitter):
         # state
         self.disconnection_result = asyncio.get_running_loop().create_future()
         return await self.disconnection_result
+
+    def abort(self):
+        if self.state == self.CONNECTED:
+            self.change_state(self.DISCONNECTED)
 
     def on_pdu(self, pdu):
         if self.sink is None:
@@ -1490,8 +1501,12 @@ class ChannelManager:
     def on_disconnection(self, connection_handle, _reason):
         logger.debug(f'disconnection from {connection_handle}, cleaning up channels')
         if connection_handle in self.channels:
+            for _, channel in self.channels[connection_handle].items():
+                channel.abort()
             del self.channels[connection_handle]
         if connection_handle in self.le_coc_channels:
+            for _, channel in self.le_coc_channels[connection_handle].items():
+                channel.abort()
             del self.le_coc_channels[connection_handle]
         if connection_handle in self.identifiers:
             del self.identifiers[connection_handle]
@@ -1619,7 +1634,7 @@ class ChannelManager:
                     destination_cid=request.source_cid,
                     source_cid=0,
                     # pylint: disable=line-too-long
-                    result=L2CAP_Connection_Response.CONNECTION_REFUSED_LE_PSM_NOT_SUPPORTED,
+                    result=L2CAP_Connection_Response.CONNECTION_REFUSED_PSM_NOT_SUPPORTED,
                     status=0x0000,
                 ),
             )

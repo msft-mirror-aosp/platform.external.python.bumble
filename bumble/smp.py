@@ -22,12 +22,15 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import logging
 import asyncio
 import secrets
-from pyee import EventEmitter
-from colors import color
+from typing import Dict, Optional, Type
 
+from pyee import EventEmitter
+
+from .colors import color
 from .hci import Address, HCI_LE_Enable_Encryption_Command, HCI_Object, key_with_value
 from .core import (
     BT_BR_EDR_TRANSPORT,
@@ -184,7 +187,7 @@ class SMP_Command:
     See Bluetooth spec @ Vol 3, Part H - 3 SECURITY MANAGER PROTOCOL
     '''
 
-    smp_classes = {}
+    smp_classes: Dict[int, Type[SMP_Command]] = {}
     code = 0
     name = ''
 
@@ -495,33 +498,45 @@ class PairingDelegate:
     DISPLAY_OUTPUT_ONLY = SMP_DISPLAY_ONLY_IO_CAPABILITY
     DISPLAY_OUTPUT_AND_YES_NO_INPUT = SMP_DISPLAY_YES_NO_IO_CAPABILITY
     DISPLAY_OUTPUT_AND_KEYBOARD_INPUT = SMP_KEYBOARD_DISPLAY_IO_CAPABILITY
-    DEFAULT_KEY_DISTRIBUTION = (
+    DEFAULT_KEY_DISTRIBUTION: int = (
         SMP_ENC_KEY_DISTRIBUTION_FLAG | SMP_ID_KEY_DISTRIBUTION_FLAG
     )
 
     def __init__(
         self,
-        io_capability=NO_OUTPUT_NO_INPUT,
-        local_initiator_key_distribution=DEFAULT_KEY_DISTRIBUTION,
-        local_responder_key_distribution=DEFAULT_KEY_DISTRIBUTION,
-    ):
+        io_capability: int = NO_OUTPUT_NO_INPUT,
+        local_initiator_key_distribution: int = DEFAULT_KEY_DISTRIBUTION,
+        local_responder_key_distribution: int = DEFAULT_KEY_DISTRIBUTION,
+    ) -> None:
         self.io_capability = io_capability
         self.local_initiator_key_distribution = local_initiator_key_distribution
         self.local_responder_key_distribution = local_responder_key_distribution
 
-    async def accept(self):
+    async def accept(self) -> bool:
         return True
 
-    async def confirm(self):
+    async def confirm(self) -> bool:
         return True
 
-    async def compare_numbers(self, _number, _digits=6):
+    # pylint: disable-next=unused-argument
+    async def compare_numbers(self, number: int, digits: int) -> bool:
         return True
 
-    async def get_number(self):
+    async def get_number(self) -> Optional[int]:
+        '''
+        Returns an optional number as an answer to a passkey request.
+        Returning `None` will result in a negative reply.
+        '''
         return 0
 
-    async def display_number(self, _number, _digits=6):
+    async def get_string(self, max_length) -> Optional[str]:
+        '''
+        Returns a string whose utf-8 encoding is up to max_length bytes.
+        '''
+        return None
+
+    # pylint: disable-next=unused-argument
+    async def display_number(self, number: int, digits: int) -> None:
         pass
 
     async def key_distribution_response(
@@ -535,7 +550,13 @@ class PairingDelegate:
 
 # -----------------------------------------------------------------------------
 class PairingConfig:
-    def __init__(self, sc=True, mitm=True, bonding=True, delegate=None):
+    def __init__(
+        self,
+        sc: bool = True,
+        mitm: bool = True,
+        bonding: bool = True,
+        delegate: Optional[PairingDelegate] = None,
+    ) -> None:
         self.sc = sc
         self.mitm = mitm
         self.bonding = bonding
@@ -652,7 +673,8 @@ class Session:
         self.peer_expected_distributions = []
         self.dh_key = None
         self.confirm_value = None
-        self.passkey = 0
+        self.passkey = None
+        self.passkey_ready = asyncio.Event()
         self.passkey_step = 0
         self.passkey_display = False
         self.pairing_method = 0
@@ -830,6 +852,7 @@ class Session:
         # Generate random Passkey/PIN code
         self.passkey = secrets.randbelow(1000000)
         logger.debug(f'Pairing PIN CODE: {self.passkey:06}')
+        self.passkey_ready.set()
 
         # The value of TK is computed from the PIN code
         if not self.sc:
@@ -849,6 +872,8 @@ class Session:
             if not self.sc:
                 self.tk = passkey.to_bytes(16, byteorder='little')
                 logger.debug(f'TK from passkey = {self.tk.hex()}')
+
+            self.passkey_ready.set()
 
             if next_steps is not None:
                 next_steps()
@@ -901,17 +926,29 @@ class Session:
         logger.debug(f'generated random: {self.r.hex()}')
 
         if self.sc:
-            if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
-                z = 0
-            elif self.pairing_method == self.PASSKEY:
-                z = 0x80 + ((self.passkey >> self.passkey_step) & 1)
-            else:
-                return
 
-            if self.is_initiator:
-                confirm_value = crypto.f4(self.pka, self.pkb, self.r, bytes([z]))
-            else:
-                confirm_value = crypto.f4(self.pkb, self.pka, self.r, bytes([z]))
+            async def next_steps():
+                if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+                    z = 0
+                elif self.pairing_method == self.PASSKEY:
+                    # We need a passkey
+                    await self.passkey_ready.wait()
+
+                    z = 0x80 + ((self.passkey >> self.passkey_step) & 1)
+                else:
+                    return
+
+                if self.is_initiator:
+                    confirm_value = crypto.f4(self.pka, self.pkb, self.r, bytes([z]))
+                else:
+                    confirm_value = crypto.f4(self.pkb, self.pka, self.r, bytes([z]))
+
+                self.send_command(
+                    SMP_Pairing_Confirm_Command(confirm_value=confirm_value)
+                )
+
+            # Perform the next steps asynchronously in case we need to wait for input
+            self.connection.abort_on('disconnection', next_steps())
         else:
             confirm_value = crypto.c1(
                 self.tk,
@@ -924,7 +961,7 @@ class Session:
                 self.ra,
             )
 
-        self.send_command(SMP_Pairing_Confirm_Command(confirm_value=confirm_value))
+            self.send_command(SMP_Pairing_Confirm_Command(confirm_value=confirm_value))
 
     def send_pairing_random_command(self):
         self.send_command(SMP_Pairing_Random_Command(random_value=self.r))
@@ -1355,8 +1392,8 @@ class Session:
 
         # Start phase 2
         if self.sc:
-            if self.pairing_method == self.PASSKEY and self.passkey_display:
-                self.display_passkey()
+            if self.pairing_method == self.PASSKEY:
+                self.display_or_input_passkey()
 
             self.send_public_key_command()
         else:
@@ -1417,18 +1454,22 @@ class Session:
         else:
             srand = self.r
             mrand = command.random_value
-        stk = crypto.s1(self.tk, srand, mrand)
-        logger.debug(f'STK = {stk.hex()}')
+        self.stk = crypto.s1(self.tk, srand, mrand)
+        logger.debug(f'STK = {self.stk.hex()}')
 
         # Generate LTK
         self.ltk = crypto.r()
 
         if self.is_initiator:
-            self.start_encryption(stk)
+            self.start_encryption(self.stk)
         else:
             self.send_pairing_random_command()
 
     def on_smp_pairing_random_command_secure_connections(self, command):
+        if self.pairing_method == self.PASSKEY and self.passkey is None:
+            logger.warning('no passkey entered, ignoring command')
+            return
+
         # pylint: disable=too-many-return-statements
         if self.is_initiator:
             if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
@@ -1556,17 +1597,13 @@ class Session:
         logger.debug(f'DH key: {self.dh_key.hex()}')
 
         if self.is_initiator:
-            if self.pairing_method == self.PASSKEY:
-                if self.passkey_display:
-                    self.send_pairing_confirm_command()
-                else:
-                    self.input_passkey(self.send_pairing_confirm_command)
+            self.send_pairing_confirm_command()
         else:
-            # Send our public key back to the initiator
             if self.pairing_method == self.PASSKEY:
-                self.display_or_input_passkey(self.send_public_key_command)
-            else:
-                self.send_public_key_command()
+                self.display_or_input_passkey()
+
+            # Send our public key back to the initiator
+            self.send_public_key_command()
 
             if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
                 # We can now send the confirmation value

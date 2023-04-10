@@ -22,6 +22,7 @@ import os
 import pytest
 
 from bumble.controller import Controller
+from bumble.core import BT_BR_EDR_TRANSPORT, BT_PERIPHERAL_ROLE, BT_CENTRAL_ROLE
 from bumble.link import LocalLink
 from bumble.device import Device, Peer
 from bumble.host import Host
@@ -32,7 +33,6 @@ from bumble.smp import (
     PairingDelegate,
     SMP_PAIRING_NOT_SUPPORTED_ERROR,
     SMP_CONFIRM_VALUE_FAILED_ERROR,
-    SMP_ID_KEY_DISTRIBUTION_FLAG,
 )
 from bumble.core import ProtocolError
 
@@ -48,18 +48,19 @@ class TwoDevices:
     def __init__(self):
         self.connections = [None, None]
 
+        addresses = ['F0:F1:F2:F3:F4:F5', 'F5:F4:F3:F2:F1:F0']
         self.link = LocalLink()
         self.controllers = [
-            Controller('C1', link=self.link),
-            Controller('C2', link=self.link),
+            Controller('C1', link=self.link, public_address=addresses[0]),
+            Controller('C2', link=self.link, public_address=addresses[1]),
         ]
         self.devices = [
             Device(
-                address='F0:F1:F2:F3:F4:F5',
+                address=addresses[0],
                 host=Host(self.controllers[0], AsyncPipeSink(self.controllers[0])),
             ),
             Device(
-                address='F5:F4:F3:F2:F1:F0',
+                address=addresses[1],
                 host=Host(self.controllers[1], AsyncPipeSink(self.controllers[1])),
             ),
         ]
@@ -97,6 +98,60 @@ async def test_self_connection():
     # Check the post conditions
     assert two_devices.connections[0] is not None
     assert two_devices.connections[1] is not None
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'responder_role,',
+    (BT_CENTRAL_ROLE, BT_PERIPHERAL_ROLE),
+)
+async def test_self_classic_connection(responder_role):
+    # Create two devices, each with a controller, attached to the same link
+    two_devices = TwoDevices()
+
+    # Attach listeners
+    two_devices.devices[0].on(
+        'connection', lambda connection: two_devices.on_connection(0, connection)
+    )
+    two_devices.devices[1].on(
+        'connection', lambda connection: two_devices.on_connection(1, connection)
+    )
+
+    # Enable Classic connections
+    two_devices.devices[0].classic_enabled = True
+    two_devices.devices[1].classic_enabled = True
+
+    # Start
+    await two_devices.devices[0].power_on()
+    await two_devices.devices[1].power_on()
+
+    # Connect the two devices
+    await asyncio.gather(
+        two_devices.devices[0].connect(
+            two_devices.devices[1].public_address, transport=BT_BR_EDR_TRANSPORT
+        ),
+        two_devices.devices[1].accept(
+            two_devices.devices[0].public_address, responder_role
+        ),
+    )
+
+    # Check the post conditions
+    assert two_devices.connections[0] is not None
+    assert two_devices.connections[1] is not None
+
+    # Check the role
+    assert two_devices.connections[0].role != responder_role
+    assert two_devices.connections[1].role == responder_role
+
+    # Role switch
+    await two_devices.connections[0].switch_role(responder_role)
+
+    # Check the role
+    assert two_devices.connections[0].role == responder_role
+    assert two_devices.connections[1].role != responder_role
+
+    await two_devices.connections[0].disconnect()
 
 
 # -----------------------------------------------------------------------------
@@ -273,9 +328,15 @@ KEY_DIST = range(16)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    'io_cap, sc, mitm, key_dist', itertools.product(IO_CAP, SC, MITM, KEY_DIST)
+    'io_caps, sc, mitm, key_dist',
+    itertools.chain(
+        itertools.product([IO_CAP], SC, MITM, [15]),
+        itertools.product(
+            [[PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT]], SC, MITM, KEY_DIST
+        ),
+    ),
 )
-async def test_self_smp(io_cap, sc, mitm, key_dist):
+async def test_self_smp(io_caps, sc, mitm, key_dist):
     class Delegate(PairingDelegate):
         def __init__(
             self,
@@ -296,6 +357,7 @@ async def test_self_smp(io_cap, sc, mitm, key_dist):
             self.peer_delegate = None
             self.number = asyncio.get_running_loop().create_future()
 
+        # pylint: disable-next=unused-argument
         async def compare_numbers(self, number, digits):
             if self.peer_delegate is None:
                 logger.warning(f'[{self.name}] no peer delegate')
@@ -331,8 +393,9 @@ async def test_self_smp(io_cap, sc, mitm, key_dist):
 
     pairing_config_sets = [('Initiator', [None]), ('Responder', [None])]
     for pairing_config_set in pairing_config_sets:
-        delegate = Delegate(pairing_config_set[0], io_cap, key_dist, key_dist)
-        pairing_config_set[1].append(PairingConfig(sc, mitm, True, delegate))
+        for io_cap in io_caps:
+            delegate = Delegate(pairing_config_set[0], io_cap, key_dist, key_dist)
+            pairing_config_set[1].append(PairingConfig(sc, mitm, True, delegate))
 
     for pairing_config1 in pairing_config_sets[0][1]:
         for pairing_config2 in pairing_config_sets[1][1]:

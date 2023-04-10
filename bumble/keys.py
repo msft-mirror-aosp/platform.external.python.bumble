@@ -24,8 +24,9 @@ import asyncio
 import logging
 import os
 import json
-from colors import color
+from typing import Optional
 
+from .colors import color
 from .hci import Address
 
 
@@ -129,7 +130,7 @@ class PairingKeys:
                 for (key_property, key_value) in value.items():
                     print(f'{prefix}  {color(key_property, "green")}: {key_value}')
             else:
-                print(f'{prefix}{color(property, "cyan")}: {value}')
+                print(f'{prefix}{color(container_property, "cyan")}: {value}')
 
 
 # -----------------------------------------------------------------------------
@@ -216,7 +217,7 @@ class JsonKeyStore(KeyStore):
         params = device_config.keystore.split(':', 1)[1:]
         namespace = str(device_config.address)
         if params:
-            filename = params[1]
+            filename = params[0]
         else:
             filename = None
 
@@ -242,7 +243,7 @@ class JsonKeyStore(KeyStore):
         # Atomically replace the previous file
         os.rename(temp_filename, self.filename)
 
-    async def delete(self, name):
+    async def delete(self, name: str) -> None:
         db = await self.load()
 
         namespace = db.get(self.namespace)
@@ -278,7 +279,7 @@ class JsonKeyStore(KeyStore):
 
         await self.save(db)
 
-    async def get(self, name):
+    async def get(self, name: str) -> Optional[PairingKeys]:
         db = await self.load()
 
         namespace = db.get(self.namespace)

@@ -15,12 +15,14 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import struct
 import collections
 import logging
 import functools
-from colors import color
+from typing import Dict, Type, Union
 
+from .colors import color
 from .core import (
     BT_BR_EDR_TRANSPORT,
     AdvertisingData,
@@ -1419,7 +1421,11 @@ class HCI_Constant:
 # -----------------------------------------------------------------------------
 class HCI_Error(ProtocolError):
     def __init__(self, error_code):
-        super().__init__(error_code, 'hci', HCI_Constant.error_name(error_code))
+        super().__init__(
+            error_code,
+            error_namespace='hci',
+            error_name=HCI_Constant.error_name(error_code),
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -1485,7 +1491,7 @@ class HCI_Object:
             elif field_type == -2:
                 # 16-bit signed
                 field_value = struct.unpack_from('<h', data, offset)[0]
-                offset += 1
+                offset += 2
             elif field_type == 3:
                 # 24-bit unsigned
                 padded = data[offset : offset + 3] + bytes([0])
@@ -1638,8 +1644,8 @@ class HCI_Object:
             # Map the value if needed
             if value_mappers:
                 value_mapper = value_mappers.get(key, value_mapper)
-                if value_mapper is not None:
-                    value = value_mapper(value)
+            if value_mapper is not None:
+                value = value_mapper(value)
 
             # Get the string representation of the value
             value_str = HCI_Object.format_field_value(
@@ -1690,6 +1696,11 @@ class Address:
         RANDOM_IDENTITY_ADDRESS: 'RANDOM_IDENTITY_ADDRESS',
     }
 
+    # Type declarations
+    NIL: Address
+    ANY: Address
+    ANY_RANDOM: Address
+
     # pylint: disable-next=unnecessary-lambda
     ADDRESS_TYPE_SPEC = {'size': 1, 'mapper': lambda x: Address.address_type_name(x)}
 
@@ -1722,7 +1733,9 @@ class Address:
         address_type = data[offset - 1]
         return Address.parse_address_with_type(data, offset, address_type)
 
-    def __init__(self, address, address_type=RANDOM_DEVICE_ADDRESS):
+    def __init__(
+        self, address: Union[bytes, str], address_type: int = RANDOM_DEVICE_ADDRESS
+    ):
         '''
         Initialize an instance. `address` may be a byte array in little-endian
         format, or a hex string in big-endian format (with optional ':'
@@ -1807,6 +1820,7 @@ class Address:
 # Predefined address values
 Address.NIL = Address(b"\xff\xff\xff\xff\xff\xff", Address.PUBLIC_DEVICE_ADDRESS)
 Address.ANY = Address(b"\x00\x00\x00\x00\x00\x00", Address.PUBLIC_DEVICE_ADDRESS)
+Address.ANY_RANDOM = Address(b"\x00\x00\x00\x00\x00\x00", Address.RANDOM_DEVICE_ADDRESS)
 
 # -----------------------------------------------------------------------------
 class OwnAddressType:
@@ -1836,6 +1850,8 @@ class HCI_Packet:
     Abstract Base class for HCI packets
     '''
 
+    hci_packet_type: int
+
     @staticmethod
     def from_bytes(packet):
         packet_type = packet[0]
@@ -1854,6 +1870,9 @@ class HCI_Packet:
     def __init__(self, name):
         self.name = name
 
+    def __bytes__(self) -> bytes:
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return self.name
 
@@ -1865,6 +1884,9 @@ class HCI_CustomPacket(HCI_Packet):
         self.hci_packet_type = payload[0]
         self.payload = payload
 
+    def __bytes__(self) -> bytes:
+        return self.payload
+
 
 # -----------------------------------------------------------------------------
 class HCI_Command(HCI_Packet):
@@ -1873,7 +1895,7 @@ class HCI_Command(HCI_Packet):
     '''
 
     hci_packet_type = HCI_COMMAND_PACKET
-    command_classes = {}
+    command_classes: Dict[int, Type[HCI_Command]] = {}
 
     @staticmethod
     def command(fields=(), return_parameters_fields=()):
@@ -2072,6 +2094,24 @@ class HCI_Link_Key_Request_Reply_Command(HCI_Command):
 class HCI_Link_Key_Request_Negative_Reply_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.1.11 Link Key Request Negative Reply Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('pin_code_length', 1),
+        ('pin_code', 16),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_PIN_Code_Request_Reply_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.12 PIN Code Request Reply Command
     '''
 
 
@@ -3106,6 +3146,16 @@ class HCI_LE_Read_Remote_Features_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command(
+    return_parameters_fields=[("status", STATUS_SPEC), ("random_number", 8)]
+)
+class HCI_LE_Rand_Command(HCI_Command):
+    """
+    See Bluetooth spec @ 7.8.23 LE Rand Command
+    """
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
     [
         ('connection_handle', 2),
         ('random_number', 8),
@@ -4009,8 +4059,8 @@ class HCI_Event(HCI_Packet):
     '''
 
     hci_packet_type = HCI_EVENT_PACKET
-    event_classes = {}
-    meta_event_classes = {}
+    event_classes: Dict[int, Type[HCI_Event]] = {}
+    meta_event_classes: Dict[int, Type[HCI_LE_Meta_Event]] = {}
 
     @staticmethod
     def event(fields=()):
