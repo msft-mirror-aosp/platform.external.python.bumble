@@ -1421,7 +1421,11 @@ class HCI_Constant:
 # -----------------------------------------------------------------------------
 class HCI_Error(ProtocolError):
     def __init__(self, error_code):
-        super().__init__(error_code, 'hci', HCI_Constant.error_name(error_code))
+        super().__init__(
+            error_code,
+            error_namespace='hci',
+            error_name=HCI_Constant.error_name(error_code),
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -1487,7 +1491,7 @@ class HCI_Object:
             elif field_type == -2:
                 # 16-bit signed
                 field_value = struct.unpack_from('<h', data, offset)[0]
-                offset += 1
+                offset += 2
             elif field_type == 3:
                 # 24-bit unsigned
                 padded = data[offset : offset + 3] + bytes([0])
@@ -1846,6 +1850,8 @@ class HCI_Packet:
     Abstract Base class for HCI packets
     '''
 
+    hci_packet_type: int
+
     @staticmethod
     def from_bytes(packet):
         packet_type = packet[0]
@@ -1864,6 +1870,9 @@ class HCI_Packet:
     def __init__(self, name):
         self.name = name
 
+    def __bytes__(self) -> bytes:
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return self.name
 
@@ -1874,6 +1883,9 @@ class HCI_CustomPacket(HCI_Packet):
         super().__init__('HCI_CUSTOM_PACKET')
         self.hci_packet_type = payload[0]
         self.payload = payload
+
+    def __bytes__(self) -> bytes:
+        return self.payload
 
 
 # -----------------------------------------------------------------------------
@@ -2082,6 +2094,24 @@ class HCI_Link_Key_Request_Reply_Command(HCI_Command):
 class HCI_Link_Key_Request_Negative_Reply_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.1.11 Link Key Request Negative Reply Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('pin_code_length', 1),
+        ('pin_code', 16),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_PIN_Code_Request_Reply_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.12 PIN Code Request Reply Command
     '''
 
 

@@ -23,14 +23,17 @@
 # Imports
 # -----------------------------------------------------------------------------
 from __future__ import annotations
+import functools
 import struct
 from pyee import EventEmitter
-from typing import Dict, Type
+from typing import Dict, Type, TYPE_CHECKING
 
-from bumble.core import UUID, name_or_number
-from bumble.hci import HCI_Object, key_with_value
+from bumble.core import UUID, name_or_number, get_dict_key_by_value, ProtocolError
+from bumble.hci import HCI_Object, key_with_value, HCI_Constant
 from bumble.colors import color
 
+if TYPE_CHECKING:
+    from bumble.device import Connection
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -182,13 +185,18 @@ UUID_2_FIELD_SPEC    = lambda x, y: UUID.parse_uuid_2(x, y)  # noqa: E731
 # -----------------------------------------------------------------------------
 # Exceptions
 # -----------------------------------------------------------------------------
-class ATT_Error(Exception):
-    def __init__(self, error_code, att_handle=0x0000):
-        self.error_code = error_code
+class ATT_Error(ProtocolError):
+    def __init__(self, error_code, att_handle=0x0000, message=''):
+        super().__init__(
+            error_code,
+            error_namespace='att',
+            error_name=ATT_PDU.error_name(error_code),
+        )
         self.att_handle = att_handle
+        self.message = message
 
     def __str__(self):
-        return f'ATT_Error({ATT_PDU.error_name(self.error_code)})'
+        return f'ATT_Error(error={self.error_name}, handle={self.att_handle:04X}): {self.message}'
 
 
 # -----------------------------------------------------------------------------
@@ -723,11 +731,38 @@ class Attribute(EventEmitter):
     READ_REQUIRES_AUTHORIZATION = 0x40
     WRITE_REQUIRES_AUTHORIZATION = 0x80
 
+    PERMISSION_NAMES = {
+        READABLE: 'READABLE',
+        WRITEABLE: 'WRITEABLE',
+        READ_REQUIRES_ENCRYPTION: 'READ_REQUIRES_ENCRYPTION',
+        WRITE_REQUIRES_ENCRYPTION: 'WRITE_REQUIRES_ENCRYPTION',
+        READ_REQUIRES_AUTHENTICATION: 'READ_REQUIRES_AUTHENTICATION',
+        WRITE_REQUIRES_AUTHENTICATION: 'WRITE_REQUIRES_AUTHENTICATION',
+        READ_REQUIRES_AUTHORIZATION: 'READ_REQUIRES_AUTHORIZATION',
+        WRITE_REQUIRES_AUTHORIZATION: 'WRITE_REQUIRES_AUTHORIZATION',
+    }
+
+    @staticmethod
+    def string_to_permissions(permissions_str: str):
+        try:
+            return functools.reduce(
+                lambda x, y: x | get_dict_key_by_value(Attribute.PERMISSION_NAMES, y),
+                permissions_str.split(","),
+                0,
+            )
+        except TypeError:
+            raise TypeError(
+                f"Attribute::permissions error:\nExpected a string containing any of the keys, seperated by commas: {','.join(Attribute.PERMISSION_NAMES.values())}\nGot: {permissions_str}"
+            )
+
     def __init__(self, attribute_type, permissions, value=b''):
         EventEmitter.__init__(self)
         self.handle = 0
         self.end_group_handle = 0
-        self.permissions = permissions
+        if isinstance(permissions, str):
+            self.permissions = self.string_to_permissions(permissions)
+        else:
+            self.permissions = permissions
 
         # Convert the type to a UUID object if it isn't already
         if isinstance(attribute_type, str):
@@ -749,7 +784,25 @@ class Attribute(EventEmitter):
     def decode_value(self, value_bytes):
         return value_bytes
 
-    def read_value(self, connection):
+    def read_value(self, connection: Connection):
+        if (
+            self.permissions & self.READ_REQUIRES_ENCRYPTION
+        ) and not connection.encryption:
+            raise ATT_Error(
+                error_code=ATT_INSUFFICIENT_ENCRYPTION_ERROR, att_handle=self.handle
+            )
+        if (
+            self.permissions & self.READ_REQUIRES_AUTHENTICATION
+        ) and not connection.authenticated:
+            raise ATT_Error(
+                error_code=ATT_INSUFFICIENT_AUTHENTICATION_ERROR, att_handle=self.handle
+            )
+        if self.permissions & self.READ_REQUIRES_AUTHORIZATION:
+            # TODO: handle authorization better
+            raise ATT_Error(
+                error_code=ATT_INSUFFICIENT_AUTHORIZATION_ERROR, att_handle=self.handle
+            )
+
         if read := getattr(self.value, 'read', None):
             try:
                 value = read(connection)  # pylint: disable=not-callable
@@ -762,7 +815,25 @@ class Attribute(EventEmitter):
 
         return self.encode_value(value)
 
-    def write_value(self, connection, value_bytes):
+    def write_value(self, connection: Connection, value_bytes):
+        if (
+            self.permissions & self.WRITE_REQUIRES_ENCRYPTION
+        ) and not connection.encryption:
+            raise ATT_Error(
+                error_code=ATT_INSUFFICIENT_ENCRYPTION_ERROR, att_handle=self.handle
+            )
+        if (
+            self.permissions & self.WRITE_REQUIRES_AUTHENTICATION
+        ) and not connection.authenticated:
+            raise ATT_Error(
+                error_code=ATT_INSUFFICIENT_AUTHENTICATION_ERROR, att_handle=self.handle
+            )
+        if self.permissions & self.WRITE_REQUIRES_AUTHORIZATION:
+            # TODO: handle authorization better
+            raise ATT_Error(
+                error_code=ATT_INSUFFICIENT_AUTHORIZATION_ERROR, att_handle=self.handle
+            )
+
         value = self.decode_value(value_bytes)
 
         if write := getattr(self.value, 'write', None):
