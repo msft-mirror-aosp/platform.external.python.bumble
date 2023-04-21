@@ -25,8 +25,7 @@ from contextlib import asynccontextmanager, AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
-from colors import color
-
+from .colors import color
 from .att import ATT_CID, ATT_DEFAULT_MTU, ATT_PDU
 from .gatt import Characteristic, Descriptor, Service
 from .hci import (
@@ -51,6 +50,7 @@ from .hci import (
     HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
     HCI_LE_RAND_COMMAND,
     HCI_LE_READ_PHY_COMMAND,
+    HCI_LE_SET_PHY_COMMAND,
     HCI_MITM_NOT_REQUIRED_GENERAL_BONDING_AUTHENTICATION_REQUIREMENTS,
     HCI_MITM_NOT_REQUIRED_NO_BONDING_AUTHENTICATION_REQUIREMENTS,
     HCI_MITM_REQUIRED_GENERAL_BONDING_AUTHENTICATION_REQUIREMENTS,
@@ -95,10 +95,13 @@ from .hci import (
     HCI_LE_Set_Scan_Enable_Command,
     HCI_LE_Set_Scan_Parameters_Command,
     HCI_LE_Set_Scan_Response_Data_Command,
+    HCI_PIN_Code_Request_Reply_Command,
+    HCI_PIN_Code_Request_Negative_Reply_Command,
     HCI_Read_BD_ADDR_Command,
     HCI_Read_RSSI_Command,
     HCI_Reject_Connection_Request_Command,
     HCI_Remote_Name_Request_Command,
+    HCI_Switch_Role_Command,
     HCI_Set_Connection_Encryption_Command,
     HCI_StatusError,
     HCI_User_Confirmation_Request_Negative_Reply_Command,
@@ -311,6 +314,9 @@ class AdvertisementDataAccumulator:
 
     def update(self, report):
         advertisement = Advertisement.from_advertising_report(report)
+        if advertisement is None:
+            return None
+
         result = None
 
         if advertisement.is_scan_response:
@@ -535,6 +541,9 @@ class Connection(CompositeEventEmitter):
         def on_connection_parameters_update_failure(self, error):
             pass
 
+        def on_connection_data_length_change(self):
+            pass
+
         def on_connection_phy_update(self):
             pass
 
@@ -613,7 +622,9 @@ class Connection(CompositeEventEmitter):
         assert self.transport == BT_BR_EDR_TRANSPORT
         self.handle = handle
         self.peer_resolvable_address = peer_resolvable_address
-        self.role = role
+        # Quirk: role might be known before complete
+        if self.role is None:
+            self.role = role
         self.parameters = parameters
 
     @property
@@ -660,6 +671,9 @@ class Connection(CompositeEventEmitter):
 
     async def encrypt(self, enable: bool = True) -> None:
         return await self.device.encrypt(self, enable)
+
+    async def switch_role(self, role: int) -> None:
+        return await self.device.switch_role(self, role)
 
     async def sustain(self, timeout=None):
         """Idles the current task waiting for a disconnect or timeout"""
@@ -737,6 +751,7 @@ class DeviceConfiguration:
         self.le_enabled = True
         # LE host enable 2nd parameter
         self.le_simultaneous_enabled = True
+        self.classic_enabled = False
         self.classic_sc_enabled = True
         self.classic_ssp_enabled = True
         self.classic_accept_any = True
@@ -766,6 +781,7 @@ class DeviceConfiguration:
         self.le_simultaneous_enabled = config.get(
             'le_simultaneous_enabled', self.le_simultaneous_enabled
         )
+        self.classic_enabled = config.get('classic_enabled', self.classic_enabled)
         self.classic_sc_enabled = config.get(
             'classic_sc_enabled', self.classic_sc_enabled
         )
@@ -977,6 +993,7 @@ class Device(CompositeEventEmitter):
         self.keystore = KeyStore.create_for_device(config)
         self.irk = config.irk
         self.le_enabled = config.le_enabled
+        self.classic_enabled = config.classic_enabled
         self.le_simultaneous_enabled = config.le_simultaneous_enabled
         self.classic_ssp_enabled = config.classic_ssp_enabled
         self.classic_sc_enabled = config.classic_sc_enabled
@@ -989,15 +1006,20 @@ class Device(CompositeEventEmitter):
             for characteristic in service.get("characteristics", []):
                 descriptors = []
                 for descriptor in characteristic.get("descriptors", []):
+                    # Leave this check until 5/25/2023
+                    if descriptor.get("permission", False):
+                        raise Exception(
+                            "Error parsing Device Config's GATT Services. The key 'permission' must be renamed to 'permissions'"
+                        )
                     new_descriptor = Descriptor(
                         attribute_type=descriptor["descriptor_type"],
-                        permissions=descriptor["permission"],
+                        permissions=descriptor["permissions"],
                     )
                     descriptors.append(new_descriptor)
                 new_characteristic = Characteristic(
                     uuid=characteristic["uuid"],
                     properties=characteristic["properties"],
-                    permissions=int(characteristic["permissions"], 0),
+                    permissions=characteristic["permissions"],
                     descriptors=descriptors,
                 )
                 characteristics.append(new_characteristic)
@@ -1239,6 +1261,11 @@ class Device(CompositeEventEmitter):
 
         # Done
         self.powered_on = True
+
+    async def power_off(self) -> None:
+        if self.powered_on:
+            await self.host.flush()
+            self.powered_on = False
 
     def supports_le_feature(self, feature):
         return self.host.supports_le_feature(feature)
@@ -1664,7 +1691,7 @@ class Device(CompositeEventEmitter):
                         )
                     )
                     if not phys:
-                        raise ValueError('least one supported PHY needed')
+                        raise ValueError('at least one supported PHY needed')
 
                     phy_count = len(phys)
                     initiating_phys = phy_list_to_bits(phys)
@@ -1805,7 +1832,7 @@ class Device(CompositeEventEmitter):
 
                 try:
                     return await self.abort_on('flush', pending_connection)
-                except ConnectionError as error:
+                except core.ConnectionError as error:
                     raise core.TimeoutError() from error
         finally:
             self.remove_listener('connection', on_connection)
@@ -2009,7 +2036,7 @@ class Device(CompositeEventEmitter):
         NOTE: the name of the parameters may look odd, but it just follows the names
         used in the Bluetooth spec.
         '''
-        await self.send_command(
+        result = await self.send_command(
             HCI_LE_Connection_Update_Command(
                 connection_handle=connection.handle,
                 connection_interval_min=connection_interval_min,
@@ -2018,9 +2045,10 @@ class Device(CompositeEventEmitter):
                 supervision_timeout=supervision_timeout,
                 min_ce_length=min_ce_length,
                 max_ce_length=max_ce_length,
-            ),
-            check_result=True,
+            )
         )
+        if result.status != HCI_Command_Status_Event.PENDING:
+            raise HCI_StatusError(result)
 
     async def get_connection_rssi(self, connection):
         result = await self.send_command(
@@ -2038,20 +2066,30 @@ class Device(CompositeEventEmitter):
     async def set_connection_phy(
         self, connection, tx_phys=None, rx_phys=None, phy_options=None
     ):
+        if not self.host.supports_command(HCI_LE_SET_PHY_COMMAND):
+            logger.warning('ignoring request, command not supported')
+            return
+
         all_phys_bits = (1 if tx_phys is None else 0) | (
             (1 if rx_phys is None else 0) << 1
         )
 
-        return await self.send_command(
+        result = await self.send_command(
             HCI_LE_Set_PHY_Command(
                 connection_handle=connection.handle,
                 all_phys=all_phys_bits,
                 tx_phys=phy_list_to_bits(tx_phys),
                 rx_phys=phy_list_to_bits(rx_phys),
                 phy_options=0 if phy_options is None else int(phy_options),
-            ),
-            check_result=True,
+            )
         )
+
+        if result.status != HCI_COMMAND_STATUS_PENDING:
+            logger.warning(
+                'HCI_LE_Set_PHY_Command failed: '
+                f'{HCI_Constant.error_name(result.status)}'
+            )
+            raise HCI_StatusError(result)
 
     async def set_default_phy(self, tx_phys=None, rx_phys=None):
         all_phys_bits = (1 if tx_phys is None else 0) | (
@@ -2287,6 +2325,34 @@ class Device(CompositeEventEmitter):
             )
 
     # [Classic only]
+    async def switch_role(self, connection: Connection, role: int):
+        pending_role_change = asyncio.get_running_loop().create_future()
+
+        def on_role_change(new_role):
+            pending_role_change.set_result(new_role)
+
+        def on_role_change_failure(error_code):
+            pending_role_change.set_exception(HCI_Error(error_code))
+
+        connection.on('role_change', on_role_change)
+        connection.on('role_change_failure', on_role_change_failure)
+
+        try:
+            result = await self.send_command(
+                HCI_Switch_Role_Command(bd_addr=connection.peer_address, role=role)  # type: ignore[call-arg]
+            )
+            if result.status != HCI_COMMAND_STATUS_PENDING:
+                logger.warning(
+                    'HCI_Switch_Role_Command failed: '
+                    f'{HCI_Constant.error_name(result.status)}'
+                )
+                raise HCI_StatusError(result)
+            await connection.abort_on('disconnection', pending_role_change)
+        finally:
+            connection.remove_listener('role_change', on_role_change)
+            connection.remove_listener('role_change_failure', on_role_change_failure)
+
+    # [Classic only]
     async def request_remote_name(self, remote: Union[Address, Connection]) -> str:
         # Set up event handlers
         pending_name = asyncio.get_running_loop().create_future()
@@ -2491,7 +2557,7 @@ class Device(CompositeEventEmitter):
             self.advertising = False
 
         # Notify listeners
-        error = ConnectionError(
+        error = core.ConnectionError(
             error_code,
             transport,
             peer_address,
@@ -2564,7 +2630,7 @@ class Device(CompositeEventEmitter):
     @with_connection_from_handle
     def on_disconnection_failure(self, connection, error_code):
         logger.debug(f'*** Disconnection failed: {error_code}')
-        error = ConnectionError(
+        error = core.ConnectionError(
             error_code,
             connection.transport,
             connection.peer_address,
@@ -2762,6 +2828,54 @@ class Device(CompositeEventEmitter):
     # [Classic only]
     @host_event_handler
     @with_connection_from_address
+    def on_pin_code_request(self, connection):
+        # classic legacy pairing
+        # Ask what the pairing config should be for this connection
+        pairing_config = self.pairing_config_factory(connection)
+
+        can_input = pairing_config.delegate.io_capability in (
+            smp.SMP_KEYBOARD_ONLY_IO_CAPABILITY,
+            smp.SMP_KEYBOARD_DISPLAY_IO_CAPABILITY,
+        )
+
+        # respond the pin code
+        if can_input:
+
+            async def get_pin_code():
+                pin_code = await connection.abort_on(
+                    'disconnection', pairing_config.delegate.get_string(16)
+                )
+
+                if pin_code is not None:
+                    pin_code = bytes(pin_code, encoding='utf-8')
+                    pin_code_len = len(pin_code)
+                    assert 0 < pin_code_len <= 16, "pin_code should be 1-16 bytes"
+                    await self.host.send_command(
+                        HCI_PIN_Code_Request_Reply_Command(
+                            bd_addr=connection.peer_address,
+                            pin_code_length=pin_code_len,
+                            pin_code=pin_code,
+                        )
+                    )
+                else:
+                    logger.debug("delegate.get_string() returned None")
+                    await self.host.send_command(
+                        HCI_PIN_Code_Request_Negative_Reply_Command(
+                            bd_addr=connection.peer_address
+                        )
+                    )
+
+            asyncio.create_task(get_pin_code())
+        else:
+            self.host.send_command_sync(
+                HCI_PIN_Code_Request_Negative_Reply_Command(
+                    bd_addr=connection.peer_address
+                )
+            )
+
+    # [Classic only]
+    @host_event_handler
+    @with_connection_from_address
     def on_authentication_user_passkey_notification(self, connection, passkey):
         # Ask what the pairing config should be for this connection
         pairing_config = self.pairing_config_factory(connection)
@@ -2773,7 +2887,7 @@ class Device(CompositeEventEmitter):
     # [Classic only]
     @host_event_handler
     @try_with_connection_from_address
-    def on_remote_name(self, connection, address, remote_name):
+    def on_remote_name(self, connection: Connection, address, remote_name):
         # Try to decode the name
         try:
             remote_name = remote_name.decode('utf-8')
@@ -2791,7 +2905,7 @@ class Device(CompositeEventEmitter):
     # [Classic only]
     @host_event_handler
     @try_with_connection_from_address
-    def on_remote_name_failure(self, connection, address, error):
+    def on_remote_name_failure(self, connection: Connection, address, error):
         if connection:
             connection.emit('remote_name_failure', error)
         self.emit('remote_name_failure', address, error)
@@ -2901,6 +3015,21 @@ class Device(CompositeEventEmitter):
             max_rx_time,
         )
         connection.emit('connection_data_length_change')
+
+    # [Classic only]
+    @host_event_handler
+    @with_connection_from_address
+    def on_role_change(self, connection, new_role):
+        connection.role = new_role
+        connection.emit('role_change', new_role)
+
+    # [Classic only]
+    @host_event_handler
+    @try_with_connection_from_address
+    def on_role_change_failure(self, connection, address, error):
+        if connection:
+            connection.emit('role_change_failure', error)
+        self.emit('role_change_failure', address, error)
 
     @with_connection_from_handle
     def on_pairing_start(self, connection):

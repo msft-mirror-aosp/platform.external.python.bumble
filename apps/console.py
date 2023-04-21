@@ -24,10 +24,10 @@ import logging
 import os
 import random
 import re
+from typing import Optional
 from collections import OrderedDict
 
 import click
-import colors
 
 from prompt_toolkit import Application
 from prompt_toolkit.history import FileHistory
@@ -53,11 +53,13 @@ from prompt_toolkit.layout import (
 
 from bumble import __version__
 import bumble.core
+from bumble import colors
 from bumble.core import UUID, AdvertisingData, BT_LE_TRANSPORT
 from bumble.device import ConnectionParametersPreferences, Device, Connection, Peer
 from bumble.utils import AsyncRunner
 from bumble.transport import open_transport_or_link
 from bumble.gatt import Characteristic, Service, CharacteristicDeclaration, Descriptor
+from bumble.gatt_client import CharacteristicProxy
 from bumble.hci import (
     HCI_Constant,
     HCI_LE_1M_PHY,
@@ -119,6 +121,8 @@ def parse_phys(phys):
 # Console App
 # -----------------------------------------------------------------------------
 class ConsoleApp:
+    connected_peer: Optional[Peer]
+
     def __init__(self):
         self.known_addresses = set()
         self.known_attributes = []
@@ -218,7 +222,7 @@ class ConsoleApp:
                     filter=Condition(lambda: self.top_tab == 'local-services'),
                 ),
                 ConditionalContainer(
-                    Frame(Window(self.remote_services_text), title='Remove Services'),
+                    Frame(Window(self.remote_services_text), title='Remote Services'),
                     filter=Condition(lambda: self.top_tab == 'remote-services'),
                 ),
                 ConditionalContainer(
@@ -490,7 +494,9 @@ class ConsoleApp:
 
         self.show_attributes(attributes)
 
-    def find_characteristic(self, param):
+    def find_characteristic(self, param) -> Optional[CharacteristicProxy]:
+        if not self.connected_peer:
+            return None
         parts = param.split('.')
         if len(parts) == 2:
             service_uuid = UUID(parts[0]) if parts[0] != '*' else None

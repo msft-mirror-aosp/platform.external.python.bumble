@@ -52,6 +52,7 @@ from bumble.hci import (
     HCI_LE_Set_Scan_Parameters_Command,
     HCI_Number_Of_Completed_Packets_Event,
     HCI_Packet,
+    HCI_PIN_Code_Request_Reply_Command,
     HCI_Read_Local_Supported_Commands_Command,
     HCI_Read_Local_Supported_Features_Command,
     HCI_Read_Local_Version_Information_Command,
@@ -213,6 +214,23 @@ def test_HCI_Command():
 
 
 # -----------------------------------------------------------------------------
+def test_HCI_PIN_Code_Request_Reply_Command():
+    pin_code = b'1234'
+    pin_code_length = len(pin_code)
+    # here to make the test pass, we need to
+    # pad pin_code, as HCI_Object.format_fields
+    # does not do it for us
+    padded_pin_code = pin_code + bytes(16 - pin_code_length)
+    command = HCI_PIN_Code_Request_Reply_Command(
+        bd_addr=Address(
+            '00:11:22:33:44:55', address_type=Address.PUBLIC_DEVICE_ADDRESS
+        ),
+        pin_code_length=pin_code_length,
+        pin_code=padded_pin_code,
+    )
+    basic_check(command)
+
+
 def test_HCI_Reset_Command():
     command = HCI_Reset_Command()
     basic_check(command)
@@ -440,6 +458,7 @@ def run_test_events():
 def run_test_commands():
     test_HCI_Command()
     test_HCI_Reset_Command()
+    test_HCI_PIN_Code_Request_Reply_Command()
     test_HCI_Read_Local_Version_Information_Command()
     test_HCI_Read_Local_Supported_Commands_Command()
     test_HCI_Read_Local_Supported_Features_Command()

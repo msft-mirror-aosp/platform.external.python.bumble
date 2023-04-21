@@ -29,8 +29,8 @@ import secrets
 from typing import Dict, Optional, Type
 
 from pyee import EventEmitter
-from colors import color
 
+from .colors import color
 from .hci import Address, HCI_LE_Enable_Encryption_Command, HCI_Object, key_with_value
 from .core import (
     BT_BR_EDR_TRANSPORT,
@@ -522,8 +522,18 @@ class PairingDelegate:
     async def compare_numbers(self, number: int, digits: int) -> bool:
         return True
 
-    async def get_number(self) -> int:
+    async def get_number(self) -> Optional[int]:
+        '''
+        Returns an optional number as an answer to a passkey request.
+        Returning `None` will result in a negative reply.
+        '''
         return 0
+
+    async def get_string(self, max_length) -> Optional[str]:
+        '''
+        Returns a string whose utf-8 encoding is up to max_length bytes.
+        '''
+        return None
 
     # pylint: disable-next=unused-argument
     async def display_number(self, number: int, digits: int) -> None:
