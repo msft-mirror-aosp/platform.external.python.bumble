@@ -20,14 +20,18 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import asyncio
 import logging
 import os
 import json
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .colors import color
 from .hci import Address
+
+if TYPE_CHECKING:
+    from .device import Device
 
 
 # -----------------------------------------------------------------------------
@@ -135,19 +139,19 @@ class PairingKeys:
 
 # -----------------------------------------------------------------------------
 class KeyStore:
-    async def delete(self, name):
+    async def delete(self, name: str):
         pass
 
-    async def update(self, name, keys):
+    async def update(self, name: str, keys: PairingKeys) -> None:
         pass
 
-    async def get(self, _name):
-        return PairingKeys()
+    async def get(self, _name: str) -> Optional[PairingKeys]:
+        return None
 
-    async def get_all(self):
+    async def get_all(self) -> List[Tuple[str, PairingKeys]]:
         return []
 
-    async def delete_all(self):
+    async def delete_all(self) -> None:
         all_keys = await self.get_all()
         await asyncio.gather(*(self.delete(name) for (name, _) in all_keys))
 
@@ -173,15 +177,15 @@ class KeyStore:
             separator = '\n'
 
     @staticmethod
-    def create_for_device(device_config):
-        if device_config.keystore is None:
-            return None
+    def create_for_device(device: Device) -> KeyStore:
+        if device.config.keystore is None:
+            return MemoryKeyStore()
 
-        keystore_type = device_config.keystore.split(':', 1)[0]
+        keystore_type = device.config.keystore.split(':', 1)[0]
         if keystore_type == 'JsonKeyStore':
-            return JsonKeyStore.from_device_config(device_config)
+            return JsonKeyStore.from_device(device)
 
-        return None
+        return MemoryKeyStore()
 
 
 # -----------------------------------------------------------------------------
@@ -204,7 +208,9 @@ class JsonKeyStore(KeyStore):
             self.directory_name = os.path.join(
                 appdirs.user_data_dir(self.APP_NAME, self.APP_AUTHOR), self.KEYS_DIR
             )
-            json_filename = f'{self.namespace}.json'.lower().replace(':', '-')
+            json_filename = (
+                f'{self.namespace}.json'.lower().replace(':', '-').replace('/p', '-p')
+            )
             self.filename = os.path.join(self.directory_name, json_filename)
         else:
             self.filename = filename
@@ -213,9 +219,19 @@ class JsonKeyStore(KeyStore):
         logger.debug(f'JSON keystore: {self.filename}')
 
     @staticmethod
-    def from_device_config(device_config):
-        params = device_config.keystore.split(':', 1)[1:]
-        namespace = str(device_config.address)
+    def from_device(device: Device) -> Optional[JsonKeyStore]:
+        if not device.config.keystore:
+            return None
+
+        params = device.config.keystore.split(':', 1)[1:]
+
+        # Use a namespace based on the device address
+        if device.public_address not in (Address.ANY, Address.ANY_RANDOM):
+            namespace = str(device.public_address)
+        elif device.random_address != Address.ANY_RANDOM:
+            namespace = str(device.random_address)
+        else:
+            namespace = JsonKeyStore.DEFAULT_NAMESPACE
         if params:
             filename = params[0]
         else:
@@ -241,7 +257,7 @@ class JsonKeyStore(KeyStore):
             json.dump(db, output, sort_keys=True, indent=4)
 
         # Atomically replace the previous file
-        os.rename(temp_filename, self.filename)
+        os.replace(temp_filename, self.filename)
 
     async def delete(self, name: str) -> None:
         db = await self.load()
@@ -257,7 +273,7 @@ class JsonKeyStore(KeyStore):
         db = await self.load()
 
         namespace = db.setdefault(self.namespace, {})
-        namespace[name] = keys.to_dict()
+        namespace.setdefault(name, {}).update(keys.to_dict())
 
         await self.save(db)
 
@@ -291,3 +307,24 @@ class JsonKeyStore(KeyStore):
             return None
 
         return PairingKeys.from_dict(keys)
+
+
+# -----------------------------------------------------------------------------
+class MemoryKeyStore(KeyStore):
+    all_keys: Dict[str, PairingKeys]
+
+    def __init__(self) -> None:
+        self.all_keys = {}
+
+    async def delete(self, name: str) -> None:
+        if name in self.all_keys:
+            del self.all_keys[name]
+
+    async def update(self, name: str, keys: PairingKeys) -> None:
+        self.all_keys[name] = keys
+
+    async def get(self, name: str) -> Optional[PairingKeys]:
+        return self.all_keys.get(name)
+
+    async def get_all(self) -> List[Tuple[str, PairingKeys]]:
+        return list(self.all_keys.items())

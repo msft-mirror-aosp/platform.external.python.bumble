@@ -28,9 +28,8 @@ from bumble.device import Device, Peer
 from bumble.host import Host
 from bumble.gatt import Service, Characteristic
 from bumble.transport import AsyncPipeSink
+from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.smp import (
-    PairingConfig,
-    PairingDelegate,
     SMP_PAIRING_NOT_SUPPORTED_ERROR,
     SMP_CONFIRM_VALUE_FAILED_ERROR,
 )
@@ -163,32 +162,37 @@ async def test_self_gatt():
     # Add some GATT characteristics to device 1
     c1 = Characteristic(
         '3A143AD7-D4A7-436B-97D6-5B62C315E833',
-        Characteristic.READ,
+        Characteristic.Properties.READ,
         Characteristic.READABLE,
         bytes([1, 2, 3]),
     )
     c2 = Characteristic(
         '9557CCE2-DB37-46EB-94C4-50AE5B9CB0F8',
-        Characteristic.READ | Characteristic.WRITE,
+        Characteristic.Properties.READ | Characteristic.Properties.WRITE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([4, 5, 6]),
     )
     c3 = Characteristic(
         '84FC1A2E-C52D-4A2D-B8C3-8855BAB86638',
-        Characteristic.READ | Characteristic.WRITE_WITHOUT_RESPONSE,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE_WITHOUT_RESPONSE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([7, 8, 9]),
     )
     c4 = Characteristic(
         '84FC1A2E-C52D-4A2D-B8C3-8855BAB86638',
-        Characteristic.READ | Characteristic.NOTIFY | Characteristic.INDICATE,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.NOTIFY
+        | Characteristic.Properties.INDICATE,
         Characteristic.READABLE,
         bytes([1, 1, 1]),
     )
 
     s1 = Service('8140E247-04F0-42C1-BC34-534C344DAFCA', [c1, c2, c3])
     s2 = Service('97210A0F-1875-4D05-9E5D-326EB171257A', [c4])
-    two_devices.devices[1].add_services([s1, s2])
+    s3 = Service('1853', [])
+    s4 = Service('3A12C182-14E2-4FE0-8C5B-65D7C569F9DB', [], included_services=[s2, s3])
+    two_devices.devices[1].add_services([s1, s2, s4])
 
     # Start
     await two_devices.devices[0].power_on()
@@ -223,6 +227,13 @@ async def test_self_gatt():
     assert result is not None
     assert result == c1.value
 
+    result = await peer.discover_service(s4.uuid)
+    assert len(result) == 1
+    result = await peer.discover_included_services(result[0])
+    assert len(result) == 2
+    # Service UUID is only present when the UUID is 16-bit Bluetooth UUID
+    assert result[1].uuid.to_bytes() == s3.uuid.to_bytes()
+
 
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -234,7 +245,7 @@ async def test_self_gatt_long_read():
     characteristics = [
         Characteristic(
             f'3A143AD7-D4A7-436B-97D6-5B62C315{i:04X}',
-            Characteristic.READ,
+            Characteristic.Properties.READ,
             Characteristic.READABLE,
             bytes([x & 255 for x in range(i)]),
         )
@@ -259,7 +270,7 @@ async def test_self_gatt_long_read():
     found_service = result[0]
     found_characteristics = await found_service.discover_characteristics()
     assert len(found_characteristics) == 513
-    for (i, characteristic) in enumerate(found_characteristics):
+    for i, characteristic in enumerate(found_characteristics):
         value = await characteristic.read_value()
         assert value == characteristics[i].value
 
@@ -314,11 +325,11 @@ async def _test_self_smp_with_configs(pairing_config1, pairing_config2):
 
 # -----------------------------------------------------------------------------
 IO_CAP = [
-    PairingDelegate.NO_OUTPUT_NO_INPUT,
-    PairingDelegate.KEYBOARD_INPUT_ONLY,
-    PairingDelegate.DISPLAY_OUTPUT_ONLY,
-    PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
-    PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
+    PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT,
+    PairingDelegate.IoCapability.KEYBOARD_INPUT_ONLY,
+    PairingDelegate.IoCapability.DISPLAY_OUTPUT_ONLY,
+    PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
+    PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
 ]
 SC = [False, True]
 MITM = [False, True]
@@ -332,7 +343,10 @@ KEY_DIST = range(16)
     itertools.chain(
         itertools.product([IO_CAP], SC, MITM, [15]),
         itertools.product(
-            [[PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT]], SC, MITM, KEY_DIST
+            [[PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT]],
+            SC,
+            MITM,
+            KEY_DIST,
         ),
     ),
 )
@@ -375,7 +389,7 @@ async def test_self_smp(io_caps, sc, mitm, key_dist):
             else:
                 if (
                     self.peer_delegate.io_capability
-                    == PairingDelegate.KEYBOARD_INPUT_ONLY
+                    == PairingDelegate.IoCapability.KEYBOARD_INPUT_ONLY
                 ):
                     peer_number = 6789
                 else:
@@ -418,7 +432,7 @@ async def test_self_smp(io_caps, sc, mitm, key_dist):
 async def test_self_smp_reject():
     class RejectingDelegate(PairingDelegate):
         def __init__(self):
-            super().__init__(PairingDelegate.NO_OUTPUT_NO_INPUT)
+            super().__init__(PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT)
 
         async def accept(self):
             return False
@@ -439,12 +453,14 @@ async def test_self_smp_reject():
 async def test_self_smp_wrong_pin():
     class WrongPinDelegate(PairingDelegate):
         def __init__(self):
-            super().__init__(PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT)
+            super().__init__(
+                PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT
+            )
 
         async def compare_numbers(self, number, digits):
             return False
 
-    wrong_pin_pairing_config = PairingConfig(delegate=WrongPinDelegate())
+    wrong_pin_pairing_config = PairingConfig(mitm=True, delegate=WrongPinDelegate())
     paired = False
     try:
         await _test_self_smp_with_configs(

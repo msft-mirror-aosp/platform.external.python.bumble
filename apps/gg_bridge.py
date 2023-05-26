@@ -230,13 +230,13 @@ class GattlinkNodeBridge(GattlinkL2capEndpoint, Device.Listener):
         )
         self.tx_characteristic = Characteristic(
             GG_GATTLINK_TX_CHARACTERISTIC_UUID,
-            Characteristic.NOTIFY,
+            Characteristic.Properties.NOTIFY,
             Characteristic.READABLE,
         )
         self.tx_characteristic.on('subscription', self.on_tx_subscription)
         self.psm_characteristic = Characteristic(
             GG_GATTLINK_L2CAP_CHANNEL_PSM_CHARACTERISTIC_UUID,
-            Characteristic.READ | Characteristic.NOTIFY,
+            Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
             Characteristic.READABLE,
             bytes([psm, 0]),
         )
@@ -339,8 +339,7 @@ async def run(
 
         # Create a UDP to TX bridge (receive from TX, send to UDP)
         bridge.tx_socket, _ = await loop.create_datagram_endpoint(
-            # pylint: disable-next=unnecessary-lambda
-            lambda: asyncio.DatagramProtocol(),
+            asyncio.DatagramProtocol,
             remote_addr=(send_host, send_port),
         )
 
