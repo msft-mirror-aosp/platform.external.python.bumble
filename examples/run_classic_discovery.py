@@ -19,7 +19,7 @@ import asyncio
 import sys
 import os
 import logging
-from colors import color
+from bumble.colors import color
 
 from bumble.device import Device
 from bumble.transport import open_transport_or_link
@@ -28,17 +28,28 @@ from bumble.core import DeviceClass
 
 # -----------------------------------------------------------------------------
 class DiscoveryListener(Device.Listener):
-    def on_inquiry_result(self, address, class_of_device, eir_data, rssi):
-        service_classes, major_device_class, minor_device_class = DeviceClass.split_class_of_device(class_of_device)
+    def on_inquiry_result(self, address, class_of_device, data, rssi):
+        (
+            service_classes,
+            major_device_class,
+            minor_device_class,
+        ) = DeviceClass.split_class_of_device(class_of_device)
         separator = '\n  '
         print(f'>>> {color(address, "yellow")}:')
         print(f'  Device Class (raw): {class_of_device:06X}')
-        print(f'  Device Major Class: {DeviceClass.major_device_class_name(major_device_class)}')
-        print(f'  Device Minor Class: {DeviceClass.minor_device_class_name(major_device_class, minor_device_class)}')
-        print(f'  Device Services: {", ".join(DeviceClass.service_class_labels(service_classes))}')
+        major_class_name = DeviceClass.major_device_class_name(major_device_class)
+        print('  Device Major Class: ' f'{major_class_name}')
+        minor_class_name = DeviceClass.minor_device_class_name(
+            major_device_class, minor_device_class
+        )
+        print('  Device Minor Class: ' f'{minor_class_name}')
+        print(
+            '  Device Services: '
+            f'{", ".join(DeviceClass.service_class_labels(service_classes))}'
+        )
         print(f'  RSSI: {rssi}')
-        if eir_data.ad_structures:
-            print(f'  {eir_data.to_string(separator)}')
+        if data.ad_structures:
+            print(f'  {data.to_string(separator)}')
 
 
 # -----------------------------------------------------------------------------
@@ -59,6 +70,7 @@ async def main():
 
         await hci_source.wait_for_termination()
 
+
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
