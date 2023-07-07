@@ -19,8 +19,8 @@ import asyncio
 import sys
 import os
 import logging
-from colors import color
-from bumble.device import Device, Peer
+from bumble.colors import color
+from bumble.device import Device
 from bumble.transport import open_transport
 from bumble.profiles.battery_service import BatteryServiceProxy
 
@@ -43,30 +43,28 @@ async def main():
         # Connect to the peer
         target_address = sys.argv[2]
         print(f'=== Connecting to {target_address}...')
-        connection = await device.connect(target_address)
-        print(f'=== Connected to {connection}')
+        async with device.connect_as_gatt(target_address) as peer:
+            print(f'=== Connected to {peer}')
+            battery_service = peer.create_service_proxy(BatteryServiceProxy)
 
-        # Discover the Battery Service
-        peer = Peer(connection)
-        print('=== Discovering Battery Service')
-        battery_service = await peer.discover_and_create_service_proxy(BatteryServiceProxy)
+            # Check that the service was found
+            if not battery_service:
+                print('!!! Service not found')
+                return
 
-        # Check that the service was found
-        if not battery_service:
-            print('!!! Service not found')
-            return
+            # Subscribe to and read the battery level
+            if battery_service.battery_level:
+                await battery_service.battery_level.subscribe(
+                    lambda value: print(
+                        f'{color("Battery Level Update:", "green")} {value}'
+                    )
+                )
+                value = await battery_service.battery_level.read_value()
+                print(f'{color("Initial Battery Level:", "green")} {value}')
 
-        # Subscribe to and read the battery level
-        if battery_service.battery_level:
-            await battery_service.battery_level.subscribe(
-                lambda value: print(f'{color("Battery Level Update:", "green")} {value}')
-            )
-            value = await battery_service.battery_level.read_value()
-            print(f'{color("Initial Battery Level:", "green")} {value}')
-
-        await hci_source.wait_for_termination()
+            await peer.sustain()
 
 
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
