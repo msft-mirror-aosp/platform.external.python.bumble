@@ -17,14 +17,15 @@
 # -----------------------------------------------------------------------------
 import asyncio
 import logging
-import usb.core
-import usb.util
 import threading
 import time
-from colors import color
+
+import usb.core
+import usb.util
 
 from .common import Transport, ParserSource
 from .. import hci
+from ..colors import color
 
 
 # -----------------------------------------------------------------------------
@@ -48,25 +49,26 @@ async def open_pyusb_transport(spec):
     04b4:f901 --> the BT USB dongle with vendor=04b4 and product=f901
     '''
 
-    USB_RECIPIENT_DEVICE                             = 0x00
-    USB_REQUEST_TYPE_CLASS                           = 0x01 << 5
-    USB_ENDPOINT_EVENTS_IN                           = 0x81
-    USB_ENDPOINT_ACL_IN                              = 0x82
-    USB_ENDPOINT_SCO_IN                              = 0x83
-    USB_ENDPOINT_ACL_OUT                             = 0x02
+    # pylint: disable=invalid-name
+    USB_RECIPIENT_DEVICE = 0x00
+    USB_REQUEST_TYPE_CLASS = 0x01 << 5
+    USB_ENDPOINT_EVENTS_IN = 0x81
+    USB_ENDPOINT_ACL_IN = 0x82
+    USB_ENDPOINT_SCO_IN = 0x83
+    USB_ENDPOINT_ACL_OUT = 0x02
     #  USB_ENDPOINT_SCO_OUT                             = 0x03
-    USB_DEVICE_CLASS_WIRELESS_CONTROLLER             = 0xE0
-    USB_DEVICE_SUBCLASS_RF_CONTROLLER                = 0x01
+    USB_DEVICE_CLASS_WIRELESS_CONTROLLER = 0xE0
+    USB_DEVICE_SUBCLASS_RF_CONTROLLER = 0x01
     USB_DEVICE_PROTOCOL_BLUETOOTH_PRIMARY_CONTROLLER = 0x01
 
-    READ_SIZE    = 1024
+    READ_SIZE = 1024
     READ_TIMEOUT = 1000
 
     class UsbPacketSink:
         def __init__(self, device):
-            self.device     = device
-            self.thread     = threading.Thread(target=self.run)
-            self.loop       = asyncio.get_running_loop()
+            self.device = device
+            self.thread = threading.Thread(target=self.run)
+            self.loop = asyncio.get_running_loop()
             self.stop_event = None
 
         def on_packet(self, packet):
@@ -80,9 +82,17 @@ async def open_pyusb_transport(spec):
                 if packet_type == hci.HCI_ACL_DATA_PACKET:
                     self.device.write(USB_ENDPOINT_ACL_OUT, packet[1:])
                 elif packet_type == hci.HCI_COMMAND_PACKET:
-                    self.device.ctrl_transfer(USB_RECIPIENT_DEVICE | USB_REQUEST_TYPE_CLASS, 0, 0, 0, packet[1:])
+                    self.device.ctrl_transfer(
+                        USB_RECIPIENT_DEVICE | USB_REQUEST_TYPE_CLASS,
+                        0,
+                        0,
+                        0,
+                        packet[1:],
+                    )
                 else:
-                    logger.warning(color(f'unsupported packet type {packet_type}', 'red'))
+                    logger.warning(
+                        color(f'unsupported packet type {packet_type}', 'red')
+                    )
             except usb.core.USBTimeoutError:
                 logger.warning('USB Write Timeout')
             except usb.core.USBError as error:
@@ -100,22 +110,21 @@ async def open_pyusb_transport(spec):
         def run(self):
             while self.stop_event is None:
                 time.sleep(1)
-            self.loop.call_soon_threadsafe(lambda: self.stop_event.set())
+            self.loop.call_soon_threadsafe(self.stop_event.set)
 
     class UsbPacketSource(asyncio.Protocol, ParserSource):
         def __init__(self, device, sco_enabled):
             super().__init__()
-            self.device       = device
-            self.loop         = asyncio.get_running_loop()
-            self.queue        = asyncio.Queue()
+            self.device = device
+            self.loop = asyncio.get_running_loop()
+            self.queue = asyncio.Queue()
+            self.dequeue_task = None
             self.event_thread = threading.Thread(
-                target=self.run,
-                args=(USB_ENDPOINT_EVENTS_IN, hci.HCI_EVENT_PACKET)
+                target=self.run, args=(USB_ENDPOINT_EVENTS_IN, hci.HCI_EVENT_PACKET)
             )
             self.event_thread.stop_event = None
             self.acl_thread = threading.Thread(
-                target=self.run,
-                args=(USB_ENDPOINT_ACL_IN, hci.HCI_ACL_DATA_PACKET)
+                target=self.run, args=(USB_ENDPOINT_ACL_IN, hci.HCI_ACL_DATA_PACKET)
             )
             self.acl_thread.stop_event = None
 
@@ -124,12 +133,12 @@ async def open_pyusb_transport(spec):
             if sco_enabled:
                 self.sco_thread = threading.Thread(
                     target=self.run,
-                    args=(USB_ENDPOINT_SCO_IN, hci.HCI_SYNCHRONOUS_DATA_PACKET)
+                    args=(USB_ENDPOINT_SCO_IN, hci.HCI_SYNCHRONOUS_DATA_PACKET),
                 )
                 self.sco_thread.stop_event = None
 
-        def data_received(self, packet):
-            self.parser.feed_data(packet)
+        def data_received(self, data):
+            self.parser.feed_data(data)
 
         def enqueue(self, packet):
             self.queue.put_nowait(packet)
@@ -155,7 +164,7 @@ async def open_pyusb_transport(spec):
 
             # Create stop events and wait for them to be signaled
             self.event_thread.stop_event = asyncio.Event()
-            self.acl_thread.stop_event   = asyncio.Event()
+            self.acl_thread.stop_event = asyncio.Event()
             await self.event_thread.stop_event.wait()
             await self.acl_thread.stop_event.wait()
             if self.sco_enabled:
@@ -173,16 +182,17 @@ async def open_pyusb_transport(spec):
                 except usb.core.USBTimeoutError:
                     continue
                 except usb.core.USBError:
-                    # Don't log this: because pyusb doesn't really support multiple threads
-                    # reading at the same time, we can get occasional USBError(errno=5)
-                    # Input/Output errors reported, but they seem to be harmless.
+                    # Don't log this: because pyusb doesn't really support multiple
+                    # threads reading at the same time, we can get occasional
+                    # USBError(errno=5) Input/Output errors reported, but they seem to
+                    # be harmless.
                     # Until support for async or multi-thread support is added to pyusb,
                     # we'll just live with this as is...
                     # logger.warning(f'USB read error: {error}')
                     time.sleep(1)  # Sleep one second to avoid busy looping
 
             stop_event = current_thread.stop_event
-            self.loop.call_soon_threadsafe(lambda: stop_event.set())
+            self.loop.call_soon_threadsafe(stop_event.set)
 
     class UsbTransport(Transport):
         def __init__(self, device, source, sink):
@@ -194,18 +204,28 @@ async def open_pyusb_transport(spec):
             await self.sink.stop()
             usb.util.release_interface(self.device, 0)
 
+    usb_find = usb.core.find
+    try:
+        import libusb_package
+    except ImportError:
+        logger.debug('libusb_package is not available')
+    else:
+        usb_find = libusb_package.find
+
     # Find the device according to the spec moniker
     if ':' in spec:
         vendor_id, product_id = spec.split(':')
-        device = usb.core.find(idVendor=int(vendor_id, 16), idProduct=int(product_id, 16))
+        device = usb_find(idVendor=int(vendor_id, 16), idProduct=int(product_id, 16))
     else:
         device_index = int(spec)
-        devices = list(usb.core.find(
-            find_all        = 1,
-            bDeviceClass    = USB_DEVICE_CLASS_WIRELESS_CONTROLLER,
-            bDeviceSubClass = USB_DEVICE_SUBCLASS_RF_CONTROLLER,
-            bDeviceProtocol = USB_DEVICE_PROTOCOL_BLUETOOTH_PRIMARY_CONTROLLER
-        ))
+        devices = list(
+            usb_find(
+                find_all=1,
+                bDeviceClass=USB_DEVICE_CLASS_WIRELESS_CONTROLLER,
+                bDeviceSubClass=USB_DEVICE_SUBCLASS_RF_CONTROLLER,
+                bDeviceProtocol=USB_DEVICE_PROTOCOL_BLUETOOTH_PRIMARY_CONTROLLER,
+            )
+        )
         if len(devices) > device_index:
             device = devices[device_index]
         else:
@@ -232,6 +252,7 @@ async def open_pyusb_transport(spec):
 
     # Select an alternate setting for SCO, if available
     sco_enabled = False
+    # pylint: disable=line-too-long
     # NOTE: this is disabled for now, because SCO with alternate settings is broken,
     # see: https://github.com/libusb/libusb/issues/36
     #
