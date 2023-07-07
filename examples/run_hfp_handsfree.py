@@ -19,26 +19,26 @@ import asyncio
 import sys
 import os
 import logging
-import websockets
 import json
+import websockets
 
 
 from bumble.device import Device
 from bumble.transport import open_transport_or_link
-from bumble.rfcomm import Server as RfommServer
+from bumble.rfcomm import Server as RfcommServer
 from bumble.sdp import (
     DataElement,
     ServiceAttribute,
     SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
     SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
     SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-    SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID
+    SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
 )
 from bumble.core import (
     BT_GENERIC_AUDIO_SERVICE,
     BT_HANDSFREE_SERVICE,
     BT_L2CAP_PROTOCOL_ID,
-    BT_RFCOMM_PROTOCOL_ID
+    BT_RFCOMM_PROTOCOL_ID,
 )
 from bumble.hfp import HfpProtocol
 
@@ -49,36 +49,44 @@ def make_sdp_records(rfcomm_channel):
         0x00010001: [
             ServiceAttribute(
                 SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
-                DataElement.unsigned_integer_32(0x00010001)
+                DataElement.unsigned_integer_32(0x00010001),
             ),
             ServiceAttribute(
                 SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
-                DataElement.sequence([
-                    DataElement.uuid(BT_HANDSFREE_SERVICE),
-                    DataElement.uuid(BT_GENERIC_AUDIO_SERVICE)
-                ])
+                DataElement.sequence(
+                    [
+                        DataElement.uuid(BT_HANDSFREE_SERVICE),
+                        DataElement.uuid(BT_GENERIC_AUDIO_SERVICE),
+                    ]
+                ),
             ),
             ServiceAttribute(
                 SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-                DataElement.sequence([
-                    DataElement.sequence([
-                        DataElement.uuid(BT_L2CAP_PROTOCOL_ID)
-                    ]),
-                    DataElement.sequence([
-                        DataElement.uuid(BT_RFCOMM_PROTOCOL_ID),
-                        DataElement.unsigned_integer_8(rfcomm_channel)
-                    ])
-                ])
+                DataElement.sequence(
+                    [
+                        DataElement.sequence([DataElement.uuid(BT_L2CAP_PROTOCOL_ID)]),
+                        DataElement.sequence(
+                            [
+                                DataElement.uuid(BT_RFCOMM_PROTOCOL_ID),
+                                DataElement.unsigned_integer_8(rfcomm_channel),
+                            ]
+                        ),
+                    ]
+                ),
             ),
             ServiceAttribute(
                 SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-                DataElement.sequence([
-                    DataElement.sequence([
-                        DataElement.uuid(BT_HANDSFREE_SERVICE),
-                        DataElement.unsigned_integer_16(0x0105)
-                    ])
-                ])
-            )
+                DataElement.sequence(
+                    [
+                        DataElement.sequence(
+                            [
+                                DataElement.uuid(BT_HANDSFREE_SERVICE),
+                                DataElement.unsigned_integer_16(0x0105),
+                            ]
+                        )
+                    ]
+                ),
+            ),
         ]
     }
 
@@ -89,7 +97,7 @@ class UiServer:
 
     async def start(self):
         # Start a Websocket server to receive events from a web page
-        async def serve(websocket, path):
+        async def serve(websocket, _path):
             while True:
                 try:
                     message = await websocket.recv()
@@ -103,6 +111,8 @@ class UiServer:
 
                 except websockets.exceptions.ConnectionClosedOK:
                     pass
+
+        # pylint: disable=no-member
         await websockets.serve(serve, 'localhost', 8989)
 
 
@@ -111,7 +121,7 @@ async def protocol_loop(protocol):
     await protocol.initialize_service()
 
     while True:
-        await(protocol.next_line())
+        await (protocol.next_line())
 
 
 # -----------------------------------------------------------------------------
@@ -138,7 +148,7 @@ async def main():
         device.classic_enabled = True
 
         # Create and register a server
-        rfcomm_server = RfommServer(device)
+        rfcomm_server = RfcommServer(device)
 
         # Listen for incoming DLC connections
         channel_number = rfcomm_server.listen(on_dlc)
@@ -160,6 +170,7 @@ async def main():
 
         await hci_source.wait_for_termination()
 
+
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
