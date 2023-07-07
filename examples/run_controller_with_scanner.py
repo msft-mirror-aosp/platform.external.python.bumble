@@ -19,7 +19,7 @@ import logging
 import asyncio
 import sys
 import os
-from colors import color
+from bumble.colors import color
 
 from bumble.device import Device
 from bumble.controller import Controller
@@ -29,15 +29,19 @@ from bumble.transport import open_transport_or_link
 
 # -----------------------------------------------------------------------------
 class ScannerListener(Device.Listener):
-    def on_advertisement(self, address, ad_data, rssi, connectable):
-        address_type_string = ('P', 'R', 'PI', 'RI')[address.address_type]
-        address_color = 'yellow' if connectable else 'red'
+    def on_advertisement(self, advertisement):
+        address_type_string = ('P', 'R', 'PI', 'RI')[advertisement.address.address_type]
+        address_color = 'yellow' if advertisement.is_connectable else 'red'
         if address_type_string.startswith('P'):
             type_color = 'green'
         else:
             type_color = 'cyan'
 
-        print(f'>>> {color(address, address_color)} [{color(address_type_string, type_color)}]: RSSI={rssi}, {ad_data}')
+        print(
+            f'>>> {color(advertisement.address, address_color)} '
+            f'[{color(address_type_string, type_color)}]: '
+            f'RSSI={advertisement.rssi}, {advertisement.data}'
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -55,20 +59,25 @@ async def main():
         link = LocalLink()
 
         # Create a first controller using the packet source/sink as its host interface
-        controller1 = Controller('C1', host_source = hci_source, host_sink = hci_sink, link = link)
+        controller1 = Controller(
+            'C1', host_source=hci_source, host_sink=hci_sink, link=link
+        )
         controller1.address = 'E0:E1:E2:E3:E4:E5'
 
         # Create a second controller using the same link
-        controller2 = Controller('C2', link = link)
+        controller2 = Controller('C2', link=link)
 
         # Create a device with a scanner listener
-        device = Device.with_hci('Bumble', 'F0:F1:F2:F3:F4:F5', controller2, controller2)
+        device = Device.with_hci(
+            'Bumble', 'F0:F1:F2:F3:F4:F5', controller2, controller2
+        )
         device.listener = ScannerListener()
         await device.power_on()
         await device.start_scanning()
 
         await hci_source.wait_for_termination()
 
+
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
