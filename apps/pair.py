@@ -24,7 +24,7 @@ from prompt_toolkit.shortcuts import PromptSession
 from bumble.colors import color
 from bumble.device import Device, Peer
 from bumble.transport import open_transport_or_link
-from bumble.smp import PairingDelegate, PairingConfig
+from bumble.pairing import PairingDelegate, PairingConfig
 from bumble.smp import error_name as smp_error_name
 from bumble.keys import JsonKeyStore
 from bumble.core import ProtocolError
@@ -264,6 +264,7 @@ async def pair(
     sc,
     mitm,
     bond,
+    ctkd,
     io,
     prompt,
     request,
@@ -302,7 +303,8 @@ async def pair(
                     [
                         Characteristic(
                             '552957FB-CF1F-4A31-9535-E78847E1A714',
-                            Characteristic.READ | Characteristic.WRITE,
+                            Characteristic.Properties.READ
+                            | Characteristic.Properties.WRITE,
                             Characteristic.READABLE | Characteristic.WRITEABLE,
                             CharacteristicValue(
                                 read=read_with_error, write=write_with_error
@@ -316,6 +318,7 @@ async def pair(
         if mode == 'classic':
             device.classic_enabled = True
             device.le_enabled = False
+            device.classic_smp_enabled = ctkd
 
         # Get things going
         await device.power_on()
@@ -342,8 +345,13 @@ async def pair(
                     print(color(f'Pairing failed: {error}', 'red'))
                     return
         else:
-            # Advertise so that peers can find us and connect
-            await device.start_advertising(auto_restart=True)
+            if mode == 'le':
+                # Advertise so that peers can find us and connect
+                await device.start_advertising(auto_restart=True)
+            else:
+                # Become discoverable and connectable
+                await device.set_discoverable(True)
+                await device.set_connectable(True)
 
         # Run until the user asks to exit
         await Waiter.instance.wait_until_terminated()
@@ -379,6 +387,13 @@ class LogHandler(logging.Handler):
     '--bond', type=bool, default=True, help='Enable bonding', show_default=True
 )
 @click.option(
+    '--ctkd',
+    type=bool,
+    default=True,
+    help='Enable CTKD',
+    show_default=True,
+)
+@click.option(
     '--io',
     type=click.Choice(
         ['keyboard', 'display', 'display+keyboard', 'display+yes/no', 'none']
@@ -404,6 +419,7 @@ def main(
     sc,
     mitm,
     bond,
+    ctkd,
     io,
     prompt,
     request,
@@ -426,6 +442,7 @@ def main(
             sc,
             mitm,
             bond,
+            ctkd,
             io,
             prompt,
             request,
