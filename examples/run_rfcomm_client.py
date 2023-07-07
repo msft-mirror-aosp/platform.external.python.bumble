@@ -20,10 +20,16 @@ import sys
 import os
 import logging
 
-from colors import color
+from bumble.colors import color
+
+import bumble.core
 from bumble.device import Device
 from bumble.transport import open_transport_or_link
-from bumble.core import ConnectionError, BT_BR_EDR_TRANSPORT
+from bumble.core import (
+    BT_L2CAP_PROTOCOL_ID,
+    BT_RFCOMM_PROTOCOL_ID,
+    BT_BR_EDR_TRANSPORT,
+)
 from bumble.rfcomm import Client
 from bumble.sdp import (
     Client as SDP_Client,
@@ -31,9 +37,8 @@ from bumble.sdp import (
     ServiceAttribute,
     SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
     SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
-    SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID
+    SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
 )
-from bumble.hci import BT_L2CAP_PROTOCOL_ID, BT_RFCOMM_PROTOCOL_ID
 
 
 # -----------------------------------------------------------------------------
@@ -48,47 +53,70 @@ async def list_rfcomm_channels(device, connection):
         [
             SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
             SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-            SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID
-        ]
+            SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+        ],
     )
     print(color('==================================', 'blue'))
     print(color('RFCOMM Services:', 'yellow'))
+    # pylint: disable-next=too-many-nested-blocks
     for attribute_list in search_result:
         # Look for the RFCOMM Channel number
         protocol_descriptor_list = ServiceAttribute.find_attribute_in_list(
-            attribute_list,
-            SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID
+            attribute_list, SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID
         )
         if protocol_descriptor_list:
             for protocol_descriptor in protocol_descriptor_list.value:
                 if len(protocol_descriptor.value) >= 2:
                     if protocol_descriptor.value[0].value == BT_RFCOMM_PROTOCOL_ID:
                         print(color('SERVICE:', 'green'))
-                        print(color('  RFCOMM Channel:', 'cyan'), protocol_descriptor.value[1].value)
+                        print(
+                            color('  RFCOMM Channel:', 'cyan'),
+                            protocol_descriptor.value[1].value,
+                        )
 
                         # List profiles
-                        bluetooth_profile_descriptor_list = ServiceAttribute.find_attribute_in_list(
-                            attribute_list,
-                            SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID
+                        bluetooth_profile_descriptor_list = (
+                            ServiceAttribute.find_attribute_in_list(
+                                attribute_list,
+                                SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                            )
                         )
                         if bluetooth_profile_descriptor_list:
                             if bluetooth_profile_descriptor_list.value:
-                                if bluetooth_profile_descriptor_list.value[0].type == DataElement.SEQUENCE:
-                                    bluetooth_profile_descriptors = bluetooth_profile_descriptor_list.value
+                                if (
+                                    bluetooth_profile_descriptor_list.value[0].type
+                                    == DataElement.SEQUENCE
+                                ):
+                                    bluetooth_profile_descriptors = (
+                                        bluetooth_profile_descriptor_list.value
+                                    )
                                 else:
-                                    # Sometimes, instead of a list of lists, we just find a list. Fix that
-                                    bluetooth_profile_descriptors = [bluetooth_profile_descriptor_list]
+                                    # Sometimes, instead of a list of lists, we just
+                                    # find a list. Fix that
+                                    bluetooth_profile_descriptors = [
+                                        bluetooth_profile_descriptor_list
+                                    ]
 
                                 print(color('  Profiles:', 'green'))
-                                for bluetooth_profile_descriptor in bluetooth_profile_descriptors:
-                                    version_major = bluetooth_profile_descriptor.value[1].value >> 8
-                                    version_minor = bluetooth_profile_descriptor.value[1].value & 0xFF
-                                    print(f'    {bluetooth_profile_descriptor.value[0].value} - version {version_major}.{version_minor}')
+                                for (
+                                    bluetooth_profile_descriptor
+                                ) in bluetooth_profile_descriptors:
+                                    version_major = (
+                                        bluetooth_profile_descriptor.value[1].value >> 8
+                                    )
+                                    version_minor = (
+                                        bluetooth_profile_descriptor.value[1].value
+                                        & 0xFF
+                                    )
+                                    print(
+                                        '    '
+                                        f'{bluetooth_profile_descriptor.value[0].value}'
+                                        f' - version {version_major}.{version_minor}'
+                                    )
 
                         # List service classes
                         service_class_id_list = ServiceAttribute.find_attribute_in_list(
-                            attribute_list,
-                            SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID
+                            attribute_list, SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID
                         )
                         if service_class_id_list:
                             if service_class_id_list.value:
@@ -98,14 +126,16 @@ async def list_rfcomm_channels(device, connection):
 
     await sdp_client.disconnect()
 
+
 # -----------------------------------------------------------------------------
 class TcpServerProtocol(asyncio.Protocol):
     def __init__(self, rfcomm_session):
         self.rfcomm_session = rfcomm_session
+        self.transport = None
 
     def connection_made(self, transport):
-        peername = transport.get_extra_info('peername')
-        print(f'<<< TCP Server: connection from {peername}')
+        peer_name = transport.get_extra_info('peer_name')
+        print(f'<<< TCP Server: connection from {peer_name}')
         self.transport = transport
         self.rfcomm_session.sink = self.rfcomm_data_received
 
@@ -137,9 +167,14 @@ async def tcp_server(tcp_port, rfcomm_session):
 # -----------------------------------------------------------------------------
 async def main():
     if len(sys.argv) < 5:
-        print('Usage: run_rfcomm_client.py <device-config> <transport-spec> <bluetooth-address> <channel>|discover [tcp-port]')
-        print('  specifying a channel number, or "discover" to list all RFCOMM channels')
-        print('example: run_rfcomm_client.py classic1.json usb:04b4:f901 E1:CA:72:48:C4:E8 8')
+        print(
+            'Usage: run_rfcomm_client.py <device-config> <transport-spec> '
+            '<bluetooth-address> <channel>|discover [tcp-port]'
+        )
+        print(
+            '  specifying a channel number, or "discover" to list all RFCOMM channels'
+        )
+        print('example: run_rfcomm_client.py classic1.json usb:0 E1:CA:72:48:C4:E8 8')
         return
 
     print('<<< connecting to HCI...')
@@ -173,7 +208,7 @@ async def main():
         print('*** Encryption on')
 
         # Create a client and start it
-        print('@@@ Starting to RFCOMM client...')
+        print('@@@ Starting RFCOMM client...')
         rfcomm_client = Client(device, connection)
         rfcomm_mux = await rfcomm_client.start()
         print('@@@ Started')
@@ -183,7 +218,7 @@ async def main():
         try:
             session = await rfcomm_mux.open_dlc(channel)
             print('### Session open', session)
-        except ConnectionError as error:
+        except bumble.core.ConnectionError as error:
             print(f'### Session open failed: {error}')
             await rfcomm_mux.disconnect()
             print('@@@ Disconnected from RFCOMM server')
@@ -192,10 +227,11 @@ async def main():
         if len(sys.argv) == 6:
             # A TCP port was specified, start listening
             tcp_port = int(sys.argv[5])
-            asyncio.get_running_loop().create_task(tcp_server(tcp_port, session))
+            asyncio.create_task(tcp_server(tcp_port, session))
 
         await hci_source.wait_for_termination()
 
+
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
