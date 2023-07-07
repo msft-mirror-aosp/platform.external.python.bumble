@@ -19,7 +19,7 @@ import asyncio
 import sys
 import os
 import logging
-from colors import color
+from bumble.colors import color
 
 from bumble.core import ProtocolError
 from bumble.device import Device, Peer
@@ -34,6 +34,7 @@ class Listener(Device.Listener):
         self.device = device
 
     @AsyncRunner.run_in_task()
+    # pylint: disable=invalid-overridden-method
     async def on_connection(self, connection):
         print(f'=== Connected to {connection}')
 
@@ -70,7 +71,10 @@ class Listener(Device.Listener):
 # -----------------------------------------------------------------------------
 async def main():
     if len(sys.argv) < 3:
-        print('Usage: run_gatt_client.py <device-config> <transport-spec> [<bluetooth-address>]')
+        print(
+            'Usage: run_gatt_client.py <device-config> <transport-spec> '
+            '[<bluetooth-address>]'
+        )
         print('example: run_gatt_client.py device1.json usb:0 E1:CA:72:48:C4:E8')
         return
 
@@ -93,6 +97,7 @@ async def main():
 
         await asyncio.get_running_loop().create_future()
 
+
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())

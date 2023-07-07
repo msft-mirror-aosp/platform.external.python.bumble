@@ -38,7 +38,7 @@ def test_import():
         sdp,
         smp,
         transport,
-        utils
+        utils,
     )
 
     assert att
@@ -63,5 +63,67 @@ def test_import():
 
 
 # -----------------------------------------------------------------------------
+def test_app_imports():
+    from apps.console import main
+
+    assert main
+
+    from apps.controller_info import main
+
+    assert main
+
+    from apps.controllers import main
+
+    assert main
+
+    from apps.gatt_dump import main
+
+    assert main
+
+    from apps.gg_bridge import main
+
+    assert main
+
+    from apps.hci_bridge import main
+
+    assert main
+
+    from apps.pair import main
+
+    assert main
+
+    from apps.scan import main
+
+    assert main
+
+    from apps.show import main
+
+    assert main
+
+    from apps.unbond import main
+
+    assert main
+
+    from apps.usb_probe import main
+
+    assert main
+
+
+# -----------------------------------------------------------------------------
+def test_profiles_imports():
+    from bumble.profiles import (
+        battery_service,
+        device_information_service,
+        heart_rate_service,
+    )
+
+    assert battery_service
+    assert device_information_service
+    assert heart_rate_service
+
+
+# -----------------------------------------------------------------------------
 if __name__ == '__main__':
     test_import()
+    test_app_imports()
+    test_profiles_imports()

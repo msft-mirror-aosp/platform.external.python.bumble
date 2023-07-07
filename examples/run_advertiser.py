@@ -16,23 +16,36 @@
 # Imports
 # -----------------------------------------------------------------------------
 import asyncio
+import logging
 import sys
 import os
+from bumble.device import AdvertisingType, Device
+from bumble.hci import Address
 
-from bumble.hci import *
-from bumble.controller import *
-from bumble.device import *
-from bumble.transport import *
-from bumble.host import *
 from bumble.transport import open_transport_or_link
 
 
 # -----------------------------------------------------------------------------
 async def main():
-    if len(sys.argv) != 3:
-        print('Usage: run_advertiser.py <config-file> <transport-spec>')
-        print('example: run_advertiser.py device1.json link-relay:ws://localhost:8888/test')
+    if len(sys.argv) < 3:
+        print(
+            'Usage: run_advertiser.py <config-file> <transport-spec> [type] [address]'
+        )
+        print('example: run_advertiser.py device1.json usb:0')
         return
+
+    if len(sys.argv) >= 4:
+        advertising_type = AdvertisingType(int(sys.argv[3]))
+    else:
+        advertising_type = AdvertisingType.UNDIRECTED_CONNECTABLE_SCANNABLE
+
+    if advertising_type.is_directed:
+        if len(sys.argv) < 5:
+            print('<address> required for directed advertising')
+            return
+        target = Address(sys.argv[4])
+    else:
+        target = None
 
     print('<<< connecting to HCI...')
     async with await open_transport_or_link(sys.argv[2]) as (hci_source, hci_sink):
@@ -40,9 +53,10 @@ async def main():
 
         device = Device.from_config_file_with_hci(sys.argv[1], hci_source, hci_sink)
         await device.power_on()
-        await device.start_advertising()
+        await device.start_advertising(advertising_type=advertising_type, target=target)
         await hci_source.wait_for_termination()
 
+
 # -----------------------------------------------------------------------------
-logging.basicConfig(level = os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
+logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper())
 asyncio.run(main())
