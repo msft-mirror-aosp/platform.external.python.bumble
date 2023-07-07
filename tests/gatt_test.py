@@ -23,6 +23,7 @@ import pytest
 
 from bumble.controller import Controller
 from bumble.gatt_client import CharacteristicProxy
+from bumble.gatt_server import Server
 from bumble.link import LocalLink
 from bumble.device import Device, Peer
 from bumble.host import Host
@@ -114,7 +115,7 @@ async def test_characteristic_encoding():
 
     c = Foo(
         GATT_BATTERY_LEVEL_CHARACTERISTIC,
-        Characteristic.READ,
+        Characteristic.Properties.READ,
         Characteristic.READABLE,
         123,
     )
@@ -143,7 +144,9 @@ async def test_characteristic_encoding():
 
     characteristic = Characteristic(
         'FDB159DB-036C-49E3-B3DB-6325AC750806',
-        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE
+        | Characteristic.Properties.NOTIFY,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([123]),
     )
@@ -239,7 +242,9 @@ async def test_attribute_getters():
     characteristic_uuid = UUID('FDB159DB-036C-49E3-B3DB-6325AC750806')
     characteristic = Characteristic(
         characteristic_uuid,
-        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE
+        | Characteristic.Properties.NOTIFY,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([123]),
     )
@@ -284,7 +289,7 @@ def test_CharacteristicAdapter():
     v = bytes([1, 2, 3])
     c = Characteristic(
         GATT_BATTERY_LEVEL_CHARACTERISTIC,
-        Characteristic.READ,
+        Characteristic.Properties.READ,
         Characteristic.READABLE,
         v,
     )
@@ -420,7 +425,7 @@ async def test_read_write():
 
     characteristic1 = Characteristic(
         'FDB159DB-036C-49E3-B3DB-6325AC750806',
-        Characteristic.READ | Characteristic.WRITE,
+        Characteristic.Properties.READ | Characteristic.Properties.WRITE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
     )
 
@@ -437,7 +442,7 @@ async def test_read_write():
 
     characteristic2 = Characteristic(
         '66DE9057-C848-4ACA-B993-D675644EBB85',
-        Characteristic.READ | Characteristic.WRITE,
+        Characteristic.Properties.READ | Characteristic.Properties.WRITE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         CharacteristicValue(
             read=on_characteristic2_read, write=on_characteristic2_write
@@ -500,7 +505,7 @@ async def test_read_write2():
     v = bytes([0x11, 0x22, 0x33, 0x44])
     characteristic1 = Characteristic(
         'FDB159DB-036C-49E3-B3DB-6325AC750806',
-        Characteristic.READ | Characteristic.WRITE,
+        Characteristic.Properties.READ | Characteristic.Properties.WRITE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         value=v,
     )
@@ -544,7 +549,7 @@ async def test_subscribe_notify():
 
     characteristic1 = Characteristic(
         'FDB159DB-036C-49E3-B3DB-6325AC750806',
-        Characteristic.READ | Characteristic.NOTIFY,
+        Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
         Characteristic.READABLE,
         bytes([1, 2, 3]),
     )
@@ -560,7 +565,7 @@ async def test_subscribe_notify():
 
     characteristic2 = Characteristic(
         '66DE9057-C848-4ACA-B993-D675644EBB85',
-        Characteristic.READ | Characteristic.INDICATE,
+        Characteristic.Properties.READ | Characteristic.Properties.INDICATE,
         Characteristic.READABLE,
         bytes([4, 5, 6]),
     )
@@ -576,7 +581,9 @@ async def test_subscribe_notify():
 
     characteristic3 = Characteristic(
         'AB5E639C-40C1-4238-B9CB-AF41F8B806E4',
-        Characteristic.READ | Characteristic.NOTIFY | Characteristic.INDICATE,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.NOTIFY
+        | Characteristic.Properties.INDICATE,
         Characteristic.READABLE,
         bytes([7, 8, 9]),
     )
@@ -796,32 +803,46 @@ async def test_mtu_exchange():
 # -----------------------------------------------------------------------------
 def test_char_property_to_string():
     # single
-    assert Characteristic.property_name(0x01) == "BROADCAST"
-    assert Characteristic.property_name(Characteristic.BROADCAST) == "BROADCAST"
+    assert str(Characteristic.Properties(0x01)) == "Properties.BROADCAST"
+    assert str(Characteristic.Properties.BROADCAST) == "Properties.BROADCAST"
 
     # double
-    assert Characteristic.properties_as_string(0x03) == "BROADCAST,READ"
+    assert str(Characteristic.Properties(0x03)) == "Properties.READ|BROADCAST"
     assert (
-        Characteristic.properties_as_string(
-            Characteristic.BROADCAST | Characteristic.READ
-        )
-        == "BROADCAST,READ"
+        str(Characteristic.Properties.BROADCAST | Characteristic.Properties.READ)
+        == "Properties.READ|BROADCAST"
     )
 
 
 # -----------------------------------------------------------------------------
-def test_char_property_string_to_type():
+def test_characteristic_property_from_string():
     # single
-    assert Characteristic.string_to_properties("BROADCAST") == Characteristic.BROADCAST
+    assert (
+        Characteristic.Properties.from_string("BROADCAST")
+        == Characteristic.Properties.BROADCAST
+    )
 
     # double
     assert (
-        Characteristic.string_to_properties("BROADCAST,READ")
-        == Characteristic.BROADCAST | Characteristic.READ
+        Characteristic.Properties.from_string("BROADCAST,READ")
+        == Characteristic.Properties.BROADCAST | Characteristic.Properties.READ
     )
     assert (
-        Characteristic.string_to_properties("READ,BROADCAST")
-        == Characteristic.BROADCAST | Characteristic.READ
+        Characteristic.Properties.from_string("READ,BROADCAST")
+        == Characteristic.Properties.BROADCAST | Characteristic.Properties.READ
+    )
+
+
+# -----------------------------------------------------------------------------
+def test_characteristic_property_from_string_assert():
+    with pytest.raises(TypeError) as e_info:
+        Characteristic.Properties.from_string("BROADCAST,HELLO")
+
+    assert (
+        str(e_info.value)
+        == """Characteristic.Properties::from_string() error:
+Expected a string containing any of the keys, separated by commas: BROADCAST,READ,WRITE_WITHOUT_RESPONSE,WRITE,NOTIFY,INDICATE,AUTHENTICATED_SIGNED_WRITES,EXTENDED_PROPERTIES
+Got: BROADCAST,HELLO"""
     )
 
 
@@ -832,7 +853,9 @@ async def test_server_string():
 
     characteristic = Characteristic(
         'FDB159DB-036C-49E3-B3DB-6325AC750806',
-        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE
+        | Characteristic.Properties.NOTIFY,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([123]),
     )
@@ -843,13 +866,13 @@ async def test_server_string():
     assert (
         str(server.gatt_server)
         == """Service(handle=0x0001, end=0x0005, uuid=UUID-16:1800 (Generic Access))
-CharacteristicDeclaration(handle=0x0002, value_handle=0x0003, uuid=UUID-16:2A00 (Device Name), properties=READ)
-Characteristic(handle=0x0003, end=0x0003, uuid=UUID-16:2A00 (Device Name), properties=READ)
-CharacteristicDeclaration(handle=0x0004, value_handle=0x0005, uuid=UUID-16:2A01 (Appearance), properties=READ)
-Characteristic(handle=0x0005, end=0x0005, uuid=UUID-16:2A01 (Appearance), properties=READ)
+CharacteristicDeclaration(handle=0x0002, value_handle=0x0003, uuid=UUID-16:2A00 (Device Name), Properties.READ)
+Characteristic(handle=0x0003, end=0x0003, uuid=UUID-16:2A00 (Device Name), Properties.READ)
+CharacteristicDeclaration(handle=0x0004, value_handle=0x0005, uuid=UUID-16:2A01 (Appearance), Properties.READ)
+Characteristic(handle=0x0005, end=0x0005, uuid=UUID-16:2A01 (Appearance), Properties.READ)
 Service(handle=0x0006, end=0x0009, uuid=3A657F47-D34F-46B3-B1EC-698E29B6B829)
-CharacteristicDeclaration(handle=0x0007, value_handle=0x0008, uuid=FDB159DB-036C-49E3-B3DB-6325AC750806, properties=READ,WRITE,NOTIFY)
-Characteristic(handle=0x0008, end=0x0009, uuid=FDB159DB-036C-49E3-B3DB-6325AC750806, properties=READ,WRITE,NOTIFY)
+CharacteristicDeclaration(handle=0x0007, value_handle=0x0008, uuid=FDB159DB-036C-49E3-B3DB-6325AC750806, Properties.NOTIFY|WRITE|READ)
+Characteristic(handle=0x0008, end=0x0009, uuid=FDB159DB-036C-49E3-B3DB-6325AC750806, Properties.NOTIFY|WRITE|READ)
 Descriptor(handle=0x0009, type=UUID-16:2902 (Client Characteristic Configuration), value=0000)"""
     )
 
@@ -871,19 +894,129 @@ def test_attribute_string_to_permissions():
 
 
 # -----------------------------------------------------------------------------
-def test_charracteristic_permissions():
+def test_characteristic_permissions():
     characteristic = Characteristic(
         'FDB159DB-036C-49E3-B3DB-6325AC750806',
-        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE
+        | Characteristic.Properties.NOTIFY,
         'READABLE,WRITEABLE',
     )
     assert characteristic.permissions == 3
 
 
 # -----------------------------------------------------------------------------
+def test_characteristic_has_properties():
+    characteristic = Characteristic(
+        'FDB159DB-036C-49E3-B3DB-6325AC750806',
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE
+        | Characteristic.Properties.NOTIFY,
+        'READABLE,WRITEABLE',
+    )
+    assert characteristic.has_properties(Characteristic.Properties.READ)
+    assert characteristic.has_properties(
+        Characteristic.Properties.READ | Characteristic.Properties.WRITE
+    )
+    assert not characteristic.has_properties(
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE
+        | Characteristic.Properties.INDICATE
+    )
+    assert not characteristic.has_properties(Characteristic.Properties.INDICATE)
+
+
+# -----------------------------------------------------------------------------
 def test_descriptor_permissions():
     descriptor = Descriptor('2902', 'READABLE,WRITEABLE')
     assert descriptor.permissions == 3
+
+
+# -----------------------------------------------------------------------------
+def test_get_attribute_group():
+    device = Device()
+
+    # add some services / characteristics to the gatt server
+    characteristic1 = Characteristic(
+        '1111',
+        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.READABLE | Characteristic.WRITEABLE,
+        bytes([123]),
+    )
+    characteristic2 = Characteristic(
+        '2222',
+        Characteristic.READ | Characteristic.WRITE | Characteristic.NOTIFY,
+        Characteristic.READABLE | Characteristic.WRITEABLE,
+        bytes([123]),
+    )
+    services = [Service('1212', [characteristic1]), Service('3233', [characteristic2])]
+    device.gatt_server.add_services(services)
+
+    # get the handles from gatt server
+    characteristic_attributes1 = device.gatt_server.get_characteristic_attributes(
+        UUID('1212'), UUID('1111')
+    )
+    assert characteristic_attributes1 is not None
+    characteristic_attributes2 = device.gatt_server.get_characteristic_attributes(
+        UUID('3233'), UUID('2222')
+    )
+    assert characteristic_attributes2 is not None
+    descriptor1 = device.gatt_server.get_descriptor_attribute(
+        UUID('1212'), UUID('1111'), UUID('2902')
+    )
+    assert descriptor1 is not None
+    descriptor2 = device.gatt_server.get_descriptor_attribute(
+        UUID('3233'), UUID('2222'), UUID('2902')
+    )
+    assert descriptor2 is not None
+
+    # confirm the handles map back to the service
+    assert (
+        UUID('1212')
+        == device.gatt_server.get_attribute_group(
+            characteristic_attributes1[0].handle, Service
+        ).uuid
+    )
+    assert (
+        UUID('1212')
+        == device.gatt_server.get_attribute_group(
+            characteristic_attributes1[1].handle, Service
+        ).uuid
+    )
+    assert (
+        UUID('1212')
+        == device.gatt_server.get_attribute_group(descriptor1.handle, Service).uuid
+    )
+    assert (
+        UUID('3233')
+        == device.gatt_server.get_attribute_group(
+            characteristic_attributes2[0].handle, Service
+        ).uuid
+    )
+    assert (
+        UUID('3233')
+        == device.gatt_server.get_attribute_group(
+            characteristic_attributes2[1].handle, Service
+        ).uuid
+    )
+    assert (
+        UUID('3233')
+        == device.gatt_server.get_attribute_group(descriptor2.handle, Service).uuid
+    )
+
+    # confirm the handles map back to the characteristic
+    assert (
+        UUID('1111')
+        == device.gatt_server.get_attribute_group(
+            descriptor1.handle, Characteristic
+        ).uuid
+    )
+    assert (
+        UUID('2222')
+        == device.gatt_server.get_attribute_group(
+            descriptor2.handle, Characteristic
+        ).uuid
+    )
 
 
 # -----------------------------------------------------------------------------
