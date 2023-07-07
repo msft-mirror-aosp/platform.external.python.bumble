@@ -144,12 +144,20 @@ class ConnectionError(BaseError):  # pylint: disable=redefined-builtin
 class UUID:
     '''
     See Bluetooth spec Vol 3, Part B - 2.5.1 UUID
+
+    Note that this class expects and works in little-endian byte-order throughout.
+    The exception is when interacting with strings, which are in big-endian byte-order.
     '''
 
-    BASE_UUID = bytes.fromhex('00001000800000805F9B34FB')
+    BASE_UUID = bytes.fromhex('00001000800000805F9B34FB')[::-1]  # little-endian
     UUIDS: List[UUID] = []  # Registry of all instances created
 
-    def __init__(self, uuid_str_or_int, name=None):
+    uuid_bytes: bytes
+    name: Optional[str]
+
+    def __init__(
+        self, uuid_str_or_int: Union[str, int], name: Optional[str] = None
+    ) -> None:
         if isinstance(uuid_str_or_int, int):
             self.uuid_bytes = struct.pack('<H', uuid_str_or_int)
         else:
@@ -169,7 +177,7 @@ class UUID:
             self.uuid_bytes = bytes(reversed(bytes.fromhex(uuid_str)))
         self.name = name
 
-    def register(self):
+    def register(self) -> UUID:
         # Register this object in the class registry, and update the entry's name if
         # it wasn't set already
         for uuid in self.UUIDS:
@@ -193,31 +201,38 @@ class UUID:
         raise ValueError('only 2, 4 and 16 bytes are allowed')
 
     @classmethod
-    def from_16_bits(cls, uuid_16, name=None):
+    def from_16_bits(cls, uuid_16: int, name: Optional[str] = None) -> UUID:
         return cls.from_bytes(struct.pack('<H', uuid_16), name)
 
     @classmethod
-    def from_32_bits(cls, uuid_32, name=None):
+    def from_32_bits(cls, uuid_32: int, name: Optional[str] = None) -> UUID:
         return cls.from_bytes(struct.pack('<I', uuid_32), name)
 
     @classmethod
-    def parse_uuid(cls, uuid_as_bytes, offset):
+    def parse_uuid(cls, uuid_as_bytes: bytes, offset: int) -> Tuple[int, UUID]:
         return len(uuid_as_bytes), cls.from_bytes(uuid_as_bytes[offset:])
 
     @classmethod
-    def parse_uuid_2(cls, uuid_as_bytes, offset):
+    def parse_uuid_2(cls, uuid_as_bytes: bytes, offset: int) -> Tuple[int, UUID]:
         return offset + 2, cls.from_bytes(uuid_as_bytes[offset : offset + 2])
 
-    def to_bytes(self, force_128=False):
-        if len(self.uuid_bytes) == 16 or not force_128:
+    def to_bytes(self, force_128: bool = False) -> bytes:
+        '''
+        Serialize UUID in little-endian byte-order
+        '''
+        if not force_128:
             return self.uuid_bytes
 
-        if len(self.uuid_bytes) == 4:
-            return self.uuid_bytes + UUID.BASE_UUID
+        if len(self.uuid_bytes) == 2:
+            return self.BASE_UUID + self.uuid_bytes + bytes([0, 0])
+        elif len(self.uuid_bytes) == 4:
+            return self.BASE_UUID + self.uuid_bytes
+        elif len(self.uuid_bytes) == 16:
+            return self.uuid_bytes
+        else:
+            assert False, "unreachable"
 
-        return self.uuid_bytes + bytes([0, 0]) + UUID.BASE_UUID
-
-    def to_pdu_bytes(self):
+    def to_pdu_bytes(self) -> bytes:
         '''
         Convert to bytes for use in an ATT PDU.
         According to Vol 3, Part F - 3.2.1 Attribute Type:
@@ -226,11 +241,11 @@ class UUID:
         '''
         return self.to_bytes(force_128=(len(self.uuid_bytes) == 4))
 
-    def to_hex_str(self) -> str:
+    def to_hex_str(self, separator: str = '') -> str:
         if len(self.uuid_bytes) == 2 or len(self.uuid_bytes) == 4:
             return bytes(reversed(self.uuid_bytes)).hex().upper()
 
-        return ''.join(
+        return separator.join(
             [
                 bytes(reversed(self.uuid_bytes[12:16])).hex(),
                 bytes(reversed(self.uuid_bytes[10:12])).hex(),
@@ -240,10 +255,10 @@ class UUID:
             ]
         ).upper()
 
-    def __bytes__(self):
+    def __bytes__(self) -> bytes:
         return self.to_bytes()
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, UUID):
             return self.to_bytes(force_128=True) == other.to_bytes(force_128=True)
 
@@ -252,34 +267,18 @@ class UUID:
 
         return False
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash(self.uuid_bytes)
 
-    def __str__(self):
+    def __str__(self) -> str:
+        result = self.to_hex_str(separator='-')
         if len(self.uuid_bytes) == 2:
-            uuid = struct.unpack('<H', self.uuid_bytes)[0]
-            result = f'UUID-16:{uuid:04X}'
+            result = 'UUID-16:' + result
         elif len(self.uuid_bytes) == 4:
-            uuid = struct.unpack('<I', self.uuid_bytes)[0]
-            result = f'UUID-32:{uuid:08X}'
-        else:
-            result = '-'.join(
-                [
-                    bytes(reversed(self.uuid_bytes[12:16])).hex(),
-                    bytes(reversed(self.uuid_bytes[10:12])).hex(),
-                    bytes(reversed(self.uuid_bytes[8:10])).hex(),
-                    bytes(reversed(self.uuid_bytes[6:8])).hex(),
-                    bytes(reversed(self.uuid_bytes[0:6])).hex(),
-                ]
-            ).upper()
-
+            result = 'UUID-32:' + result
         if self.name is not None:
-            return result + f' ({self.name})'
-
+            result += f' ({self.name})'
         return result
-
-    def __repr__(self):
-        return str(self)
 
 
 # -----------------------------------------------------------------------------
@@ -763,7 +762,7 @@ class AdvertisingData:
     def uuid_list_to_objects(ad_data: bytes, uuid_size: int) -> List[UUID]:
         uuids = []
         offset = 0
-        while (uuid_size * (offset + 1)) <= len(ad_data):
+        while (offset + uuid_size) <= len(ad_data):
             uuids.append(UUID.from_bytes(ad_data[offset : offset + uuid_size]))
             offset += uuid_size
         return uuids

@@ -23,13 +23,16 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import asyncio
 import logging
 import struct
+from datetime import datetime
+from typing import List, Optional, Dict, Tuple, Callable, Union, Any
 
-from colors import color
 from pyee import EventEmitter
 
+from .colors import color
 from .hci import HCI_Constant
 from .att import (
     ATT_ATTRIBUTE_NOT_FOUND_ERROR,
@@ -50,6 +53,7 @@ from .att import (
     ATT_Read_Request,
     ATT_Write_Command,
     ATT_Write_Request,
+    ATT_Error,
 )
 from . import core
 from .core import UUID, InvalidStateError, ProtocolError
@@ -59,6 +63,7 @@ from .gatt import (
     GATT_PRIMARY_SERVICE_ATTRIBUTE_TYPE,
     GATT_REQUEST_TIMEOUT,
     GATT_SECONDARY_SERVICE_ATTRIBUTE_TYPE,
+    GATT_INCLUDE_ATTRIBUTE_TYPE,
     Characteristic,
     ClientCharacteristicConfigurationBits,
 )
@@ -73,6 +78,8 @@ logger = logging.getLogger(__name__)
 # Proxies
 # -----------------------------------------------------------------------------
 class AttributeProxy(EventEmitter):
+    client: Client
+
     def __init__(self, client, handle, end_group_handle, attribute_type):
         EventEmitter.__init__(self)
         self.client = client
@@ -101,6 +108,10 @@ class AttributeProxy(EventEmitter):
 
 
 class ServiceProxy(AttributeProxy):
+    uuid: UUID
+    characteristics: List[CharacteristicProxy]
+    included_services: List[ServiceProxy]
+
     @staticmethod
     def from_client(service_class, client, service_uuid):
         # The service and its characteristics are considered to have already been
@@ -130,10 +141,21 @@ class ServiceProxy(AttributeProxy):
 
 
 class CharacteristicProxy(AttributeProxy):
-    def __init__(self, client, handle, end_group_handle, uuid, properties):
+    properties: Characteristic.Properties
+    descriptors: List[DescriptorProxy]
+    subscribers: Dict[Any, Callable]
+
+    def __init__(
+        self,
+        client,
+        handle,
+        end_group_handle,
+        uuid,
+        properties: int,
+    ):
         super().__init__(client, handle, end_group_handle, uuid)
         self.uuid = uuid
-        self.properties = properties
+        self.properties = Characteristic.Properties(properties)
         self.descriptors = []
         self.descriptors_discovered = False
         self.subscribers = {}  # Map from subscriber to proxy subscriber
@@ -148,7 +170,9 @@ class CharacteristicProxy(AttributeProxy):
     async def discover_descriptors(self):
         return await self.client.discover_descriptors(self)
 
-    async def subscribe(self, subscriber=None, prefer_notify=True):
+    async def subscribe(
+        self, subscriber: Optional[Callable] = None, prefer_notify=True
+    ):
         if subscriber is not None:
             if subscriber in self.subscribers:
                 # We already have a proxy subscriber
@@ -175,7 +199,7 @@ class CharacteristicProxy(AttributeProxy):
         return (
             f'Characteristic(handle=0x{self.handle:04X}, '
             f'uuid={self.uuid}, '
-            f'properties={Characteristic.properties_as_string(self.properties)})'
+            f'{self.properties!s})'
         )
 
 
@@ -201,6 +225,9 @@ class ProfileServiceProxy:
 # GATT Client
 # -----------------------------------------------------------------------------
 class Client:
+    services: List[ServiceProxy]
+    cached_values: Dict[int, Tuple[datetime, bytes]]
+
     def __init__(self, connection):
         self.connection = connection
         self.mtu_exchange_done = False
@@ -212,6 +239,7 @@ class Client:
         )  # Notification subscribers, by attribute handle
         self.indication_subscribers = {}  # Indication subscribers, by attribute handle
         self.services = []
+        self.cached_values = {}
 
     def send_gatt_pdu(self, pdu):
         self.connection.send_l2cap_pdu(ATT_CID, pdu)
@@ -296,6 +324,35 @@ class Client:
             if c.uuid == uuid
         ]
 
+    def get_attribute_grouping(
+        self, attribute_handle: int
+    ) -> Optional[
+        Union[
+            ServiceProxy,
+            Tuple[ServiceProxy, CharacteristicProxy],
+            Tuple[ServiceProxy, CharacteristicProxy, DescriptorProxy],
+        ]
+    ]:
+        """
+        Get the attribute(s) associated with an attribute handle
+        """
+        for service in self.services:
+            if service.handle == attribute_handle:
+                return service
+            if service.handle <= attribute_handle <= service.end_group_handle:
+                for characteristic in service.characteristics:
+                    if characteristic.handle == attribute_handle:
+                        return (service, characteristic)
+                    if (
+                        characteristic.handle
+                        <= attribute_handle
+                        <= characteristic.end_group_handle
+                    ):
+                        for descriptor in characteristic.descriptors:
+                            if descriptor.handle == attribute_handle:
+                                return (service, characteristic, descriptor)
+        return None
+
     def on_service_discovered(self, service):
         '''Add a service to the service list if it wasn't already there'''
         already_known = False
@@ -306,7 +363,7 @@ class Client:
         if not already_known:
             self.services.append(service)
 
-    async def discover_services(self, uuids=None):
+    async def discover_services(self, uuids=None) -> List[ServiceProxy]:
         '''
         See Vol 3, Part G - 4.4.1 Discover All Primary Services
         '''
@@ -332,8 +389,10 @@ class Client:
                         '!!! unexpected error while discovering services: '
                         f'{HCI_Constant.error_name(response.error_code)}'
                     )
-                    # TODO raise appropriate exception
-                    return
+                    raise ATT_Error(
+                        error_code=response.error_code,
+                        message='Unexpected error while discovering services',
+                    )
                 break
 
             for (
@@ -349,7 +408,7 @@ class Client:
                     logger.warning(
                         f'bogus handle values: {attribute_handle} {end_group_handle}'
                     )
-                    return
+                    return []
 
                 # Create a service proxy for this service
                 service = ServiceProxy(
@@ -445,14 +504,73 @@ class Client:
 
         return services
 
-    async def discover_included_services(self, _service):
+    async def discover_included_services(
+        self, service: ServiceProxy
+    ) -> List[ServiceProxy]:
         '''
         See Vol 3, Part G - 4.5.1 Find Included Services
         '''
-        # TODO
-        return []
 
-    async def discover_characteristics(self, uuids, service):
+        starting_handle = service.handle
+        ending_handle = service.end_group_handle
+
+        included_services: List[ServiceProxy] = []
+        while starting_handle <= ending_handle:
+            response = await self.send_request(
+                ATT_Read_By_Type_Request(
+                    starting_handle=starting_handle,
+                    ending_handle=ending_handle,
+                    attribute_type=GATT_INCLUDE_ATTRIBUTE_TYPE,
+                )
+            )
+            if response is None:
+                # TODO raise appropriate exception
+                return []
+
+            # Check if we reached the end of the iteration
+            if response.op_code == ATT_ERROR_RESPONSE:
+                if response.error_code != ATT_ATTRIBUTE_NOT_FOUND_ERROR:
+                    # Unexpected end
+                    logger.warning(
+                        '!!! unexpected error while discovering included services: '
+                        f'{HCI_Constant.error_name(response.error_code)}'
+                    )
+                    raise ATT_Error(
+                        error_code=response.error_code,
+                        message='Unexpected error while discovering included services',
+                    )
+                break
+
+            # Stop if for some reason the list was empty
+            if not response.attributes:
+                break
+
+            # Process all included services returned in this iteration
+            for attribute_handle, attribute_value in response.attributes:
+                if attribute_handle < starting_handle:
+                    # Something's not right
+                    logger.warning(f'bogus handle value: {attribute_handle}')
+                    return []
+
+                group_starting_handle, group_ending_handle = struct.unpack_from(
+                    '<HH', attribute_value
+                )
+                service_uuid = UUID.from_bytes(attribute_value[4:])
+                included_service = ServiceProxy(
+                    self, group_starting_handle, group_ending_handle, service_uuid, True
+                )
+
+                included_services.append(included_service)
+
+            # Move on to the next included services
+            starting_handle = response.attributes[-1][0] + 1
+
+        service.included_services = included_services
+        return included_services
+
+    async def discover_characteristics(
+        self, uuids, service: Optional[ServiceProxy]
+    ) -> List[CharacteristicProxy]:
         '''
         See Vol 3, Part G - 4.6.1 Discover All Characteristics of a Service and 4.6.2
         Discover Characteristics by UUID
@@ -465,12 +583,12 @@ class Client:
         services = [service] if service else self.services
 
         # Perform characteristic discovery for each service
-        discovered_characteristics = []
+        discovered_characteristics: List[CharacteristicProxy] = []
         for service in services:
             starting_handle = service.handle
             ending_handle = service.end_group_handle
 
-            characteristics = []
+            characteristics: List[CharacteristicProxy] = []
             while starting_handle <= ending_handle:
                 response = await self.send_request(
                     ATT_Read_By_Type_Request(
@@ -491,8 +609,10 @@ class Client:
                             '!!! unexpected error while discovering characteristics: '
                             f'{HCI_Constant.error_name(response.error_code)}'
                         )
-                        # TODO raise appropriate exception
-                        return
+                        raise ATT_Error(
+                            error_code=response.error_code,
+                            message='Unexpected error while discovering characteristics',
+                        )
                     break
 
                 # Stop if for some reason the list was empty
@@ -535,8 +655,11 @@ class Client:
         return discovered_characteristics
 
     async def discover_descriptors(
-        self, characteristic=None, start_handle=None, end_handle=None
-    ):
+        self,
+        characteristic: Optional[CharacteristicProxy] = None,
+        start_handle=None,
+        end_handle=None,
+    ) -> List[DescriptorProxy]:
         '''
         See Vol 3, Part G - 4.7.1 Discover All Characteristic Descriptors
         '''
@@ -549,7 +672,7 @@ class Client:
         else:
             return []
 
-        descriptors = []
+        descriptors: List[DescriptorProxy] = []
         while starting_handle <= ending_handle:
             response = await self.send_request(
                 ATT_Find_Information_Request(
@@ -656,8 +779,8 @@ class Client:
             return
 
         if (
-            characteristic.properties & Characteristic.NOTIFY
-            and characteristic.properties & Characteristic.INDICATE
+            characteristic.properties & Characteristic.Properties.NOTIFY
+            and characteristic.properties & Characteristic.Properties.INDICATE
         ):
             if prefer_notify:
                 bits = ClientCharacteristicConfigurationBits.NOTIFICATION
@@ -665,10 +788,10 @@ class Client:
             else:
                 bits = ClientCharacteristicConfigurationBits.INDICATION
                 subscribers = self.indication_subscribers
-        elif characteristic.properties & Characteristic.NOTIFY:
+        elif characteristic.properties & Characteristic.Properties.NOTIFY:
             bits = ClientCharacteristicConfigurationBits.NOTIFICATION
             subscribers = self.notification_subscribers
-        elif characteristic.properties & Characteristic.INDICATE:
+        elif characteristic.properties & Characteristic.Properties.INDICATE:
             bits = ClientCharacteristicConfigurationBits.INDICATION
             subscribers = self.indication_subscribers
         else:
@@ -778,6 +901,7 @@ class Client:
 
                 offset += len(part)
 
+        self.cache_value(attribute_handle, attribute_value)
         # Return the value as bytes
         return attribute_value
 
@@ -912,6 +1036,8 @@ class Client:
         )
         if not subscribers:
             logger.warning('!!! received notification with no subscriber')
+
+        self.cache_value(notification.attribute_handle, notification.attribute_value)
         for subscriber in subscribers:
             if callable(subscriber):
                 subscriber(notification.attribute_value)
@@ -923,6 +1049,8 @@ class Client:
         subscribers = self.indication_subscribers.get(indication.attribute_handle, [])
         if not subscribers:
             logger.warning('!!! received indication with no subscriber')
+
+        self.cache_value(indication.attribute_handle, indication.attribute_value)
         for subscriber in subscribers:
             if callable(subscriber):
                 subscriber(indication.attribute_value)
@@ -931,3 +1059,9 @@ class Client:
 
         # Confirm that we received the indication
         self.send_confirmation(ATT_Handle_Value_Confirmation())
+
+    def cache_value(self, attribute_handle: int, value: bytes):
+        self.cached_values[attribute_handle] = (
+            datetime.now(),
+            value,
+        )

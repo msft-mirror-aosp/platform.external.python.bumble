@@ -18,7 +18,7 @@
 import asyncio
 import os
 import logging
-from colors import color
+from bumble.colors import color
 
 from bumble.core import ProtocolError
 from bumble.controller import Controller
@@ -70,7 +70,7 @@ async def main():
     )
     manufacturer_name_characteristic = Characteristic(
         GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC,
-        Characteristic.READ,
+        Characteristic.Properties.READ,
         Characteristic.READABLE,
         "Fitbit",
         [descriptor],

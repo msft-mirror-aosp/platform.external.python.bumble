@@ -20,11 +20,14 @@ import collections
 import logging
 import struct
 
-from colors import color
-
+from bumble.colors import color
 from bumble.l2cap import L2CAP_PDU
+from bumble.snoop import Snooper
+
+from typing import Optional
 
 from .hci import (
+    Address,
     HCI_ACL_DATA_PACKET,
     HCI_COMMAND_COMPLETE_EVENT,
     HCI_COMMAND_PACKET,
@@ -53,7 +56,6 @@ from .hci import (
     HCI_LE_Write_Suggested_Default_Data_Length_Command,
     HCI_Link_Key_Request_Negative_Reply_Command,
     HCI_Link_Key_Request_Reply_Command,
-    HCI_PIN_Code_Request_Negative_Reply_Command,
     HCI_Packet,
     HCI_Read_Buffer_Size_Command,
     HCI_Read_Local_Supported_Commands_Command,
@@ -92,10 +94,9 @@ HOST_HC_TOTAL_NUM_ACL_DATA_PACKETS        = 1
 
 # -----------------------------------------------------------------------------
 class Connection:
-    def __init__(self, host, handle, role, peer_address, transport):
+    def __init__(self, host, handle, peer_address, transport):
         self.host = host
         self.handle = handle
-        self.role = role
         self.peer_address = peer_address
         self.assembler = HCI_AclDataPacketAssembler(self.on_acl_pdu)
         self.transport = transport
@@ -134,12 +135,31 @@ class Host(AbortableEventEmitter):
         self.long_term_key_provider = None
         self.link_key_provider = None
         self.pairing_io_capability_provider = None  # Classic only
+        self.snooper = None
 
         # Connect to the source and sink if specified
         if controller_source:
             controller_source.set_packet_sink(self)
         if controller_sink:
             self.set_packet_sink(controller_sink)
+
+    def find_connection_by_bd_addr(
+        self,
+        bd_addr: Address,
+        transport: Optional[int] = None,
+        check_address_type: bool = False,
+    ) -> Optional[Connection]:
+        for connection in self.connections.values():
+            if connection.peer_address.to_bytes() == bd_addr.to_bytes():
+                if (
+                    check_address_type
+                    and connection.peer_address.address_type != bd_addr.address_type
+                ):
+                    continue
+                if transport is None or connection.transport == transport:
+                    return connection
+
+        return None
 
     async def flush(self) -> None:
         # Make sure no command is pending
@@ -274,6 +294,9 @@ class Host(AbortableEventEmitter):
         self.hci_sink = sink
 
     def send_hci_packet(self, packet):
+        if self.snooper:
+            self.snooper.snoop(bytes(packet), Snooper.Direction.HOST_TO_CONTROLLER)
+
         self.hci_sink.on_packet(packet.to_bytes())
 
     async def send_command(self, command, check_result=False):
@@ -372,8 +395,8 @@ class Host(AbortableEventEmitter):
 
     def supports_command(self, command):
         # Find the support flag position for this command
-        for (octet, flags) in enumerate(HCI_SUPPORTED_COMMANDS_FLAGS):
-            for (flag_position, value) in enumerate(flags):
+        for octet, flags in enumerate(HCI_SUPPORTED_COMMANDS_FLAGS):
+            for flag_position, value in enumerate(flags):
                 if value == command:
                     # Check if the flag is set
                     if octet < len(self.local_supported_commands) and flag_position < 8:
@@ -386,7 +409,7 @@ class Host(AbortableEventEmitter):
     @property
     def supported_commands(self):
         commands = []
-        for (octet, flags) in enumerate(self.local_supported_commands):
+        for octet, flags in enumerate(self.local_supported_commands):
             if octet < len(HCI_SUPPORTED_COMMANDS_FLAGS):
                 for flag in range(8):
                     if flags & (1 << flag) != 0:
@@ -419,6 +442,9 @@ class Host(AbortableEventEmitter):
 
     def on_hci_packet(self, packet):
         logger.debug(f'{color("### CONTROLLER -> HOST", "green")}: {packet}')
+
+        if self.snooper:
+            self.snooper.snoop(bytes(packet), Snooper.Direction.CONTROLLER_TO_HOST)
 
         # If the packet is a command, invoke the handler for this packet
         if packet.hci_packet_type == HCI_COMMAND_PACKET:
@@ -507,7 +533,7 @@ class Host(AbortableEventEmitter):
         if event.status == HCI_SUCCESS:
             # Create/update the connection
             logger.debug(
-                f'### CONNECTION: [0x{event.connection_handle:04X}] '
+                f'### LE CONNECTION: [0x{event.connection_handle:04X}] '
                 f'{event.peer_address} as {HCI_Constant.role_name(event.role)}'
             )
 
@@ -516,7 +542,6 @@ class Host(AbortableEventEmitter):
                 connection = Connection(
                     self,
                     event.connection_handle,
-                    event.role,
                     event.peer_address,
                     BT_LE_TRANSPORT,
                 )
@@ -533,7 +558,6 @@ class Host(AbortableEventEmitter):
                 event.connection_handle,
                 BT_LE_TRANSPORT,
                 event.peer_address,
-                None,
                 event.role,
                 connection_parameters,
             )
@@ -562,7 +586,6 @@ class Host(AbortableEventEmitter):
                 connection = Connection(
                     self,
                     event.connection_handle,
-                    BT_CENTRAL_ROLE,
                     event.bd_addr,
                     BT_BR_EDR_TRANSPORT,
                 )
@@ -575,7 +598,6 @@ class Host(AbortableEventEmitter):
                 BT_BR_EDR_TRANSPORT,
                 event.bd_addr,
                 None,
-                BT_CENTRAL_ROLE,
                 None,
             )
         else:
@@ -595,8 +617,7 @@ class Host(AbortableEventEmitter):
         if event.status == HCI_SUCCESS:
             logger.debug(
                 f'### DISCONNECTION: [0x{event.connection_handle:04X}] '
-                f'{connection.peer_address} as '
-                f'{HCI_Constant.role_name(connection.role)}, '
+                f'{connection.peer_address} '
                 f'reason={event.reason}'
             )
             del self.connections[event.connection_handle]
@@ -712,12 +733,13 @@ class Host(AbortableEventEmitter):
                 f'role change for {event.bd_addr}: '
                 f'{HCI_Constant.role_name(event.new_role)}'
             )
-            # TODO: lookup the connection and update the role
+            self.emit('role_change', event.bd_addr, event.new_role)
         else:
             logger.debug(
                 f'role change for {event.bd_addr} failed: '
                 f'{HCI_Constant.error_name(event.status)}'
             )
+            self.emit('role_change_failure', event.bd_addr, event.status)
 
     def on_hci_le_data_length_change_event(self, event):
         self.emit(
@@ -787,11 +809,7 @@ class Host(AbortableEventEmitter):
         )
 
     def on_hci_pin_code_request_event(self, event):
-        # For now, just refuse all requests
-        # TODO: delegate the decision
-        self.send_command_sync(
-            HCI_PIN_Code_Request_Negative_Reply_Command(bd_addr=event.bd_addr)
-        )
+        self.emit('pin_code_request', event.bd_addr)
 
     def on_hci_link_key_request_event(self, event):
         async def send_link_key():
@@ -821,7 +839,12 @@ class Host(AbortableEventEmitter):
         self.emit('authentication_io_capability_request', event.bd_addr)
 
     def on_hci_io_capability_response_event(self, event):
-        pass
+        self.emit(
+            'authentication_io_capability_response',
+            event.bd_addr,
+            event.io_capability,
+            event.authentication_requirements,
+        )
 
     def on_hci_user_confirmation_request_event(self, event):
         self.emit(
