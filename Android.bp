@@ -23,6 +23,41 @@ python_library_host {
         "bumble/transport/*.py",
     ],
     libs: [
-        "py-cryptography",
+        "pyee",
+    ]
+}
+
+python_library_host {
+    name: "bumble-pandora",
+    srcs: [
+        "bumble/pandora/*.py",
     ],
+    libs: [
+        "bumble",
+        "pandora-python",
+        "libprotobuf-python",
+    ],
+    data: [
+        "bumble/pandora/py.typed"
+    ]
+}
+
+python_test_host {
+    name: "bumble_pandora_server",
+    main: "apps/pandora_server.py",
+    srcs: [
+        "apps/pandora_server.py",
+    ],
+    libs: [
+        "bumble-pandora",
+        "pandora-python",
+    ],
+
+    test_options: {
+        unit_test: false,
+    },
+
+    test_suites: [
+        "general-tests"
+    ]
 }
