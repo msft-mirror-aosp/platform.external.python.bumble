@@ -28,7 +28,7 @@ import enum
 import functools
 import logging
 import struct
-from typing import Optional, Sequence
+from typing import Optional, Sequence, List
 
 from .colors import color
 from .core import UUID, get_dict_key_by_value
@@ -205,8 +205,16 @@ class Service(Attribute):
     '''
 
     uuid: UUID
+    characteristics: List[Characteristic]
+    included_services: List[Service]
 
-    def __init__(self, uuid, characteristics: list[Characteristic], primary=True):
+    def __init__(
+        self,
+        uuid,
+        characteristics: List[Characteristic],
+        primary=True,
+        included_services: List[Service] = [],
+    ):
         # Convert the uuid to a UUID object if it isn't already
         if isinstance(uuid, str):
             uuid = UUID(uuid)
@@ -219,7 +227,7 @@ class Service(Attribute):
             uuid.to_pdu_bytes(),
         )
         self.uuid = uuid
-        # self.included_services = []
+        self.included_services = included_services[:]
         self.characteristics = characteristics[:]
         self.primary = primary
 
@@ -247,10 +255,37 @@ class TemplateService(Service):
     to expose their UUID as a class property
     '''
 
-    UUID = None
+    UUID: Optional[UUID] = None
 
     def __init__(self, characteristics, primary=True):
         super().__init__(self.UUID, characteristics, primary)
+
+
+# -----------------------------------------------------------------------------
+class IncludedServiceDeclaration(Attribute):
+    '''
+    See Vol 3, Part G - 3.2 INCLUDE DEFINITION
+    '''
+
+    service: Service
+
+    def __init__(self, service):
+        declaration_bytes = struct.pack(
+            '<HH2s', service.handle, service.end_group_handle, service.uuid.to_bytes()
+        )
+        super().__init__(
+            GATT_INCLUDE_ATTRIBUTE_TYPE, Attribute.READABLE, declaration_bytes
+        )
+        self.service = service
+
+    def __str__(self):
+        return (
+            f'IncludedServiceDefinition(handle=0x{self.handle:04X}, '
+            f'group_starting_handle=0x{self.service.handle:04X}, '
+            f'group_ending_handle=0x{self.service.end_group_handle:04X}, '
+            f'uuid={self.service.uuid}, '
+            f'{self.service.properties!s})'
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -259,63 +294,68 @@ class Characteristic(Attribute):
     See Vol 3, Part G - 3.3 CHARACTERISTIC DEFINITION
     '''
 
-    # Property flags
-    BROADCAST = 0x01
-    READ = 0x02
-    WRITE_WITHOUT_RESPONSE = 0x04
-    WRITE = 0x08
-    NOTIFY = 0x10
-    INDICATE = 0x20
-    AUTHENTICATED_SIGNED_WRITES = 0x40
-    EXTENDED_PROPERTIES = 0x80
+    uuid: UUID
+    properties: Characteristic.Properties
 
-    PROPERTY_NAMES = {
-        BROADCAST: 'BROADCAST',
-        READ: 'READ',
-        WRITE_WITHOUT_RESPONSE: 'WRITE_WITHOUT_RESPONSE',
-        WRITE: 'WRITE',
-        NOTIFY: 'NOTIFY',
-        INDICATE: 'INDICATE',
-        AUTHENTICATED_SIGNED_WRITES: 'AUTHENTICATED_SIGNED_WRITES',
-        EXTENDED_PROPERTIES: 'EXTENDED_PROPERTIES',
-    }
+    class Properties(enum.IntFlag):
+        """Property flags"""
 
-    @staticmethod
-    def property_name(property_int):
-        return Characteristic.PROPERTY_NAMES.get(property_int, '')
+        BROADCAST = 0x01
+        READ = 0x02
+        WRITE_WITHOUT_RESPONSE = 0x04
+        WRITE = 0x08
+        NOTIFY = 0x10
+        INDICATE = 0x20
+        AUTHENTICATED_SIGNED_WRITES = 0x40
+        EXTENDED_PROPERTIES = 0x80
 
-    @staticmethod
-    def properties_as_string(properties):
-        return ','.join(
-            [
-                Characteristic.property_name(p)
-                for p in Characteristic.PROPERTY_NAMES
-                if properties & p
-            ]
-        )
+        @staticmethod
+        def from_string(properties_str: str) -> Characteristic.Properties:
+            property_names: List[str] = []
+            for property in Characteristic.Properties:
+                if property.name is None:
+                    raise TypeError()
+                property_names.append(property.name)
 
-    @staticmethod
-    def string_to_properties(properties_str: str):
-        return functools.reduce(
-            lambda x, y: x | get_dict_key_by_value(Characteristic.PROPERTY_NAMES, y),
-            properties_str.split(","),
-            0,
-        )
+            def string_to_property(property_string) -> Characteristic.Properties:
+                for property in zip(Characteristic.Properties, property_names):
+                    if property_string == property[1]:
+                        return property[0]
+                raise TypeError(f"Unable to convert {property_string} to Property")
+
+            try:
+                return functools.reduce(
+                    lambda x, y: x | string_to_property(y),
+                    properties_str.split(","),
+                    Characteristic.Properties(0),
+                )
+            except TypeError:
+                raise TypeError(
+                    f"Characteristic.Properties::from_string() error:\nExpected a string containing any of the keys, separated by commas: {','.join(property_names)}\nGot: {properties_str}"
+                )
+
+    # For backwards compatibility these are defined here
+    # For new code, please use Characteristic.Properties.X
+    BROADCAST = Properties.BROADCAST
+    READ = Properties.READ
+    WRITE_WITHOUT_RESPONSE = Properties.WRITE_WITHOUT_RESPONSE
+    WRITE = Properties.WRITE
+    NOTIFY = Properties.NOTIFY
+    INDICATE = Properties.INDICATE
+    AUTHENTICATED_SIGNED_WRITES = Properties.AUTHENTICATED_SIGNED_WRITES
+    EXTENDED_PROPERTIES = Properties.EXTENDED_PROPERTIES
 
     def __init__(
         self,
         uuid,
-        properties,
+        properties: Characteristic.Properties,
         permissions,
         value=b'',
         descriptors: Sequence[Descriptor] = (),
     ):
         super().__init__(uuid, permissions, value)
         self.uuid = self.type
-        if isinstance(properties, str):
-            self.properties = Characteristic.string_to_properties(properties)
-        else:
-            self.properties = properties
+        self.properties = properties
         self.descriptors = descriptors
 
     def get_descriptor(self, descriptor_type):
@@ -325,12 +365,15 @@ class Characteristic(Attribute):
 
         return None
 
+    def has_properties(self, properties: Characteristic.Properties) -> bool:
+        return self.properties & properties == properties
+
     def __str__(self):
         return (
             f'Characteristic(handle=0x{self.handle:04X}, '
             f'end=0x{self.end_group_handle:04X}, '
             f'uuid={self.uuid}, '
-            f'properties={Characteristic.properties_as_string(self.properties)})'
+            f'{self.properties!s})'
         )
 
 
@@ -339,6 +382,8 @@ class CharacteristicDeclaration(Attribute):
     '''
     See Vol 3, Part G - 3.3.1 CHARACTERISTIC DECLARATION
     '''
+
+    characteristic: Characteristic
 
     def __init__(self, characteristic, value_handle):
         declaration_bytes = (
@@ -355,8 +400,8 @@ class CharacteristicDeclaration(Attribute):
         return (
             f'CharacteristicDeclaration(handle=0x{self.handle:04X}, '
             f'value_handle=0x{self.value_handle:04X}, '
-            f'uuid={self.characteristic.uuid}, properties='
-            f'{Characteristic.properties_as_string(self.characteristic.properties)})'
+            f'uuid={self.characteristic.uuid}, '
+            f'{self.characteristic.properties!s})'
         )
 
 
