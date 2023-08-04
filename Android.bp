@@ -19,6 +19,7 @@ python_library_host {
     name: "bumble",
     srcs: [
         "bumble/*.py",
+        "bumble/drivers/*.py",
         "bumble/profiles/*.py",
         "bumble/transport/*.py",
     ],
