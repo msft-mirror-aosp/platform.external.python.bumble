@@ -25,6 +25,7 @@
 from __future__ import annotations
 import logging
 import asyncio
+import enum
 import secrets
 from typing import (
     TYPE_CHECKING,
@@ -553,20 +554,16 @@ class AddressResolver:
 
 
 # -----------------------------------------------------------------------------
-class Session:
-    # Pairing methods
+class PairingMethod(enum.IntEnum):
     JUST_WORKS = 0
     NUMERIC_COMPARISON = 1
     PASSKEY = 2
     OOB = 3
+    CTKD_OVER_CLASSIC = 4
 
-    PAIRING_METHOD_NAMES = {
-        JUST_WORKS: 'JUST_WORKS',
-        NUMERIC_COMPARISON: 'NUMERIC_COMPARISON',
-        PASSKEY: 'PASSKEY',
-        OOB: 'OOB',
-    }
 
+# -----------------------------------------------------------------------------
+class Session:
     # I/O Capability to pairing method decision matrix
     #
     # See Bluetooth spec @ Vol 3, part H - Table 2.8: Mapping of IO Capabilities to Key
@@ -581,47 +578,50 @@ class Session:
     # (False).
     PAIRING_METHODS = {
         SMP_DISPLAY_ONLY_IO_CAPABILITY: {
-            SMP_DISPLAY_ONLY_IO_CAPABILITY: JUST_WORKS,
-            SMP_DISPLAY_YES_NO_IO_CAPABILITY: JUST_WORKS,
-            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PASSKEY, True, False),
-            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: JUST_WORKS,
-            SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: (PASSKEY, True, False),
+            SMP_DISPLAY_ONLY_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_DISPLAY_YES_NO_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PairingMethod.PASSKEY, True, False),
+            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: (PairingMethod.PASSKEY, True, False),
         },
         SMP_DISPLAY_YES_NO_IO_CAPABILITY: {
-            SMP_DISPLAY_ONLY_IO_CAPABILITY: JUST_WORKS,
-            SMP_DISPLAY_YES_NO_IO_CAPABILITY: (JUST_WORKS, NUMERIC_COMPARISON),
-            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PASSKEY, True, False),
-            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: JUST_WORKS,
+            SMP_DISPLAY_ONLY_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_DISPLAY_YES_NO_IO_CAPABILITY: (
+                PairingMethod.JUST_WORKS,
+                PairingMethod.NUMERIC_COMPARISON,
+            ),
+            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PairingMethod.PASSKEY, True, False),
+            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: PairingMethod.JUST_WORKS,
             SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: (
-                (PASSKEY, True, False),
-                NUMERIC_COMPARISON,
+                (PairingMethod.PASSKEY, True, False),
+                PairingMethod.NUMERIC_COMPARISON,
             ),
         },
         SMP_KEYBOARD_ONLY_IO_CAPABILITY: {
-            SMP_DISPLAY_ONLY_IO_CAPABILITY: (PASSKEY, False, True),
-            SMP_DISPLAY_YES_NO_IO_CAPABILITY: (PASSKEY, False, True),
-            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PASSKEY, False, False),
-            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: JUST_WORKS,
-            SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: (PASSKEY, False, True),
+            SMP_DISPLAY_ONLY_IO_CAPABILITY: (PairingMethod.PASSKEY, False, True),
+            SMP_DISPLAY_YES_NO_IO_CAPABILITY: (PairingMethod.PASSKEY, False, True),
+            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PairingMethod.PASSKEY, False, False),
+            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: (PairingMethod.PASSKEY, False, True),
         },
         SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: {
-            SMP_DISPLAY_ONLY_IO_CAPABILITY: JUST_WORKS,
-            SMP_DISPLAY_YES_NO_IO_CAPABILITY: JUST_WORKS,
-            SMP_KEYBOARD_ONLY_IO_CAPABILITY: JUST_WORKS,
-            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: JUST_WORKS,
-            SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: JUST_WORKS,
+            SMP_DISPLAY_ONLY_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_DISPLAY_YES_NO_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_KEYBOARD_ONLY_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: PairingMethod.JUST_WORKS,
+            SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: PairingMethod.JUST_WORKS,
         },
         SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: {
-            SMP_DISPLAY_ONLY_IO_CAPABILITY: (PASSKEY, False, True),
+            SMP_DISPLAY_ONLY_IO_CAPABILITY: (PairingMethod.PASSKEY, False, True),
             SMP_DISPLAY_YES_NO_IO_CAPABILITY: (
-                (PASSKEY, False, True),
-                NUMERIC_COMPARISON,
+                (PairingMethod.PASSKEY, False, True),
+                PairingMethod.NUMERIC_COMPARISON,
             ),
-            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PASSKEY, True, False),
-            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: JUST_WORKS,
+            SMP_KEYBOARD_ONLY_IO_CAPABILITY: (PairingMethod.PASSKEY, True, False),
+            SMP_NO_INPUT_NO_OUTPUT_IO_CAPABILITY: PairingMethod.JUST_WORKS,
             SMP_KEYBOARD_DISPLAY_IO_CAPABILITY: (
-                (PASSKEY, True, False),
-                NUMERIC_COMPARISON,
+                (PairingMethod.PASSKEY, True, False),
+                PairingMethod.NUMERIC_COMPARISON,
             ),
         },
     }
@@ -664,7 +664,7 @@ class Session:
         self.passkey_ready = asyncio.Event()
         self.passkey_step = 0
         self.passkey_display = False
-        self.pairing_method = 0
+        self.pairing_method: PairingMethod = PairingMethod.JUST_WORKS
         self.pairing_config = pairing_config
         self.wait_before_continuing: Optional[asyncio.Future[None]] = None
         self.completed = False
@@ -769,19 +769,23 @@ class Session:
     def decide_pairing_method(
         self, auth_req: int, initiator_io_capability: int, responder_io_capability: int
     ) -> None:
+        if self.connection.transport == BT_BR_EDR_TRANSPORT:
+            self.pairing_method = PairingMethod.CTKD_OVER_CLASSIC
+            return
         if (not self.mitm) and (auth_req & SMP_MITM_AUTHREQ == 0):
-            self.pairing_method = self.JUST_WORKS
+            self.pairing_method = PairingMethod.JUST_WORKS
             return
 
         details = self.PAIRING_METHODS[initiator_io_capability][responder_io_capability]  # type: ignore[index]
         if isinstance(details, tuple) and len(details) == 2:
             # One entry for legacy pairing and one for secure connections
             details = details[1 if self.sc else 0]
-        if isinstance(details, int):
+        if isinstance(details, PairingMethod):
             # Just a method ID
             self.pairing_method = details
         else:
             # PASSKEY method, with a method ID and display/input flags
+            assert isinstance(details[0], PairingMethod)
             self.pairing_method = details[0]
             self.passkey_display = details[1 if self.is_initiator else 2]
 
@@ -858,10 +862,13 @@ class Session:
             self.tk = self.passkey.to_bytes(16, byteorder='little')
             logger.debug(f'TK from passkey = {self.tk.hex()}')
 
-        self.connection.abort_on(
-            'disconnection',
-            self.pairing_config.delegate.display_number(self.passkey, digits=6),
-        )
+        try:
+            self.connection.abort_on(
+                'disconnection',
+                self.pairing_config.delegate.display_number(self.passkey, digits=6),
+            )
+        except Exception as error:
+            logger.warning(f'exception while displaying number: {error}')
 
     def input_passkey(self, next_steps: Optional[Callable[[], None]] = None) -> None:
         # Prompt the user for the passkey displayed on the peer
@@ -929,9 +936,12 @@ class Session:
         if self.sc:
 
             async def next_steps() -> None:
-                if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+                if self.pairing_method in (
+                    PairingMethod.JUST_WORKS,
+                    PairingMethod.NUMERIC_COMPARISON,
+                ):
                     z = 0
-                elif self.pairing_method == self.PASSKEY:
+                elif self.pairing_method == PairingMethod.PASSKEY:
                     # We need a passkey
                     await self.passkey_ready.wait()
                     assert self.passkey
@@ -983,6 +993,19 @@ class Session:
             )
         )
 
+    def send_identity_address_command(self) -> None:
+        identity_address = {
+            None: self.connection.self_address,
+            Address.PUBLIC_DEVICE_ADDRESS: self.manager.device.public_address,
+            Address.RANDOM_DEVICE_ADDRESS: self.manager.device.random_address,
+        }[self.pairing_config.identity_address_type]
+        self.send_command(
+            SMP_Identity_Address_Information_Command(
+                addr_type=identity_address.address_type,
+                bd_addr=identity_address,
+            )
+        )
+
     def start_encryption(self, key: bytes) -> None:
         # We can now encrypt the connection with the short term key, so that we can
         # distribute the long term and/or other keys over an encrypted connection
@@ -1006,6 +1029,7 @@ class Session:
         self.ltk = crypto.h6(ilk, b'brle')
 
     def distribute_keys(self) -> None:
+
         # Distribute the keys as required
         if self.is_initiator:
             # CTKD: Derive LTK from LinkKey
@@ -1035,12 +1059,7 @@ class Session:
                         identity_resolving_key=self.manager.device.irk
                     )
                 )
-                self.send_command(
-                    SMP_Identity_Address_Information_Command(
-                        addr_type=self.connection.self_address.address_type,
-                        bd_addr=self.connection.self_address,
-                    )
-                )
+                self.send_identity_address_command()
 
             # Distribute CSRK
             csrk = bytes(16)  # FIXME: testing
@@ -1084,12 +1103,7 @@ class Session:
                         identity_resolving_key=self.manager.device.irk
                     )
                 )
-                self.send_command(
-                    SMP_Identity_Address_Information_Command(
-                        addr_type=self.connection.self_address.address_type,
-                        bd_addr=self.connection.self_address,
-                    )
-                )
+                self.send_identity_address_command()
 
             # Distribute CSRK
             csrk = bytes(16)  # FIXME: testing
@@ -1224,7 +1238,7 @@ class Session:
         # Create an object to hold the keys
         keys = PairingKeys()
         keys.address_type = peer_address.address_type
-        authenticated = self.pairing_method != self.JUST_WORKS
+        authenticated = self.pairing_method != PairingMethod.JUST_WORKS
         if self.sc or self.connection.transport == BT_BR_EDR_TRANSPORT:
             keys.ltk = PairingKeys.Key(value=self.ltk, authenticated=authenticated)
         else:
@@ -1300,7 +1314,11 @@ class Session:
         self, command: SMP_Pairing_Request_Command
     ) -> None:
         # Check if the request should proceed
-        accepted = await self.pairing_config.delegate.accept()
+        try:
+            accepted = await self.pairing_config.delegate.accept()
+        except Exception as error:
+            logger.warning(f'exception while accepting: {error}')
+            accepted = False
         if not accepted:
             logger.debug('pairing rejected by delegate')
             self.send_pairing_failed(SMP_PAIRING_NOT_SUPPORTED_ERROR)
@@ -1323,9 +1341,7 @@ class Session:
         self.decide_pairing_method(
             command.auth_req, command.io_capability, self.io_capability
         )
-        logger.debug(
-            f'pairing method: {self.PAIRING_METHOD_NAMES[self.pairing_method]}'
-        )
+        logger.debug(f'pairing method: {self.pairing_method.name}')
 
         # Key distribution
         (
@@ -1341,7 +1357,7 @@ class Session:
 
         # Display a passkey if we need to
         if not self.sc:
-            if self.pairing_method == self.PASSKEY and self.passkey_display:
+            if self.pairing_method == PairingMethod.PASSKEY and self.passkey_display:
                 self.display_passkey()
 
         # Respond
@@ -1382,9 +1398,7 @@ class Session:
         self.decide_pairing_method(
             command.auth_req, self.io_capability, command.io_capability
         )
-        logger.debug(
-            f'pairing method: {self.PAIRING_METHOD_NAMES[self.pairing_method]}'
-        )
+        logger.debug(f'pairing method: {self.pairing_method.name}')
 
         # Key distribution
         if (
@@ -1400,13 +1414,16 @@ class Session:
         self.compute_peer_expected_distributions(self.responder_key_distribution)
 
         # Start phase 2
-        if self.sc:
-            if self.pairing_method == self.PASSKEY:
+        if self.pairing_method == PairingMethod.CTKD_OVER_CLASSIC:
+            # Authentication is already done in SMP, so remote shall start keys distribution immediately
+            return
+        elif self.sc:
+            if self.pairing_method == PairingMethod.PASSKEY:
                 self.display_or_input_passkey()
 
             self.send_public_key_command()
         else:
-            if self.pairing_method == self.PASSKEY:
+            if self.pairing_method == PairingMethod.PASSKEY:
                 self.display_or_input_passkey(self.send_pairing_confirm_command)
             else:
                 self.send_pairing_confirm_command()
@@ -1418,7 +1435,10 @@ class Session:
             self.send_pairing_random_command()
         else:
             # If the method is PASSKEY, now is the time to input the code
-            if self.pairing_method == self.PASSKEY and not self.passkey_display:
+            if (
+                self.pairing_method == PairingMethod.PASSKEY
+                and not self.passkey_display
+            ):
                 self.input_passkey(self.send_pairing_confirm_command)
             else:
                 self.send_pairing_confirm_command()
@@ -1426,11 +1446,14 @@ class Session:
     def on_smp_pairing_confirm_command_secure_connections(
         self, _: SMP_Pairing_Confirm_Command
     ) -> None:
-        if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+        if self.pairing_method in (
+            PairingMethod.JUST_WORKS,
+            PairingMethod.NUMERIC_COMPARISON,
+        ):
             if self.is_initiator:
                 self.r = crypto.r()
                 self.send_pairing_random_command()
-        elif self.pairing_method == self.PASSKEY:
+        elif self.pairing_method == PairingMethod.PASSKEY:
             if self.is_initiator:
                 self.send_pairing_random_command()
             else:
@@ -1486,13 +1509,16 @@ class Session:
     def on_smp_pairing_random_command_secure_connections(
         self, command: SMP_Pairing_Random_Command
     ) -> None:
-        if self.pairing_method == self.PASSKEY and self.passkey is None:
+        if self.pairing_method == PairingMethod.PASSKEY and self.passkey is None:
             logger.warning('no passkey entered, ignoring command')
             return
 
         # pylint: disable=too-many-return-statements
         if self.is_initiator:
-            if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+            if self.pairing_method in (
+                PairingMethod.JUST_WORKS,
+                PairingMethod.NUMERIC_COMPARISON,
+            ):
                 assert self.confirm_value
                 # Check that the random value matches what was committed to earlier
                 confirm_verifier = crypto.f4(
@@ -1502,7 +1528,7 @@ class Session:
                     self.confirm_value, confirm_verifier, SMP_CONFIRM_VALUE_FAILED_ERROR
                 ):
                     return
-            elif self.pairing_method == self.PASSKEY:
+            elif self.pairing_method == PairingMethod.PASSKEY:
                 assert self.passkey and self.confirm_value
                 # Check that the random value matches what was committed to earlier
                 confirm_verifier = crypto.f4(
@@ -1525,9 +1551,12 @@ class Session:
             else:
                 return
         else:
-            if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+            if self.pairing_method in (
+                PairingMethod.JUST_WORKS,
+                PairingMethod.NUMERIC_COMPARISON,
+            ):
                 self.send_pairing_random_command()
-            elif self.pairing_method == self.PASSKEY:
+            elif self.pairing_method == PairingMethod.PASSKEY:
                 assert self.passkey and self.confirm_value
                 # Check that the random value matches what was committed to earlier
                 confirm_verifier = crypto.f4(
@@ -1558,10 +1587,13 @@ class Session:
         (mac_key, self.ltk) = crypto.f5(self.dh_key, self.na, self.nb, a, b)
 
         # Compute the DH Key checks
-        if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+        if self.pairing_method in (
+            PairingMethod.JUST_WORKS,
+            PairingMethod.NUMERIC_COMPARISON,
+        ):
             ra = bytes(16)
             rb = ra
-        elif self.pairing_method == self.PASSKEY:
+        elif self.pairing_method == PairingMethod.PASSKEY:
             assert self.passkey
             ra = self.passkey.to_bytes(16, byteorder='little')
             rb = ra
@@ -1585,13 +1617,16 @@ class Session:
                     self.wait_before_continuing.set_result(None)
 
         # Prompt the user for confirmation if needed
-        if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+        if self.pairing_method in (
+            PairingMethod.JUST_WORKS,
+            PairingMethod.NUMERIC_COMPARISON,
+        ):
             # Compute the 6-digit code
             code = crypto.g2(self.pka, self.pkb, self.na, self.nb) % 1000000
 
             # Ask for user confirmation
             self.wait_before_continuing = asyncio.get_running_loop().create_future()
-            if self.pairing_method == self.JUST_WORKS:
+            if self.pairing_method == PairingMethod.JUST_WORKS:
                 self.prompt_user_for_confirmation(next_steps)
             else:
                 self.prompt_user_for_numeric_comparison(code, next_steps)
@@ -1628,13 +1663,16 @@ class Session:
         if self.is_initiator:
             self.send_pairing_confirm_command()
         else:
-            if self.pairing_method == self.PASSKEY:
+            if self.pairing_method == PairingMethod.PASSKEY:
                 self.display_or_input_passkey()
 
             # Send our public key back to the initiator
             self.send_public_key_command()
 
-            if self.pairing_method in (self.JUST_WORKS, self.NUMERIC_COMPARISON):
+            if self.pairing_method in (
+                PairingMethod.JUST_WORKS,
+                PairingMethod.NUMERIC_COMPARISON,
+            ):
                 # We can now send the confirmation value
                 self.send_pairing_confirm_command()
 
@@ -1805,7 +1843,7 @@ class Manager(EventEmitter):
             self.device.abort_on('flush', store_keys())
 
         # Notify the device
-        self.device.on_pairing(session.connection, keys, session.sc)
+        self.device.on_pairing(session.connection, identity_address, keys, session.sc)
 
     def on_pairing_failure(self, session: Session, reason: int) -> None:
         self.device.on_pairing_failure(session.connection, reason)
