@@ -86,6 +86,7 @@ from .hci import (
     HCI_LE_Extended_Create_Connection_Command,
     HCI_LE_Rand_Command,
     HCI_LE_Read_PHY_Command,
+    HCI_LE_Set_Address_Resolution_Enable_Command,
     HCI_LE_Set_Advertising_Data_Command,
     HCI_LE_Set_Advertising_Enable_Command,
     HCI_LE_Set_Advertising_Parameters_Command,
@@ -778,6 +779,7 @@ class DeviceConfiguration:
         self.irk = bytes(16)  # This really must be changed for any level of security
         self.keystore = None
         self.gatt_services: List[Dict[str, Any]] = []
+        self.address_resolution_offload = False
 
     def load_from_dict(self, config: Dict[str, Any]) -> None:
         # Load simple properties
@@ -826,6 +828,12 @@ class DeviceConfiguration:
         advertising_data = config.get('advertising_data')
         if advertising_data:
             self.advertising_data = bytes.fromhex(advertising_data)
+        elif config.get('name') is not None:
+            self.advertising_data = bytes(
+                AdvertisingData(
+                    [(AdvertisingData.COMPLETE_LOCAL_NAME, bytes(self.name, 'utf-8'))]
+                )
+            )
 
     def load_from_file(self, filename):
         with open(filename, 'r', encoding='utf-8') as file:
@@ -949,11 +957,15 @@ class Device(CompositeEventEmitter):
         return cls(config=config)
 
     @classmethod
+    def from_config_with_hci(cls, config, hci_source, hci_sink):
+        host = Host(controller_source=hci_source, controller_sink=hci_sink)
+        return cls(config=config, host=host)
+
+    @classmethod
     def from_config_file_with_hci(cls, filename, hci_source, hci_sink):
         config = DeviceConfiguration()
         config.load_from_file(filename)
-        host = Host(controller_source=hci_source, controller_sink=hci_sink)
-        return cls(config=config, host=host)
+        return cls.from_config_with_hci(config, hci_source, hci_sink)
 
     def __init__(
         self,
@@ -1019,6 +1031,7 @@ class Device(CompositeEventEmitter):
         self.discoverable = config.discoverable
         self.connectable = config.connectable
         self.classic_accept_any = config.classic_accept_any
+        self.address_resolution_offload = config.address_resolution_offload
 
         for service in config.gatt_services:
             characteristics = []
@@ -1246,31 +1259,16 @@ class Device(CompositeEventEmitter):
                 )
 
             # Load the address resolving list
-            if self.keystore and self.host.supports_command(
-                HCI_LE_CLEAR_RESOLVING_LIST_COMMAND
-            ):
-                await self.send_command(HCI_LE_Clear_Resolving_List_Command())  # type: ignore[call-arg]
+            if self.keystore:
+                await self.refresh_resolving_list()
 
-                resolving_keys = await self.keystore.get_resolving_keys()
-                for irk, address in resolving_keys:
-                    await self.send_command(
-                        HCI_LE_Add_Device_To_Resolving_List_Command(
-                            peer_identity_address_type=address.address_type,
-                            peer_identity_address=address,
-                            peer_irk=irk,
-                            local_irk=self.irk,
-                        )  # type: ignore[call-arg]
-                    )
-
-                # Enable address resolution
-                # await self.send_command(
-                #     HCI_LE_Set_Address_Resolution_Enable_Command(
-                #         address_resolution_enable=1)
-                #     )
-                # )
-
-                # Create a host-side address resolver
-                self.address_resolver = smp.AddressResolver(resolving_keys)
+            # Enable address resolution
+            if self.address_resolution_offload:
+                await self.send_command(
+                    HCI_LE_Set_Address_Resolution_Enable_Command(
+                        address_resolution_enable=1
+                    )  # type: ignore[call-arg]
+                )
 
         if self.classic_enabled:
             await self.send_command(
@@ -1299,6 +1297,26 @@ class Device(CompositeEventEmitter):
         if self.powered_on:
             await self.host.flush()
             self.powered_on = False
+
+    async def refresh_resolving_list(self) -> None:
+        assert self.keystore is not None
+
+        resolving_keys = await self.keystore.get_resolving_keys()
+        # Create a host-side address resolver
+        self.address_resolver = smp.AddressResolver(resolving_keys)
+
+        if self.address_resolution_offload:
+            await self.send_command(HCI_LE_Clear_Resolving_List_Command())  # type: ignore[call-arg]
+
+            for irk, address in resolving_keys:
+                await self.send_command(
+                    HCI_LE_Add_Device_To_Resolving_List_Command(
+                        peer_identity_address_type=address.address_type,
+                        peer_identity_address=address,
+                        peer_irk=irk,
+                        local_irk=self.irk,
+                    )  # type: ignore[call-arg]
+                )
 
     def supports_le_feature(self, feature):
         return self.host.supports_le_feature(feature)
@@ -2435,7 +2453,7 @@ class Device(CompositeEventEmitter):
 
             if result.status != HCI_COMMAND_STATUS_PENDING:
                 logger.warning(
-                    'HCI_Set_Connection_Encryption_Command failed: '
+                    'HCI_Remote_Name_Request_Command failed: '
                     f'{HCI_Constant.error_name(result.status)}'
                 )
                 raise HCI_StatusError(result)
@@ -2841,18 +2859,22 @@ class Device(CompositeEventEmitter):
         method = methods[peer_io_capability][io_capability]
 
         async def reply() -> None:
-            if await connection.abort_on('disconnection', method()):
-                await self.host.send_command(
-                    HCI_User_Confirmation_Request_Reply_Command(  # type: ignore[call-arg]
-                        bd_addr=connection.peer_address
+            try:
+                if await connection.abort_on('disconnection', method()):
+                    await self.host.send_command(
+                        HCI_User_Confirmation_Request_Reply_Command(  # type: ignore[call-arg]
+                            bd_addr=connection.peer_address
+                        )
                     )
+                    return
+            except Exception as error:
+                logger.warning(f'exception while confirming: {error}')
+
+            await self.host.send_command(
+                HCI_User_Confirmation_Request_Negative_Reply_Command(  # type: ignore[call-arg]
+                    bd_addr=connection.peer_address
                 )
-            else:
-                await self.host.send_command(
-                    HCI_User_Confirmation_Request_Negative_Reply_Command(  # type: ignore[call-arg]
-                        bd_addr=connection.peer_address
-                    )
-                )
+            )
 
         AsyncRunner.spawn(reply())
 
@@ -2864,21 +2886,25 @@ class Device(CompositeEventEmitter):
         pairing_config = self.pairing_config_factory(connection)
 
         async def reply() -> None:
-            number = await connection.abort_on(
-                'disconnection', pairing_config.delegate.get_number()
+            try:
+                number = await connection.abort_on(
+                    'disconnection', pairing_config.delegate.get_number()
+                )
+                if number is not None:
+                    await self.host.send_command(
+                        HCI_User_Passkey_Request_Reply_Command(  # type: ignore[call-arg]
+                            bd_addr=connection.peer_address, numeric_value=number
+                        )
+                    )
+                    return
+            except Exception as error:
+                logger.warning(f'exception while asking for pass-key: {error}')
+
+            await self.host.send_command(
+                HCI_User_Passkey_Request_Negative_Reply_Command(  # type: ignore[call-arg]
+                    bd_addr=connection.peer_address
+                )
             )
-            if number is not None:
-                await self.host.send_command(
-                    HCI_User_Passkey_Request_Reply_Command(  # type: ignore[call-arg]
-                        bd_addr=connection.peer_address, numeric_value=number
-                    )
-                )
-            else:
-                await self.host.send_command(
-                    HCI_User_Passkey_Request_Negative_Reply_Command(  # type: ignore[call-arg]
-                        bd_addr=connection.peer_address
-                    )
-                )
 
         AsyncRunner.spawn(reply())
 
@@ -3088,7 +3114,16 @@ class Device(CompositeEventEmitter):
     def on_pairing_start(self, connection: Connection) -> None:
         connection.emit('pairing_start')
 
-    def on_pairing(self, connection: Connection, keys: PairingKeys, sc: bool) -> None:
+    def on_pairing(
+        self,
+        connection: Connection,
+        identity_address: Optional[Address],
+        keys: PairingKeys,
+        sc: bool,
+    ) -> None:
+        if identity_address is not None:
+            connection.peer_resolvable_address = connection.peer_address
+            connection.peer_address = identity_address
         connection.sc = sc
         connection.authenticated = True
         connection.emit('pairing', keys)

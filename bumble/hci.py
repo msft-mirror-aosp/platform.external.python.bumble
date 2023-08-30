@@ -62,7 +62,7 @@ def map_null_terminated_utf8_string(utf8_bytes):
     try:
         terminator = utf8_bytes.find(0)
         if terminator < 0:
-            return utf8_bytes
+            terminator = len(utf8_bytes)
         return utf8_bytes[0:terminator].decode('utf8')
     except UnicodeDecodeError:
         return utf8_bytes
@@ -185,7 +185,7 @@ HCI_IO_CAPABILITY_REQUEST_EVENT                                  = 0x31
 HCI_IO_CAPABILITY_RESPONSE_EVENT                                 = 0x32
 HCI_USER_CONFIRMATION_REQUEST_EVENT                              = 0x33
 HCI_USER_PASSKEY_REQUEST_EVENT                                   = 0x34
-HCI_REMOTE_OOB_DATA_REQUEST                                      = 0x35
+HCI_REMOTE_OOB_DATA_REQUEST_EVENT                                = 0x35
 HCI_SIMPLE_PAIRING_COMPLETE_EVENT                                = 0x36
 HCI_LINK_SUPERVISION_TIMEOUT_CHANGED_EVENT                       = 0x38
 HCI_ENHANCED_FLUSH_COMPLETE_EVENT                                = 0x39
@@ -1445,8 +1445,14 @@ class HCI_Object:
     @staticmethod
     def init_from_fields(hci_object, fields, values):
         if isinstance(values, dict):
-            for field_name, _ in fields:
-                setattr(hci_object, field_name, values[field_name])
+            for field in fields:
+                if isinstance(field, list):
+                    # The field is an array, up-level the array field names
+                    for sub_field_name, _ in field:
+                        setattr(hci_object, sub_field_name, values[sub_field_name])
+                else:
+                    field_name = field[0]
+                    setattr(hci_object, field_name, values[field_name])
         else:
             for field_name, field_value in zip(fields, values):
                 setattr(hci_object, field_name, field_value)
@@ -1457,132 +1463,160 @@ class HCI_Object:
         HCI_Object.init_from_fields(hci_object, parsed.keys(), parsed.values())
 
     @staticmethod
+    def parse_field(data, offset, field_type):
+        # The field_type may be a dictionary with a mapper, parser, and/or size
+        if isinstance(field_type, dict):
+            if 'size' in field_type:
+                field_type = field_type['size']
+            elif 'parser' in field_type:
+                field_type = field_type['parser']
+
+        # Parse the field
+        if field_type == '*':
+            # The rest of the bytes
+            field_value = data[offset:]
+            return (field_value, len(field_value))
+        if field_type == 1:
+            # 8-bit unsigned
+            return (data[offset], 1)
+        if field_type == -1:
+            # 8-bit signed
+            return (struct.unpack_from('b', data, offset)[0], 1)
+        if field_type == 2:
+            # 16-bit unsigned
+            return (struct.unpack_from('<H', data, offset)[0], 2)
+        if field_type == '>2':
+            # 16-bit unsigned big-endian
+            return (struct.unpack_from('>H', data, offset)[0], 2)
+        if field_type == -2:
+            # 16-bit signed
+            return (struct.unpack_from('<h', data, offset)[0], 2)
+        if field_type == 3:
+            # 24-bit unsigned
+            padded = data[offset : offset + 3] + bytes([0])
+            return (struct.unpack('<I', padded)[0], 3)
+        if field_type == 4:
+            # 32-bit unsigned
+            return (struct.unpack_from('<I', data, offset)[0], 4)
+        if field_type == '>4':
+            # 32-bit unsigned big-endian
+            return (struct.unpack_from('>I', data, offset)[0], 4)
+        if isinstance(field_type, int) and 4 < field_type <= 256:
+            # Byte array (from 5 up to 256 bytes)
+            return (data[offset : offset + field_type], field_type)
+        if callable(field_type):
+            new_offset, field_value = field_type(data, offset)
+            return (field_value, new_offset - offset)
+
+        raise ValueError(f'unknown field type {field_type}')
+
+    @staticmethod
     def dict_from_bytes(data, offset, fields):
         result = collections.OrderedDict()
-        for (field_name, field_type) in fields:
-            # The field_type may be a dictionary with a mapper, parser, and/or size
-            if isinstance(field_type, dict):
-                if 'size' in field_type:
-                    field_type = field_type['size']
-                elif 'parser' in field_type:
-                    field_type = field_type['parser']
-
-            # Parse the field
-            if field_type == '*':
-                # The rest of the bytes
-                field_value = data[offset:]
-                offset += len(field_value)
-            elif field_type == 1:
-                # 8-bit unsigned
-                field_value = data[offset]
+        for field in fields:
+            if isinstance(field, list):
+                # This is an array field, starting with a 1-byte item count.
+                item_count = data[offset]
                 offset += 1
-            elif field_type == -1:
-                # 8-bit signed
-                field_value = struct.unpack_from('b', data, offset)[0]
-                offset += 1
-            elif field_type == 2:
-                # 16-bit unsigned
-                field_value = struct.unpack_from('<H', data, offset)[0]
-                offset += 2
-            elif field_type == '>2':
-                # 16-bit unsigned big-endian
-                field_value = struct.unpack_from('>H', data, offset)[0]
-                offset += 2
-            elif field_type == -2:
-                # 16-bit signed
-                field_value = struct.unpack_from('<h', data, offset)[0]
-                offset += 2
-            elif field_type == 3:
-                # 24-bit unsigned
-                padded = data[offset : offset + 3] + bytes([0])
-                field_value = struct.unpack('<I', padded)[0]
-                offset += 3
-            elif field_type == 4:
-                # 32-bit unsigned
-                field_value = struct.unpack_from('<I', data, offset)[0]
-                offset += 4
-            elif field_type == '>4':
-                # 32-bit unsigned big-endian
-                field_value = struct.unpack_from('>I', data, offset)[0]
-                offset += 4
-            elif isinstance(field_type, int) and 4 < field_type <= 256:
-                # Byte array (from 5 up to 256 bytes)
-                field_value = data[offset : offset + field_type]
-                offset += field_type
-            elif callable(field_type):
-                offset, field_value = field_type(data, offset)
-            else:
-                raise ValueError(f'unknown field type {field_type}')
+                for _ in range(item_count):
+                    for sub_field_name, sub_field_type in field:
+                        value, size = HCI_Object.parse_field(
+                            data, offset, sub_field_type
+                        )
+                        result.setdefault(sub_field_name, []).append(value)
+                        offset += size
+                continue
 
+            field_name, field_type = field
+            field_value, field_size = HCI_Object.parse_field(data, offset, field_type)
             result[field_name] = field_value
+            offset += field_size
 
         return result
 
     @staticmethod
+    def serialize_field(field_value, field_type):
+        # The field_type may be a dictionary with a mapper, parser, serializer,
+        # and/or size
+        serializer = None
+        if isinstance(field_type, dict):
+            if 'serializer' in field_type:
+                serializer = field_type['serializer']
+            if 'size' in field_type:
+                field_type = field_type['size']
+
+        # Serialize the field
+        if serializer:
+            field_bytes = serializer(field_value)
+        elif field_type == 1:
+            # 8-bit unsigned
+            field_bytes = bytes([field_value])
+        elif field_type == -1:
+            # 8-bit signed
+            field_bytes = struct.pack('b', field_value)
+        elif field_type == 2:
+            # 16-bit unsigned
+            field_bytes = struct.pack('<H', field_value)
+        elif field_type == '>2':
+            # 16-bit unsigned big-endian
+            field_bytes = struct.pack('>H', field_value)
+        elif field_type == -2:
+            # 16-bit signed
+            field_bytes = struct.pack('<h', field_value)
+        elif field_type == 3:
+            # 24-bit unsigned
+            field_bytes = struct.pack('<I', field_value)[0:3]
+        elif field_type == 4:
+            # 32-bit unsigned
+            field_bytes = struct.pack('<I', field_value)
+        elif field_type == '>4':
+            # 32-bit unsigned big-endian
+            field_bytes = struct.pack('>I', field_value)
+        elif field_type == '*':
+            if isinstance(field_value, int):
+                if 0 <= field_value <= 255:
+                    field_bytes = bytes([field_value])
+                else:
+                    raise ValueError('value too large for *-typed field')
+            else:
+                field_bytes = bytes(field_value)
+        elif isinstance(field_value, (bytes, bytearray)) or hasattr(
+            field_value, 'to_bytes'
+        ):
+            field_bytes = bytes(field_value)
+            if isinstance(field_type, int) and 4 < field_type <= 256:
+                # Truncate or pad with zeros if the field is too long or too short
+                if len(field_bytes) < field_type:
+                    field_bytes += bytes(field_type - len(field_bytes))
+                elif len(field_bytes) > field_type:
+                    field_bytes = field_bytes[:field_type]
+        else:
+            raise ValueError(f"don't know how to serialize type {type(field_value)}")
+
+        return field_bytes
+
+    @staticmethod
     def dict_to_bytes(hci_object, fields):
         result = bytearray()
-        for (field_name, field_type) in fields:
-            # The field_type may be a dictionary with a mapper, parser, serializer,
-            # and/or size
-            serializer = None
-            if isinstance(field_type, dict):
-                if 'serializer' in field_type:
-                    serializer = field_type['serializer']
-                if 'size' in field_type:
-                    field_type = field_type['size']
-
-            # Serialize the field
-            field_value = hci_object[field_name]
-            if serializer:
-                field_bytes = serializer(field_value)
-            elif field_type == 1:
-                # 8-bit unsigned
-                field_bytes = bytes([field_value])
-            elif field_type == -1:
-                # 8-bit signed
-                field_bytes = struct.pack('b', field_value)
-            elif field_type == 2:
-                # 16-bit unsigned
-                field_bytes = struct.pack('<H', field_value)
-            elif field_type == '>2':
-                # 16-bit unsigned big-endian
-                field_bytes = struct.pack('>H', field_value)
-            elif field_type == -2:
-                # 16-bit signed
-                field_bytes = struct.pack('<h', field_value)
-            elif field_type == 3:
-                # 24-bit unsigned
-                field_bytes = struct.pack('<I', field_value)[0:3]
-            elif field_type == 4:
-                # 32-bit unsigned
-                field_bytes = struct.pack('<I', field_value)
-            elif field_type == '>4':
-                # 32-bit unsigned big-endian
-                field_bytes = struct.pack('>I', field_value)
-            elif field_type == '*':
-                if isinstance(field_value, int):
-                    if 0 <= field_value <= 255:
-                        field_bytes = bytes([field_value])
-                    else:
-                        raise ValueError('value too large for *-typed field')
-                else:
-                    field_bytes = bytes(field_value)
-            elif isinstance(field_value, (bytes, bytearray)) or hasattr(
-                field_value, 'to_bytes'
-            ):
-                field_bytes = bytes(field_value)
-                if isinstance(field_type, int) and 4 < field_type <= 256:
-                    # Truncate or Pad with zeros if the field is too long or too short
-                    if len(field_bytes) < field_type:
-                        field_bytes += bytes(field_type - len(field_bytes))
-                    elif len(field_bytes) > field_type:
-                        field_bytes = field_bytes[:field_type]
-            else:
-                raise ValueError(
-                    f"don't know how to serialize type {type(field_value)}"
+        for field in fields:
+            if isinstance(field, list):
+                # The field is an array. The serialized form starts with a 1-byte
+                # item count. We use the length of the first array field as the
+                # array count, since all array fields have the same number of items.
+                item_count = len(hci_object[field[0][0]])
+                result += bytes([item_count]) + b''.join(
+                    b''.join(
+                        HCI_Object.serialize_field(
+                            hci_object[sub_field_name][i], sub_field_type
+                        )
+                        for sub_field_name, sub_field_type in field
+                    )
+                    for i in range(item_count)
                 )
+                continue
 
-            result += field_bytes
+            (field_name, field_type) = field
+            result += HCI_Object.serialize_field(hci_object[field_name], field_type)
 
         return bytes(result)
 
@@ -1617,46 +1651,73 @@ class HCI_Object:
         return str(value)
 
     @staticmethod
-    def format_fields(hci_object, keys, indentation='', value_mappers=None):
-        if not keys:
-            return ''
+    def stringify_field(
+        field_name, field_type, field_value, indentation, value_mappers
+    ):
+        value_mapper = None
+        if isinstance(field_type, dict):
+            # Get the value mapper from the specifier
+            value_mapper = field_type.get('mapper')
 
-        # Measure the widest field name
-        max_field_name_length = max(
-            (len(key[0] if isinstance(key, tuple) else key) for key in keys)
+        # Check if there's a matching mapper passed
+        if value_mappers:
+            value_mapper = value_mappers.get(field_name, value_mapper)
+
+        # Map the value if we have a mapper
+        if value_mapper is not None:
+            field_value = value_mapper(field_value)
+
+        # Get the string representation of the value
+        return HCI_Object.format_field_value(
+            field_value, indentation=indentation + '  '
         )
 
+    @staticmethod
+    def format_fields(hci_object, fields, indentation='', value_mappers=None):
+        if not fields:
+            return ''
+
         # Build array of formatted key:value pairs
-        fields = []
-        for key in keys:
-            value_mapper = None
-            if isinstance(key, tuple):
-                # The key has an associated specifier
-                key, specifier = key
+        field_strings = []
+        for field in fields:
+            if isinstance(field, list):
+                for sub_field in field:
+                    sub_field_name, sub_field_type = sub_field
+                    item_count = len(hci_object[sub_field_name])
+                    for i in range(item_count):
+                        field_strings.append(
+                            (
+                                f'{sub_field_name}[{i}]',
+                                HCI_Object.stringify_field(
+                                    sub_field_name,
+                                    sub_field_type,
+                                    hci_object[sub_field_name][i],
+                                    indentation,
+                                    value_mappers,
+                                ),
+                            ),
+                        )
+                continue
 
-                # Get the value mapper from the specifier
-                if isinstance(specifier, dict):
-                    value_mapper = specifier.get('mapper')
-
-            # Get the value for the field
-            value = hci_object[key]
-
-            # Map the value if needed
-            if value_mappers:
-                value_mapper = value_mappers.get(key, value_mapper)
-            if value_mapper is not None:
-                value = value_mapper(value)
-
-            # Get the string representation of the value
-            value_str = HCI_Object.format_field_value(
-                value, indentation=indentation + '  '
+            field_name, field_type = field
+            field_value = hci_object[field_name]
+            field_strings.append(
+                (
+                    field_name,
+                    HCI_Object.stringify_field(
+                        field_name, field_type, field_value, indentation, value_mappers
+                    ),
+                ),
             )
 
-            # Add the field to the formatted result
-            key_str = color(f'{key + ":":{1 + max_field_name_length}}', 'cyan')
-            fields.append(f'{indentation}{key_str} {value_str}')
-
-        return '\n'.join(fields)
+        # Measure the widest field name
+        max_field_name_length = max(len(s[0]) for s in field_strings)
+        sep = ':'
+        return '\n'.join(
+            f'{indentation}'
+            f'{color(f"{field_name + sep:{1 + max_field_name_length}}", "cyan")} {field_value}'
+            for field_name, field_value in field_strings
+        )
 
     def __bytes__(self):
         return self.to_bytes()
@@ -1795,6 +1856,16 @@ class Address:
     def to_bytes(self):
         return self.address_bytes
 
+    def to_string(self, with_type_qualifier=True):
+        '''
+        String representation of the address, MSB first, with an optional type
+        qualifier.
+        '''
+        result = ':'.join([f'{x:02X}' for x in reversed(self.address_bytes)])
+        if not with_type_qualifier or not self.is_public:
+            return result
+        return result + '/P'
+
     def __bytes__(self):
         return self.to_bytes()
 
@@ -1808,13 +1879,7 @@ class Address:
         )
 
     def __str__(self):
-        '''
-        String representation of the address, MSB first
-        '''
-        result = ':'.join([f'{x:02X}' for x in reversed(self.address_bytes)])
-        if not self.is_public:
-            return result
-        return result + '/P'
+        return self.to_string()
 
 
 # Predefined address values
@@ -2284,6 +2349,55 @@ class HCI_User_Passkey_Request_Negative_Reply_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('c', 16),
+        ('r', 16),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_Remote_OOB_Data_Request_Reply_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.34 Remote OOB Data Request Reply Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[('bd_addr', Address.parse_address)],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_Remote_OOB_Data_Request_Negative_Reply_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.35 Remote OOB Data Request Negative Reply Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('reason', 1),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_IO_Capability_Request_Negative_Reply_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.36 IO Capability Request Negative Reply Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
     [
         ('connection_handle', 2),
         ('transmit_bandwidth', 4),
@@ -2314,6 +2428,161 @@ class HCI_User_Passkey_Request_Negative_Reply_Command(HCI_Command):
 class HCI_Enhanced_Setup_Synchronous_Connection_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.1.45 Enhanced Setup Synchronous Connection Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    [
+        ('bd_addr', Address.parse_address),
+        ('transmit_bandwidth', 4),
+        ('receive_bandwidth', 4),
+        ('transmit_coding_format', 5),
+        ('receive_coding_format', 5),
+        ('transmit_codec_frame_size', 2),
+        ('receive_codec_frame_size', 2),
+        ('input_bandwidth', 4),
+        ('output_bandwidth', 4),
+        ('input_coding_format', 5),
+        ('output_coding_format', 5),
+        ('input_coded_data_size', 2),
+        ('output_coded_data_size', 2),
+        ('input_pcm_data_format', 1),
+        ('output_pcm_data_format', 1),
+        ('input_pcm_sample_payload_msb_position', 1),
+        ('output_pcm_sample_payload_msb_position', 1),
+        ('input_data_path', 1),
+        ('output_data_path', 1),
+        ('input_transport_unit_size', 1),
+        ('output_transport_unit_size', 1),
+        ('max_latency', 2),
+        ('packet_type', 2),
+        ('retransmission_effort', 1),
+    ]
+)
+class HCI_Enhanced_Accept_Synchronous_Connection_Request_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.46 Enhanced Accept Synchronous Connection Request Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('page_scan_repetition_mode', 1),
+        ('clock_offset', 2),
+    ]
+)
+class HCI_Truncated_Page_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.47 Truncated Page Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[('bd_addr', Address.parse_address)],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_Truncated_Page_Cancel_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.48 Truncated Page Cancel Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('enable', 1),
+        ('lt_addr', 1),
+        ('lpo_allowed', 1),
+        ('packet_type', 2),
+        ('interval_min', 2),
+        ('interval_max', 2),
+        ('supervision_timeout', 2),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('lt_addr', 1),
+        ('interval', 2),
+    ],
+)
+class HCI_Set_Connectionless_Peripheral_Broadcast_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.49 Set Connectionless Peripheral Broadcast Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('enable', 1),
+        ('bd_addr', Address.parse_address),
+        ('lt_addr', 1),
+        ('interval', 2),
+        ('clock_offset', 4),
+        ('next_connectionless_peripheral_broadcast_clock', 4),
+        ('supervision_timeout', 2),
+        ('remote_timing_accuracy', 1),
+        ('skip', 1),
+        ('packet_type', 2),
+        ('afh_channel_map', 10),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+        ('lt_addr', 1),
+    ],
+)
+class HCI_Set_Connectionless_Peripheral_Broadcast_Receive_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.50 Set Connectionless Peripheral Broadcast Receive Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+class HCI_Start_Synchronization_Train_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.51 Start Synchronization Train Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('sync_scan_timeout', 2),
+        ('sync_scan_window', 2),
+        ('sync_scan_interval', 2),
+    ],
+)
+class HCI_Receive_Synchronization_Train_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.52 Receive Synchronization Train Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    fields=[
+        ('bd_addr', Address.parse_address),
+        ('c_192', 16),
+        ('r_192', 16),
+        ('c_256', 16),
+        ('r_256', 16),
+    ],
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('bd_addr', Address.parse_address),
+    ],
+)
+class HCI_Remote_OOB_Extended_Data_Request_Reply_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.1.53 Remote OOB Extended Data Request Reply Command
     '''
 
 
@@ -2685,6 +2954,20 @@ class HCI_Write_Simple_Pairing_Mode_Command(HCI_Command):
 
 # -----------------------------------------------------------------------------
 @HCI_Command.command(
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('c', 16),
+        ('r', 16),
+    ]
+)
+class HCI_Read_Local_OOB_Data_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.3.60 Read Local OOB Data Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
     return_parameters_fields=[('status', STATUS_SPEC), ('tx_power', -1)]
 )
 class HCI_Read_Inquiry_Response_Transmit_Power_Level_Command(HCI_Command):
@@ -2740,6 +3023,22 @@ class HCI_Write_Secure_Connections_Host_Support_Command(HCI_Command):
 class HCI_Write_Authenticated_Payload_Timeout_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.3.94 Write Authenticated Payload Timeout Command
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Command.command(
+    return_parameters_fields=[
+        ('status', STATUS_SPEC),
+        ('c_192', 16),
+        ('r_192', 16),
+        ('c_256', 16),
+        ('r_256', 16),
+    ]
+)
+class HCI_Read_Local_OOB_Extended_Data_Command(HCI_Command):
+    '''
+    See Bluetooth spec @ 7.3.95 Read Local OOB Extended Data Command
     '''
 
 
@@ -3529,9 +3828,7 @@ class HCI_LE_Set_Extended_Advertising_Parameters_Command(HCI_Command):
             'advertising_data',
             {
                 'parser': HCI_Object.parse_length_prefixed_bytes,
-                'serializer': functools.partial(
-                    HCI_Object.serialize_length_prefixed_bytes
-                ),
+                'serializer': HCI_Object.serialize_length_prefixed_bytes,
             },
         ),
     ]
@@ -3579,9 +3876,7 @@ class HCI_LE_Set_Extended_Advertising_Data_Command(HCI_Command):
             'scan_response_data',
             {
                 'parser': HCI_Object.parse_length_prefixed_bytes,
-                'serializer': functools.partial(
-                    HCI_Object.serialize_length_prefixed_bytes
-                ),
+                'serializer': HCI_Object.serialize_length_prefixed_bytes,
             },
         ),
     ]
@@ -3609,72 +3904,20 @@ class HCI_LE_Set_Extended_Scan_Response_Data_Command(HCI_Command):
 
 
 # -----------------------------------------------------------------------------
-@HCI_Command.command(fields=None)
+@HCI_Command.command(
+    [
+        ('enable', 1),
+        [
+            ('advertising_handles', 1),
+            ('durations', 2),
+            ('max_extended_advertising_events', 1),
+        ],
+    ]
+)
 class HCI_LE_Set_Extended_Advertising_Enable_Command(HCI_Command):
     '''
     See Bluetooth spec @ 7.8.56 LE Set Extended Advertising Enable Command
     '''
-
-    @classmethod
-    def from_parameters(cls, parameters):
-        enable = parameters[0]
-        num_sets = parameters[1]
-        advertising_handles = []
-        durations = []
-        max_extended_advertising_events = []
-        offset = 2
-        for _ in range(num_sets):
-            advertising_handles.append(parameters[offset])
-            durations.append(struct.unpack_from('<H', parameters, offset + 1)[0])
-            max_extended_advertising_events.append(parameters[offset + 3])
-            offset += 4
-
-        return cls(
-            enable, advertising_handles, durations, max_extended_advertising_events
-        )
-
-    def __init__(
-        self, enable, advertising_handles, durations, max_extended_advertising_events
-    ):
-        super().__init__(HCI_LE_SET_EXTENDED_ADVERTISING_ENABLE_COMMAND)
-        self.enable = enable
-        self.advertising_handles = advertising_handles
-        self.durations = durations
-        self.max_extended_advertising_events = max_extended_advertising_events
-
-        self.parameters = bytes([enable, len(advertising_handles)]) + b''.join(
-            [
-                struct.pack(
-                    '<BHB',
-                    advertising_handles[i],
-                    durations[i],
-                    max_extended_advertising_events[i],
-                )
-                for i in range(len(advertising_handles))
-            ]
-        )
-
-    def __str__(self):
-        fields = [('enable:', self.enable)]
-        for i, advertising_handle in enumerate(self.advertising_handles):
-            fields.append(
-                (f'advertising_handle[{i}]:             ', advertising_handle)
-            )
-            fields.append((f'duration[{i}]:                       ', self.durations[i]))
-            fields.append(
-                (
-                    f'max_extended_advertising_events[{i}]:',
-                    self.max_extended_advertising_events[i],
-                )
-            )
-
-        return (
-            color(self.name, 'green')
-            + ':\n'
-            + '\n'.join(
-                [color(field[0], 'cyan') + ' ' + str(field[1]) for field in fields]
-            )
-        )
 
 
 # -----------------------------------------------------------------------------
@@ -3826,7 +4069,10 @@ class HCI_LE_Set_Extended_Scan_Parameters_Command(HCI_Command):
             color(self.name, 'green')
             + ':\n'
             + '\n'.join(
-                [color(field[0], 'cyan') + ' ' + str(field[1]) for field in fields]
+                [
+                    color('  ' + field[0], 'cyan') + ' ' + str(field[1])
+                    for field in fields
+                ]
             )
         )
 
@@ -4002,7 +4248,10 @@ class HCI_LE_Extended_Create_Connection_Command(HCI_Command):
             color(self.name, 'green')
             + ':\n'
             + '\n'.join(
-                [color(field[0], 'cyan') + ' ' + str(field[1]) for field in fields]
+                [
+                    color('  ' + field[0], 'cyan') + ' ' + str(field[1])
+                    for field in fields
+                ]
             )
         )
 
@@ -4965,7 +5214,7 @@ class HCI_Number_Of_Completed_Packets_Event(HCI_Event):
     def __str__(self):
         lines = [
             color(self.name, 'magenta') + ':',
-            color('  number_of_handles:         ', 'cyan')
+            color('  number_of_handles:        ', 'cyan')
             + f'{len(self.connection_handles)}',
         ]
         for i, connection_handle in enumerate(self.connection_handles):
@@ -5300,6 +5549,14 @@ class HCI_User_Passkey_Request_Event(HCI_Event):
 
 
 # -----------------------------------------------------------------------------
+@HCI_Event.event([('bd_addr', Address.parse_address)])
+class HCI_Remote_OOB_Data_Request_Event(HCI_Event):
+    '''
+    See Bluetooth spec @ 7.7.44 Remote OOB Data Request Event
+    '''
+
+
+# -----------------------------------------------------------------------------
 @HCI_Event.event([('status', STATUS_SPEC), ('bd_addr', Address.parse_address)])
 class HCI_Simple_Pairing_Complete_Event(HCI_Event):
     '''
@@ -5316,10 +5573,26 @@ class HCI_Link_Supervision_Timeout_Changed_Event(HCI_Event):
 
 
 # -----------------------------------------------------------------------------
+@HCI_Event.event([('handle', 2)])
+class HCI_Enhanced_Flush_Complete_Event(HCI_Event):
+    '''
+    See Bluetooth spec @ 7.7.47 Enhanced Flush Complete Event
+    '''
+
+
+# -----------------------------------------------------------------------------
 @HCI_Event.event([('bd_addr', Address.parse_address), ('passkey', 4)])
 class HCI_User_Passkey_Notification_Event(HCI_Event):
     '''
     See Bluetooth spec @ 7.7.48 User Passkey Notification Event
+    '''
+
+
+# -----------------------------------------------------------------------------
+@HCI_Event.event([('bd_addr', Address.parse_address), ('notification_type', 1)])
+class HCI_Keypress_Notification_Event(HCI_Event):
+    '''
+    See Bluetooth spec @ 7.7.49 Keypress Notification Event
     '''
 
 
@@ -5373,7 +5646,7 @@ class HCI_AclDataPacket:
     def __str__(self):
         return (
             f'{color("ACL", "blue")}: '
-            f'handle=0x{self.connection_handle:04x}'
+            f'handle=0x{self.connection_handle:04x}, '
             f'pb={self.pb_flag}, bc={self.bc_flag}, '
             f'data_total_length={self.data_total_length}, '
             f'data={self.data.hex()}'
