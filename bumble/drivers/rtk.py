@@ -34,10 +34,9 @@ import weakref
 
 
 from bumble.hci import (
-    hci_command_op_code,
+    hci_vendor_command_op_code,
     STATUS_SPEC,
     HCI_SUCCESS,
-    HCI_COMMAND_NAMES,
     HCI_Command,
     HCI_Reset_Command,
     HCI_Read_Local_Version_Information_Command,
@@ -125,6 +124,7 @@ RTK_USB_PRODUCTS = {
     (0x2550, 0x8761),
     (0x2B89, 0x8761),
     (0x7392, 0xC611),
+    (0x0BDA, 0x877B),
     # Realtek 8821AE
     (0x0B05, 0x17DC),
     (0x13D3, 0x3414),
@@ -178,17 +178,15 @@ RTK_USB_PRODUCTS = {
 # -----------------------------------------------------------------------------
 # HCI Commands
 # -----------------------------------------------------------------------------
-HCI_RTK_READ_ROM_VERSION_COMMAND = hci_command_op_code(0x3F, 0x6D)
-HCI_COMMAND_NAMES[HCI_RTK_READ_ROM_VERSION_COMMAND] = "HCI_RTK_READ_ROM_VERSION_COMMAND"
+HCI_RTK_READ_ROM_VERSION_COMMAND = hci_vendor_command_op_code(0x6D)
+HCI_RTK_DOWNLOAD_COMMAND = hci_vendor_command_op_code(0x20)
+HCI_RTK_DROP_FIRMWARE_COMMAND = hci_vendor_command_op_code(0x66)
+HCI_Command.register_commands(globals())
 
 
 @HCI_Command.command(return_parameters_fields=[("status", STATUS_SPEC), ("version", 1)])
 class HCI_RTK_Read_ROM_Version_Command(HCI_Command):
     pass
-
-
-HCI_RTK_DOWNLOAD_COMMAND = hci_command_op_code(0x3F, 0x20)
-HCI_COMMAND_NAMES[HCI_RTK_DOWNLOAD_COMMAND] = "HCI_RTK_DOWNLOAD_COMMAND"
 
 
 @HCI_Command.command(
@@ -197,10 +195,6 @@ HCI_COMMAND_NAMES[HCI_RTK_DOWNLOAD_COMMAND] = "HCI_RTK_DOWNLOAD_COMMAND"
 )
 class HCI_RTK_Download_Command(HCI_Command):
     pass
-
-
-HCI_RTK_DROP_FIRMWARE_COMMAND = hci_command_op_code(0x3F, 0x66)
-HCI_COMMAND_NAMES[HCI_RTK_DROP_FIRMWARE_COMMAND] = "HCI_RTK_DROP_FIRMWARE_COMMAND"
 
 
 @HCI_Command.command()
@@ -445,6 +439,11 @@ class Driver:
             # When the environment variable is set, don't look elsewhere
             return None
 
+        # Then, look where the firmware download tool writes by default
+        if (path := rtk_firmware_dir() / file_name).is_file():
+            logger.debug(f"{file_name} found in project data dir")
+            return path
+
         # Then, look in the package's driver directory
         if (path := pathlib.Path(__file__).parent / "rtk_fw" / file_name).is_file():
             logger.debug(f"{file_name} found in package dir")
@@ -645,3 +644,16 @@ class Driver:
         await self.download_firmware()
         await self.host.send_command(HCI_Reset_Command(), check_result=True)
         logger.info(f"loaded FW image {self.driver_info.fw_name}")
+
+
+def rtk_firmware_dir() -> pathlib.Path:
+    """
+    Returns:
+        A path to a subdir of the project data dir for Realtek firmware.
+         The directory is created if it doesn't exist.
+    """
+    from bumble.drivers import project_data_dir
+
+    p = project_data_dir() / "firmware" / "realtek"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
