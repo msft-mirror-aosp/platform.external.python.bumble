@@ -19,13 +19,19 @@ use crate::{
     wrapper::{
         core::AdvertisingData,
         gatt_client::{ProfileServiceProxy, ServiceProxy},
-        hci::Address,
+        hci::{Address, HciErrorCode},
+        host::Host,
+        l2cap::LeConnectionOrientedChannel,
         transport::{Sink, Source},
-        ClosureCallback,
+        ClosureCallback, PyDictExt, PyObjectExt,
     },
 };
-use pyo3::types::PyDict;
-use pyo3::{intern, types::PyModule, PyObject, PyResult, Python, ToPyObject};
+use pyo3::{
+    intern,
+    types::{PyDict, PyModule},
+    IntoPy, PyObject, PyResult, Python, ToPyObject,
+};
+use pyo3_asyncio::tokio::into_future;
 use std::path;
 
 /// A device that can send/receive HCI frames.
@@ -65,7 +71,7 @@ impl Device {
         Python::with_gil(|py| {
             self.0
                 .call_method0(py, intern!(py, "power_on"))
-                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+                .and_then(|coroutine| into_future(coroutine.as_ref(py)))
         })?
         .await
         .map(|_| ())
@@ -76,10 +82,26 @@ impl Device {
         Python::with_gil(|py| {
             self.0
                 .call_method1(py, intern!(py, "connect"), (peer_addr,))
-                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+                .and_then(|coroutine| into_future(coroutine.as_ref(py)))
         })?
         .await
         .map(Connection)
+    }
+
+    /// Register a callback to be called for each incoming connection.
+    pub fn on_connection(
+        &mut self,
+        callback: impl Fn(Python, Connection) -> PyResult<()> + Send + 'static,
+    ) -> PyResult<()> {
+        let boxed = ClosureCallback::new(move |py, args, _kwargs| {
+            callback(py, Connection(args.get_item(0)?.into()))
+        });
+
+        Python::with_gil(|py| {
+            self.0
+                .call_method1(py, intern!(py, "add_listener"), ("connection", boxed))
+        })
+        .map(|_| ())
     }
 
     /// Start scanning
@@ -89,7 +111,7 @@ impl Device {
             kwargs.set_item("filter_duplicates", filter_duplicates)?;
             self.0
                 .call_method(py, intern!(py, "start_scanning"), (), Some(kwargs))
-                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+                .and_then(|coroutine| into_future(coroutine.as_ref(py)))
         })?
         .await
         .map(|_| ())
@@ -123,6 +145,15 @@ impl Device {
         .map(|_| ())
     }
 
+    /// Returns the host used by the device, if any
+    pub fn host(&mut self) -> PyResult<Option<Host>> {
+        Python::with_gil(|py| {
+            self.0
+                .getattr(py, intern!(py, "host"))
+                .map(|obj| obj.into_option(Host::from))
+        })
+    }
+
     /// Start advertising the data set with [Device.set_advertisement].
     pub async fn start_advertising(&mut self, auto_restart: bool) -> PyResult<()> {
         Python::with_gil(|py| {
@@ -131,7 +162,7 @@ impl Device {
 
             self.0
                 .call_method(py, intern!(py, "start_advertising"), (), Some(kwargs))
-                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+                .and_then(|coroutine| into_future(coroutine.as_ref(py)))
         })?
         .await
         .map(|_| ())
@@ -142,15 +173,113 @@ impl Device {
         Python::with_gil(|py| {
             self.0
                 .call_method0(py, intern!(py, "stop_advertising"))
-                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+                .and_then(|coroutine| into_future(coroutine.as_ref(py)))
         })?
         .await
         .map(|_| ())
+    }
+
+    /// Registers an L2CAP connection oriented channel server. When a client connects to the server,
+    /// the `server` callback is passed a handle to the established channel. When optional arguments
+    /// are not specified, the Python module specifies the defaults.
+    pub fn register_l2cap_channel_server(
+        &mut self,
+        psm: u16,
+        server: impl Fn(Python, LeConnectionOrientedChannel) -> PyResult<()> + Send + 'static,
+        max_credits: Option<u16>,
+        mtu: Option<u16>,
+        mps: Option<u16>,
+    ) -> PyResult<()> {
+        Python::with_gil(|py| {
+            let boxed = ClosureCallback::new(move |py, args, _kwargs| {
+                server(
+                    py,
+                    LeConnectionOrientedChannel::from(args.get_item(0)?.into()),
+                )
+            });
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("psm", psm)?;
+            kwargs.set_item("server", boxed.into_py(py))?;
+            kwargs.set_opt_item("max_credits", max_credits)?;
+            kwargs.set_opt_item("mtu", mtu)?;
+            kwargs.set_opt_item("mps", mps)?;
+            self.0.call_method(
+                py,
+                intern!(py, "register_l2cap_channel_server"),
+                (),
+                Some(kwargs),
+            )
+        })?;
+        Ok(())
     }
 }
 
 /// A connection to a remote device.
 pub struct Connection(PyObject);
+
+impl Connection {
+    /// Open an L2CAP channel using this connection. When optional arguments are not specified, the
+    /// Python module specifies the defaults.
+    pub async fn open_l2cap_channel(
+        &mut self,
+        psm: u16,
+        max_credits: Option<u16>,
+        mtu: Option<u16>,
+        mps: Option<u16>,
+    ) -> PyResult<LeConnectionOrientedChannel> {
+        Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("psm", psm)?;
+            kwargs.set_opt_item("max_credits", max_credits)?;
+            kwargs.set_opt_item("mtu", mtu)?;
+            kwargs.set_opt_item("mps", mps)?;
+            self.0
+                .call_method(py, intern!(py, "open_l2cap_channel"), (), Some(kwargs))
+                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+        })?
+        .await
+        .map(LeConnectionOrientedChannel::from)
+    }
+
+    /// Disconnect from device with provided reason. When optional arguments are not specified, the
+    /// Python module specifies the defaults.
+    pub async fn disconnect(&mut self, reason: Option<HciErrorCode>) -> PyResult<()> {
+        Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_opt_item("reason", reason)?;
+            self.0
+                .call_method(py, intern!(py, "disconnect"), (), Some(kwargs))
+                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+        })?
+        .await
+        .map(|_| ())
+    }
+
+    /// Register a callback to be called on disconnection.
+    pub fn on_disconnection(
+        &mut self,
+        callback: impl Fn(Python, HciErrorCode) -> PyResult<()> + Send + 'static,
+    ) -> PyResult<()> {
+        let boxed = ClosureCallback::new(move |py, args, _kwargs| {
+            callback(py, args.get_item(0)?.extract()?)
+        });
+
+        Python::with_gil(|py| {
+            self.0
+                .call_method1(py, intern!(py, "add_listener"), ("disconnection", boxed))
+        })
+        .map(|_| ())
+    }
+
+    /// Returns some information about the connection as a [String].
+    pub fn debug_string(&self) -> PyResult<String> {
+        Python::with_gil(|py| {
+            let str_obj = self.0.call_method0(py, intern!(py, "__str__"))?;
+            str_obj.gil_ref(py).extract()
+        })
+    }
+}
 
 /// The other end of a connection
 pub struct Peer(PyObject);
@@ -173,7 +302,7 @@ impl Peer {
         Python::with_gil(|py| {
             self.0
                 .call_method0(py, intern!(py, "discover_services"))
-                .and_then(|coroutine| pyo3_asyncio::tokio::into_future(coroutine.as_ref(py)))
+                .and_then(|coroutine| into_future(coroutine.as_ref(py)))
         })?
         .await
         .and_then(|list| {
@@ -207,13 +336,7 @@ impl Peer {
             let class = module.getattr(P::PROXY_CLASS_NAME)?;
             self.0
                 .call_method1(py, intern!(py, "create_service_proxy"), (class,))
-                .map(|obj| {
-                    if obj.is_none(py) {
-                        None
-                    } else {
-                        Some(P::wrap(obj))
-                    }
-                })
+                .map(|obj| obj.into_option(P::wrap))
         })
     }
 }
