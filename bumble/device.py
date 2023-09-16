@@ -23,7 +23,18 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager, AsyncExitStack
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+    TYPE_CHECKING,
+)
 
 from .colors import color
 from .att import ATT_CID, ATT_DEFAULT_MTU, ATT_PDU
@@ -130,6 +141,7 @@ from .core import (
     BT_LE_TRANSPORT,
     BT_PERIPHERAL_ROLE,
     AdvertisingData,
+    ConnectionParameterUpdateError,
     CommandTimeoutError,
     ConnectionPHY,
     InvalidStateError,
@@ -151,6 +163,9 @@ from . import smp
 from . import sdp
 from . import l2cap
 from . import core
+
+if TYPE_CHECKING:
+    from .transport.common import TransportSource, TransportSink
 
 
 # -----------------------------------------------------------------------------
@@ -652,7 +667,7 @@ class Connection(CompositeEventEmitter):
     def is_incomplete(self) -> bool:
         return self.handle is None
 
-    def send_l2cap_pdu(self, cid, pdu):
+    def send_l2cap_pdu(self, cid: int, pdu: bytes) -> None:
         self.device.send_l2cap_pdu(self.handle, cid, pdu)
 
     def create_l2cap_connector(self, psm):
@@ -709,6 +724,7 @@ class Connection(CompositeEventEmitter):
         connection_interval_max,
         max_latency,
         supervision_timeout,
+        use_l2cap=False,
     ):
         return await self.device.update_connection_parameters(
             self,
@@ -716,6 +732,7 @@ class Connection(CompositeEventEmitter):
             connection_interval_max,
             max_latency,
             supervision_timeout,
+            use_l2cap=use_l2cap,
         )
 
     async def set_phy(self, tx_phys=None, rx_phys=None, phy_options=None):
@@ -942,7 +959,13 @@ class Device(CompositeEventEmitter):
             pass
 
     @classmethod
-    def with_hci(cls, name, address, hci_source, hci_sink):
+    def with_hci(
+        cls,
+        name: str,
+        address: Address,
+        hci_source: TransportSource,
+        hci_sink: TransportSink,
+    ) -> Device:
         '''
         Create a Device instance with a Host configured to communicate with a controller
         through an HCI source/sink
@@ -951,18 +974,25 @@ class Device(CompositeEventEmitter):
         return cls(name=name, address=address, host=host)
 
     @classmethod
-    def from_config_file(cls, filename):
+    def from_config_file(cls, filename: str) -> Device:
         config = DeviceConfiguration()
         config.load_from_file(filename)
         return cls(config=config)
 
     @classmethod
-    def from_config_with_hci(cls, config, hci_source, hci_sink):
+    def from_config_with_hci(
+        cls,
+        config: DeviceConfiguration,
+        hci_source: TransportSource,
+        hci_sink: TransportSink,
+    ) -> Device:
         host = Host(controller_source=hci_source, controller_sink=hci_sink)
         return cls(config=config, host=host)
 
     @classmethod
-    def from_config_file_with_hci(cls, filename, hci_source, hci_sink):
+    def from_config_file_with_hci(
+        cls, filename: str, hci_source: TransportSource, hci_sink: TransportSink
+    ) -> Device:
         config = DeviceConfiguration()
         config.load_from_file(filename)
         return cls.from_config_with_hci(config, hci_source, hci_sink)
@@ -1096,7 +1126,7 @@ class Device(CompositeEventEmitter):
         return self._host
 
     @host.setter
-    def host(self, host):
+    def host(self, host: Host) -> None:
         # Unsubscribe from events from the current host
         if self._host:
             for event_name in device_host_event_handlers:
@@ -1183,7 +1213,7 @@ class Device(CompositeEventEmitter):
             connection, psm, max_credits, mtu, mps
         )
 
-    def send_l2cap_pdu(self, connection_handle, cid, pdu):
+    def send_l2cap_pdu(self, connection_handle: int, cid: int, pdu: bytes) -> None:
         self.host.send_l2cap_pdu(connection_handle, cid, pdu)
 
     async def send_command(self, command, check_result=False):
@@ -2083,11 +2113,30 @@ class Device(CompositeEventEmitter):
         supervision_timeout,
         min_ce_length=0,
         max_ce_length=0,
-    ):
+        use_l2cap=False,
+    ) -> None:
         '''
         NOTE: the name of the parameters may look odd, but it just follows the names
         used in the Bluetooth spec.
         '''
+
+        if use_l2cap:
+            if connection.role != BT_PERIPHERAL_ROLE:
+                raise InvalidStateError(
+                    'only peripheral can update connection parameters with l2cap'
+                )
+            l2cap_result = (
+                await self.l2cap_channel_manager.update_connection_parameters(
+                    connection,
+                    connection_interval_min,
+                    connection_interval_max,
+                    max_latency,
+                    supervision_timeout,
+                )
+            )
+            if l2cap_result != l2cap.L2CAP_CONNECTION_PARAMETERS_ACCEPTED_RESULT:
+                raise ConnectionParameterUpdateError(l2cap_result)
+
         result = await self.send_command(
             HCI_LE_Connection_Update_Command(
                 connection_handle=connection.handle,
@@ -2097,7 +2146,7 @@ class Device(CompositeEventEmitter):
                 supervision_timeout=supervision_timeout,
                 min_ce_length=min_ce_length,
                 max_ce_length=max_ce_length,
-            )
+            )  # type: ignore[call-arg]
         )
         if result.status != HCI_Command_Status_Event.PENDING:
             raise HCI_StatusError(result)
@@ -2238,9 +2287,11 @@ class Device(CompositeEventEmitter):
     def request_pairing(self, connection):
         return self.smp_manager.request_pairing(connection)
 
-    async def get_long_term_key(self, connection_handle, rand, ediv):
+    async def get_long_term_key(
+        self, connection_handle: int, rand: bytes, ediv: int
+    ) -> Optional[bytes]:
         if (connection := self.lookup_connection(connection_handle)) is None:
-            return
+            return None
 
         # Start by looking for the key in an SMP session
         ltk = self.smp_manager.get_long_term_key(connection, rand, ediv)
@@ -2260,19 +2311,24 @@ class Device(CompositeEventEmitter):
 
                 if connection.role == BT_PERIPHERAL_ROLE and keys.ltk_peripheral:
                     return keys.ltk_peripheral.value
+        return None
 
     async def get_link_key(self, address: Address) -> Optional[bytes]:
-        # Look for the key in the keystore
-        if self.keystore is not None:
-            keys = await self.keystore.get(str(address))
-            if keys is not None:
-                logger.debug('found keys in the key store')
-                if keys.link_key is None:
-                    logger.warning('no link key')
-                    return None
+        if self.keystore is None:
+            return None
 
-                return keys.link_key.value
-        return None
+        # Look for the key in the keystore
+        keys = await self.keystore.get(str(address))
+        if keys is None:
+            logger.debug(f'no keys found for {address}')
+            return None
+
+        logger.debug('found keys in the key store')
+        if keys.link_key is None:
+            logger.warning('no link key')
+            return None
+
+        return keys.link_key.value
 
     # [Classic only]
     async def authenticate(self, connection):
@@ -2391,6 +2447,18 @@ class Device(CompositeEventEmitter):
                 'connection_encryption_failure', on_encryption_failure
             )
 
+    async def update_keys(self, address: str, keys: PairingKeys) -> None:
+        if self.keystore is None:
+            return
+
+        try:
+            await self.keystore.update(address, keys)
+            await self.refresh_resolving_list()
+        except Exception as error:
+            logger.warning(f'!!! error while storing keys: {error}')
+        else:
+            self.emit('key_store_update')
+
     # [Classic only]
     async def switch_role(self, connection: Connection, role: int):
         pending_role_change = asyncio.get_running_loop().create_future()
@@ -2485,13 +2553,7 @@ class Device(CompositeEventEmitter):
                 value=link_key, authenticated=authenticated
             )
 
-            async def store_keys():
-                try:
-                    await self.keystore.update(str(bd_addr), pairing_keys)
-                except Exception as error:
-                    logger.warning(f'!!! error while storing keys: {error}')
-
-            self.abort_on('flush', store_keys())
+            self.abort_on('flush', self.update_keys(str(bd_addr), pairing_keys))
 
         if connection := self.find_connection_by_bd_addr(
             bd_addr, transport=BT_BR_EDR_TRANSPORT
@@ -2742,20 +2804,6 @@ class Device(CompositeEventEmitter):
             f'{connection.peer_address} as {connection.role_name}, error={error}'
         )
         connection.emit('connection_authentication_failure', error)
-
-    @host_event_handler
-    @with_connection_from_address
-    def on_ssp_complete(self, connection):
-        # On Secure Simple Pairing complete, in case:
-        # - Connection isn't already authenticated
-        # - AND we are not the initiator of the authentication
-        # We must trigger authentication to know if we are truly authenticated
-        if not connection.authenticating and not connection.authenticated:
-            logger.debug(
-                f'*** Trigger Connection Authentication: [0x{connection.handle:04X}] '
-                f'{connection.peer_address}'
-            )
-            asyncio.create_task(connection.authenticate())
 
     # [Classic only]
     @host_event_handler
@@ -3111,6 +3159,18 @@ class Device(CompositeEventEmitter):
             connection.emit('role_change_failure', error)
         self.emit('role_change_failure', address, error)
 
+    # [Classic only]
+    @host_event_handler
+    @with_connection_from_address
+    def on_classic_pairing(self, connection: Connection) -> None:
+        connection.emit('classic_pairing')
+
+    # [Classic only]
+    @host_event_handler
+    @with_connection_from_address
+    def on_classic_pairing_failure(self, connection: Connection, status) -> None:
+        connection.emit('classic_pairing_failure', status)
+
     def on_pairing_start(self, connection: Connection) -> None:
         connection.emit('pairing_start')
 
@@ -3159,7 +3219,7 @@ class Device(CompositeEventEmitter):
 
     @host_event_handler
     @with_connection_from_handle
-    def on_l2cap_pdu(self, connection, cid, pdu):
+    def on_l2cap_pdu(self, connection: Connection, cid: int, pdu: bytes):
         self.l2cap_channel_manager.on_pdu(connection, cid, pdu)
 
     def __str__(self):
