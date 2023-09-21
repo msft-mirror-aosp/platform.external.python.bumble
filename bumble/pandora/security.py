@@ -232,6 +232,7 @@ class SecurityService(SecurityServicer):
                 sc=config.pairing_sc_enable,
                 mitm=config.pairing_mitm_enable,
                 bonding=config.pairing_bonding_enable,
+                identity_address_type=config.identity_address_type,
                 delegate=PairingDelegate(
                     connection,
                     self,
@@ -422,6 +423,8 @@ class SecurityService(SecurityServicer):
             'pairing': try_set_success,
             'connection_authentication': try_set_success,
             'connection_encryption_change': on_encryption_change,
+            'classic_pairing': try_set_success,
+            'classic_pairing_failure': set_failure('pairing_failure'),
         }
 
         # register event handlers
