@@ -30,7 +30,7 @@ from bumble.core import (
     BT_RFCOMM_PROTOCOL_ID,
     BT_BR_EDR_TRANSPORT,
 )
-from bumble.rfcomm import Client
+from bumble import rfcomm, hfp
 from bumble.sdp import (
     Client as SDP_Client,
     DataElement,
@@ -39,7 +39,9 @@ from bumble.sdp import (
     SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
     SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
 )
-from bumble.hfp import HfpProtocol
+
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -181,7 +183,7 @@ async def main():
 
         # Create a client and start it
         print('@@@ Starting to RFCOMM client...')
-        rfcomm_client = Client(device, connection)
+        rfcomm_client = rfcomm.Client(device, connection)
         rfcomm_mux = await rfcomm_client.start()
         print('@@@ Started')
 
@@ -196,7 +198,7 @@ async def main():
             return
 
         # Protocol loop (just for testing at this point)
-        protocol = HfpProtocol(session)
+        protocol = hfp.HfpProtocol(session)
         while True:
             line = await protocol.next_line()
 

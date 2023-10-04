@@ -21,6 +21,8 @@ import logging
 import os
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from bumble.controller import Controller
 from bumble.core import BT_BR_EDR_TRANSPORT, BT_PERIPHERAL_ROLE, BT_CENTRAL_ROLE
 from bumble.link import LocalLink
@@ -34,6 +36,8 @@ from bumble.smp import (
     SMP_CONFIRM_VALUE_FAILED_ERROR,
 )
 from bumble.core import ProtocolError
+from bumble.hci import HCI_AUTHENTICATED_COMBINATION_KEY_GENERATED_FROM_P_256_TYPE
+from bumble.keys import PairingKeys
 
 
 # -----------------------------------------------------------------------------
@@ -64,13 +68,16 @@ class TwoDevices:
             ),
         ]
 
-        self.paired = [None, None]
+        self.paired = [
+            asyncio.get_event_loop().create_future(),
+            asyncio.get_event_loop().create_future(),
+        ]
 
     def on_connection(self, which, connection):
         self.connections[which] = connection
 
-    def on_paired(self, which, keys):
-        self.paired[which] = keys
+    def on_paired(self, which: int, keys: PairingKeys):
+        self.paired[which].set_result(keys)
 
 
 # -----------------------------------------------------------------------------
@@ -319,8 +326,8 @@ async def _test_self_smp_with_configs(pairing_config1, pairing_config2):
     # Pair
     await two_devices.devices[0].pair(connection)
     assert connection.is_encrypted
-    assert two_devices.paired[0] is not None
-    assert two_devices.paired[1] is not None
+    assert await two_devices.paired[0] is not None
+    assert await two_devices.paired[1] is not None
 
 
 # -----------------------------------------------------------------------------
@@ -474,6 +481,101 @@ async def test_self_smp_wrong_pin():
 
 
 # -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_over_classic():
+    # Create two devices, each with a controller, attached to the same link
+    two_devices = TwoDevices()
+
+    # Attach listeners
+    two_devices.devices[0].on(
+        'connection', lambda connection: two_devices.on_connection(0, connection)
+    )
+    two_devices.devices[1].on(
+        'connection', lambda connection: two_devices.on_connection(1, connection)
+    )
+
+    # Enable Classic connections
+    two_devices.devices[0].classic_enabled = True
+    two_devices.devices[1].classic_enabled = True
+
+    # Start
+    await two_devices.devices[0].power_on()
+    await two_devices.devices[1].power_on()
+
+    # Connect the two devices
+    await asyncio.gather(
+        two_devices.devices[0].connect(
+            two_devices.devices[1].public_address, transport=BT_BR_EDR_TRANSPORT
+        ),
+        two_devices.devices[1].accept(two_devices.devices[0].public_address),
+    )
+
+    # Check the post conditions
+    assert two_devices.connections[0] is not None
+    assert two_devices.connections[1] is not None
+
+    # Mock connection
+    # TODO: Implement Classic SSP and encryption in link relayer
+    LINK_KEY = bytes.fromhex('287ad379dca402530a39f1f43047b835')
+    two_devices.devices[0].on_link_key(
+        two_devices.devices[1].public_address,
+        LINK_KEY,
+        HCI_AUTHENTICATED_COMBINATION_KEY_GENERATED_FROM_P_256_TYPE,
+    )
+    two_devices.devices[1].on_link_key(
+        two_devices.devices[0].public_address,
+        LINK_KEY,
+        HCI_AUTHENTICATED_COMBINATION_KEY_GENERATED_FROM_P_256_TYPE,
+    )
+    two_devices.connections[0].encryption = 1
+    two_devices.connections[1].encryption = 1
+
+    two_devices.connections[0].on(
+        'pairing', lambda keys: two_devices.on_paired(0, keys)
+    )
+    two_devices.connections[1].on(
+        'pairing', lambda keys: two_devices.on_paired(1, keys)
+    )
+
+    # Mock SMP
+    with patch('bumble.smp.Session', spec=True) as MockSmpSession:
+        MockSmpSession.send_pairing_confirm_command = MagicMock()
+        MockSmpSession.send_pairing_dhkey_check_command = MagicMock()
+        MockSmpSession.send_public_key_command = MagicMock()
+        MockSmpSession.send_pairing_random_command = MagicMock()
+
+        # Start CTKD
+        await two_devices.connections[0].pair()
+        await asyncio.gather(*two_devices.paired)
+
+        # Phase 2 commands should not be invoked
+        MockSmpSession.send_pairing_confirm_command.assert_not_called()
+        MockSmpSession.send_pairing_dhkey_check_command.assert_not_called()
+        MockSmpSession.send_public_key_command.assert_not_called()
+        MockSmpSession.send_pairing_random_command.assert_not_called()
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_public_address():
+    pairing_config = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        identity_address_type=PairingConfig.AddressType.PUBLIC,
+        delegate=PairingDelegate(
+            PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
+            PairingDelegate.KeyDistribution.DISTRIBUTE_ENCRYPTION_KEY
+            | PairingDelegate.KeyDistribution.DISTRIBUTE_IDENTITY_KEY
+            | PairingDelegate.KeyDistribution.DISTRIBUTE_SIGNING_KEY
+            | PairingDelegate.KeyDistribution.DISTRIBUTE_LINK_KEY,
+        ),
+    )
+
+    await _test_self_smp_with_configs(pairing_config, pairing_config)
+
+
+# -----------------------------------------------------------------------------
 async def run_test_self():
     await test_self_connection()
     await test_self_gatt()
@@ -481,6 +583,8 @@ async def run_test_self():
     await test_self_smp()
     await test_self_smp_reject()
     await test_self_smp_wrong_pin()
+    await test_self_smp_over_classic()
+    await test_self_smp_public_address()
 
 
 # -----------------------------------------------------------------------------

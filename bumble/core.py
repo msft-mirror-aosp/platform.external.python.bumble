@@ -17,7 +17,7 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 import struct
-from typing import List, Optional, Tuple, Union, cast
+from typing import List, Optional, Tuple, Union, cast, Dict
 
 from .company_ids import COMPANY_IDENTIFIERS
 
@@ -53,7 +53,7 @@ def bit_flags_to_strings(bits, bit_flag_names):
     return names
 
 
-def name_or_number(dictionary, number, width=2):
+def name_or_number(dictionary: Dict[int, str], number: int, width: int = 2) -> str:
     name = dictionary.get(number)
     if name is not None:
         return name
@@ -78,7 +78,13 @@ def get_dict_key_by_value(dictionary, value):
 class BaseError(Exception):
     """Base class for errors with an error code, error name and namespace"""
 
-    def __init__(self, error_code, error_namespace='', error_name='', details=''):
+    def __init__(
+        self,
+        error_code: int | None,
+        error_namespace: str = '',
+        error_name: str = '',
+        details: str = '',
+    ):
         super().__init__()
         self.error_code = error_code
         self.error_namespace = error_namespace
@@ -90,12 +96,14 @@ class BaseError(Exception):
             namespace = f'{self.error_namespace}/'
         else:
             namespace = ''
-        if self.error_name:
-            name = f'{self.error_name} [0x{self.error_code:X}]'
-        else:
-            name = f'0x{self.error_code:X}'
+        error_text = {
+            (True, True): f'{self.error_name} [0x{self.error_code:X}]',
+            (True, False): self.error_name,
+            (False, True): f'0x{self.error_code:X}',
+            (False, False): '',
+        }[(self.error_name != '', self.error_code is not None)]
 
-        return f'{type(self).__name__}({namespace}{name})'
+        return f'{type(self).__name__}({namespace}{error_text})'
 
 
 class ProtocolError(BaseError):
@@ -132,6 +140,10 @@ class ConnectionError(BaseError):  # pylint: disable=redefined-builtin
         super().__init__(error_code, error_namespace, error_name, details)
         self.transport = transport
         self.peer_address = peer_address
+
+
+class ConnectionParameterUpdateError(BaseError):
+    """Connection Parameter Update Error"""
 
 
 # -----------------------------------------------------------------------------
@@ -562,11 +574,82 @@ class DeviceClass:
         PERIPHERAL_HANDHELD_GESTURAL_INPUT_DEVICE_MINOR_DEVICE_CLASS: 'Handheld gestural input device'
     }
 
+    WEARABLE_UNCATEGORIZED_MINOR_DEVICE_CLASS = 0x00
+    WEARABLE_WRISTWATCH_MINOR_DEVICE_CLASS    = 0x01
+    WEARABLE_PAGER_MINOR_DEVICE_CLASS         = 0x02
+    WEARABLE_JACKET_MINOR_DEVICE_CLASS        = 0x03
+    WEARABLE_HELMET_MINOR_DEVICE_CLASS        = 0x04
+    WEARABLE_GLASSES_MINOR_DEVICE_CLASS       = 0x05
+
+    WEARABLE_MINOR_DEVICE_CLASS_NAMES = {
+        WEARABLE_UNCATEGORIZED_MINOR_DEVICE_CLASS: 'Uncategorized',
+        WEARABLE_WRISTWATCH_MINOR_DEVICE_CLASS:    'Wristwatch',
+        WEARABLE_PAGER_MINOR_DEVICE_CLASS:         'Pager',
+        WEARABLE_JACKET_MINOR_DEVICE_CLASS:        'Jacket',
+        WEARABLE_HELMET_MINOR_DEVICE_CLASS:        'Helmet',
+        WEARABLE_GLASSES_MINOR_DEVICE_CLASS:       'Glasses',
+    }
+
+    TOY_UNCATEGORIZED_MINOR_DEVICE_CLASS      = 0x00
+    TOY_ROBOT_MINOR_DEVICE_CLASS              = 0x01
+    TOY_VEHICLE_MINOR_DEVICE_CLASS            = 0x02
+    TOY_DOLL_ACTION_FIGURE_MINOR_DEVICE_CLASS = 0x03
+    TOY_CONTROLLER_MINOR_DEVICE_CLASS         = 0x04
+    TOY_GAME_MINOR_DEVICE_CLASS               = 0x05
+
+    TOY_MINOR_DEVICE_CLASS_NAMES = {
+        TOY_UNCATEGORIZED_MINOR_DEVICE_CLASS:      'Uncategorized',
+        TOY_ROBOT_MINOR_DEVICE_CLASS:              'Robot',
+        TOY_VEHICLE_MINOR_DEVICE_CLASS:            'Vehicle',
+        TOY_DOLL_ACTION_FIGURE_MINOR_DEVICE_CLASS: 'Doll/Action figure',
+        TOY_CONTROLLER_MINOR_DEVICE_CLASS:         'Controller',
+        TOY_GAME_MINOR_DEVICE_CLASS:               'Game',
+    }
+
+    HEALTH_UNDEFINED_MINOR_DEVICE_CLASS                 = 0x00
+    HEALTH_BLOOD_PRESSURE_MONITOR_MINOR_DEVICE_CLASS    = 0x01
+    HEALTH_THERMOMETER_MINOR_DEVICE_CLASS               = 0x02
+    HEALTH_WEIGHING_SCALE_MINOR_DEVICE_CLASS            = 0x03
+    HEALTH_GLUCOSE_METER_MINOR_DEVICE_CLASS             = 0x04
+    HEALTH_PULSE_OXIMETER_MINOR_DEVICE_CLASS            = 0x05
+    HEALTH_HEART_PULSE_RATE_MONITOR_MINOR_DEVICE_CLASS  = 0x06
+    HEALTH_HEALTH_DATA_DISPLAY_MINOR_DEVICE_CLASS       = 0x07
+    HEALTH_STEP_COUNTER_MINOR_DEVICE_CLASS              = 0x08
+    HEALTH_BODY_COMPOSITION_ANALYZER_MINOR_DEVICE_CLASS = 0x09
+    HEALTH_PEAK_FLOW_MONITOR_MINOR_DEVICE_CLASS         = 0x0A
+    HEALTH_MEDICATION_MONITOR_MINOR_DEVICE_CLASS        = 0x0B
+    HEALTH_KNEE_PROSTHESIS_MINOR_DEVICE_CLASS           = 0x0C
+    HEALTH_ANKLE_PROSTHESIS_MINOR_DEVICE_CLASS          = 0x0D
+    HEALTH_GENERIC_HEALTH_MANAGER_MINOR_DEVICE_CLASS    = 0x0E
+    HEALTH_PERSONAL_MOBILITY_DEVICE_MINOR_DEVICE_CLASS  = 0x0F
+
+    HEALTH_MINOR_DEVICE_CLASS_NAMES = {
+        HEALTH_UNDEFINED_MINOR_DEVICE_CLASS:                 'Undefined',
+        HEALTH_BLOOD_PRESSURE_MONITOR_MINOR_DEVICE_CLASS:    'Blood Pressure Monitor',
+        HEALTH_THERMOMETER_MINOR_DEVICE_CLASS:               'Thermometer',
+        HEALTH_WEIGHING_SCALE_MINOR_DEVICE_CLASS:            'Weighing Scale',
+        HEALTH_GLUCOSE_METER_MINOR_DEVICE_CLASS:             'Glucose Meter',
+        HEALTH_PULSE_OXIMETER_MINOR_DEVICE_CLASS:            'Pulse Oximeter',
+        HEALTH_HEART_PULSE_RATE_MONITOR_MINOR_DEVICE_CLASS:  'Heart/Pulse Rate Monitor',
+        HEALTH_HEALTH_DATA_DISPLAY_MINOR_DEVICE_CLASS:       'Health Data Display',
+        HEALTH_STEP_COUNTER_MINOR_DEVICE_CLASS:              'Step Counter',
+        HEALTH_BODY_COMPOSITION_ANALYZER_MINOR_DEVICE_CLASS: 'Body Composition Analyzer',
+        HEALTH_PEAK_FLOW_MONITOR_MINOR_DEVICE_CLASS:         'Peak Flow Monitor',
+        HEALTH_MEDICATION_MONITOR_MINOR_DEVICE_CLASS:        'Medication Monitor',
+        HEALTH_KNEE_PROSTHESIS_MINOR_DEVICE_CLASS:           'Knee Prosthesis',
+        HEALTH_ANKLE_PROSTHESIS_MINOR_DEVICE_CLASS:          'Ankle Prosthesis',
+        HEALTH_GENERIC_HEALTH_MANAGER_MINOR_DEVICE_CLASS:    'Generic Health Manager',
+        HEALTH_PERSONAL_MOBILITY_DEVICE_MINOR_DEVICE_CLASS:  'Personal Mobility Device',
+    }
+
     MINOR_DEVICE_CLASS_NAMES = {
         COMPUTER_MAJOR_DEVICE_CLASS:    COMPUTER_MINOR_DEVICE_CLASS_NAMES,
         PHONE_MAJOR_DEVICE_CLASS:       PHONE_MINOR_DEVICE_CLASS_NAMES,
         AUDIO_VIDEO_MAJOR_DEVICE_CLASS: AUDIO_VIDEO_MINOR_DEVICE_CLASS_NAMES,
-        PERIPHERAL_MAJOR_DEVICE_CLASS:  PERIPHERAL_MINOR_DEVICE_CLASS_NAMES
+        PERIPHERAL_MAJOR_DEVICE_CLASS:  PERIPHERAL_MINOR_DEVICE_CLASS_NAMES,
+        WEARABLE_MAJOR_DEVICE_CLASS:    WEARABLE_MINOR_DEVICE_CLASS_NAMES,
+        TOY_MAJOR_DEVICE_CLASS:         TOY_MINOR_DEVICE_CLASS_NAMES,
+        HEALTH_MAJOR_DEVICE_CLASS:      HEALTH_MINOR_DEVICE_CLASS_NAMES,
     }
 
     # fmt: on
