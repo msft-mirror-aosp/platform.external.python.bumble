@@ -18,6 +18,8 @@
 import logging
 import grpc.aio
 
+from typing import Optional, Union
+
 from .common import PumpedTransport, PumpedPacketSource, PumpedPacketSink, Transport
 
 # pylint: disable=no-name-in-module
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
-async def open_android_emulator_transport(spec: str | None) -> Transport:
+async def open_android_emulator_transport(spec: Optional[str]) -> Transport:
     '''
     Open a transport connection to an Android emulator via its gRPC interface.
     The parameter string has this syntax:
@@ -82,7 +84,7 @@ async def open_android_emulator_transport(spec: str | None) -> Transport:
     logger.debug(f'connecting to gRPC server at {server_address}')
     channel = grpc.aio.insecure_channel(server_address)
 
-    service: EmulatedBluetoothServiceStub | VhciForwardingServiceStub
+    service: Union[EmulatedBluetoothServiceStub, VhciForwardingServiceStub]
     if mode == 'host':
         # Connect as a host
         service = EmulatedBluetoothServiceStub(channel)
@@ -95,10 +97,13 @@ async def open_android_emulator_transport(spec: str | None) -> Transport:
         raise ValueError('invalid mode')
 
     # Create the transport object
-    transport = PumpedTransport(
-        PumpedPacketSource(hci_device.read),
-        PumpedPacketSink(hci_device.write),
-        channel.close,
+    class EmulatorTransport(PumpedTransport):
+        async def close(self):
+            await super().close()
+            await channel.close()
+
+    transport = EmulatorTransport(
+        PumpedPacketSource(hci_device.read), PumpedPacketSink(hci_device.write)
     )
     transport.start()
 
