@@ -1186,8 +1186,8 @@ class Device(CompositeEventEmitter):
     def create_l2cap_registrar(self, psm):
         return lambda handler: self.register_l2cap_server(psm, handler)
 
-    def register_l2cap_server(self, psm, server):
-        self.l2cap_channel_manager.register_server(psm, server)
+    def register_l2cap_server(self, psm, server) -> int:
+        return self.l2cap_channel_manager.register_server(psm, server)
 
     def register_l2cap_channel_server(
         self,
@@ -2758,7 +2758,9 @@ class Device(CompositeEventEmitter):
             self.abort_on(
                 'flush',
                 self.start_advertising(
-                    advertising_type=self.advertising_type, auto_restart=True
+                    advertising_type=self.advertising_type,
+                    own_address_type=self.advertising_own_address_type,
+                    auto_restart=True,
                 ),
             )
 
