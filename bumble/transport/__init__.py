@@ -20,7 +20,6 @@ import logging
 import os
 
 from .common import Transport, AsyncPipeSink, SnoopingTransport
-from ..controller import Controller
 from ..snoop import create_snooper
 
 # -----------------------------------------------------------------------------
@@ -69,6 +68,7 @@ async def open_transport(name: str) -> Transport:
       * usb
       * pyusb
       * android-emulator
+      * android-netsim
     """
 
     return _wrap_transport(await _open_transport(name))
@@ -118,7 +118,8 @@ async def _open_transport(name: str) -> Transport:
     if scheme == 'file':
         from .file import open_file_transport
 
-        return await open_file_transport(spec[0] if spec else None)
+        assert spec is not None
+        return await open_file_transport(spec[0])
 
     if scheme == 'vhci':
         from .vhci import open_vhci_transport
@@ -133,12 +134,14 @@ async def _open_transport(name: str) -> Transport:
     if scheme == 'usb':
         from .usb import open_usb_transport
 
-        return await open_usb_transport(spec[0] if spec else None)
+        assert spec is not None
+        return await open_usb_transport(spec[0])
 
     if scheme == 'pyusb':
         from .pyusb import open_pyusb_transport
 
-        return await open_pyusb_transport(spec[0] if spec else None)
+        assert spec is not None
+        return await open_pyusb_transport(spec[0])
 
     if scheme == 'android-emulator':
         from .android_emulator import open_android_emulator_transport
@@ -167,6 +170,7 @@ async def open_transport_or_link(name: str) -> Transport:
 
     """
     if name.startswith('link-relay:'):
+        from ..controller import Controller
         from ..link import RemoteLink  # lazy import
 
         link = RemoteLink(name[11:])
