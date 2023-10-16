@@ -42,23 +42,3 @@ python_library_host {
         "bumble/pandora/py.typed"
     ]
 }
-
-python_test_host {
-    name: "bumble_pandora_server",
-    main: "apps/pandora_server.py",
-    srcs: [
-        "apps/pandora_server.py",
-    ],
-    libs: [
-        "bumble-pandora",
-        "pandora-python",
-    ],
-
-    test_options: {
-        unit_test: false,
-    },
-
-    test_suites: [
-        "general-tests"
-    ]
-}
