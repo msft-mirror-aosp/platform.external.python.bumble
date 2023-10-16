@@ -5,7 +5,8 @@ Rust wrappers around the [Bumble](https://github.com/google/bumble) Python API.
 Method calls are mapped to the equivalent Python, and return types adapted where
 relevant.
 
-See the `examples` directory for usage.
+See the CLI in `src/main.rs` or the `examples` directory for how to use the
+Bumble API.
 
 # Usage
 
@@ -27,6 +28,15 @@ PYTHONPATH=..:~/.virtualenvs/bumble/lib/python3.10/site-packages/ \
 Run the corresponding `battery_server` Python example, and launch an emulator in
 Android Studio (currently, Canary is required) to run netsim.
 
+# CLI
+
+Explore the available subcommands:
+
+```
+PYTHONPATH=..:[virtualenv site-packages] \
+    cargo run --features bumble-tools --bin bumble -- --help
+```
+
 # Development
 
 Run the tests:
@@ -39,4 +49,18 @@ Check lints:
 
 ```
 cargo clippy --all-targets
+```
+
+## Code gen
+
+To have the fastest startup while keeping the build simple, code gen for
+assigned numbers is done with the `gen_assigned_numbers` tool. It should
+be re-run whenever the Python assigned numbers are changed. To ensure that the
+generated code is kept up to date, the Rust data is compared to the Python
+in tests at `pytests/assigned_numbers.rs`.
+
+To regenerate the assigned number tables based on the Python codebase:
+
+```
+PYTHONPATH=.. cargo run --bin gen-assigned-numbers --features dev-tools
 ```
