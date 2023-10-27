@@ -167,7 +167,7 @@ class DataElement:
         UUID: lambda x: DataElement(
             DataElement.UUID, core.UUID.from_bytes(bytes(reversed(x)))
         ),
-        TEXT_STRING: lambda x: DataElement(DataElement.TEXT_STRING, x.decode('utf8')),
+        TEXT_STRING: lambda x: DataElement(DataElement.TEXT_STRING, x),
         BOOLEAN: lambda x: DataElement(DataElement.BOOLEAN, x[0] == 1),
         SEQUENCE: lambda x: DataElement(
             DataElement.SEQUENCE, DataElement.list_from_bytes(x)
@@ -229,7 +229,7 @@ class DataElement:
         return DataElement(DataElement.UUID, value)
 
     @staticmethod
-    def text_string(value: str) -> DataElement:
+    def text_string(value: bytes) -> DataElement:
         return DataElement(DataElement.TEXT_STRING, value)
 
     @staticmethod
@@ -376,7 +376,7 @@ class DataElement:
                 raise ValueError('invalid value_size')
         elif self.type == DataElement.UUID:
             data = bytes(reversed(bytes(self.value)))
-        elif self.type in (DataElement.TEXT_STRING, DataElement.URL):
+        elif self.type == DataElement.URL:
             data = self.value.encode('utf8')
         elif self.type == DataElement.BOOLEAN:
             data = bytes([1 if self.value else 0])
@@ -758,7 +758,7 @@ class SDP_ServiceSearchAttributeResponse(SDP_PDU):
 
 # -----------------------------------------------------------------------------
 class Client:
-    channel: Optional[l2cap.Channel]
+    channel: Optional[l2cap.ClassicChannel]
 
     def __init__(self, device: Device) -> None:
         self.device = device
@@ -766,8 +766,9 @@ class Client:
         self.channel = None
 
     async def connect(self, connection: Connection) -> None:
-        result = await self.device.l2cap_channel_manager.connect(connection, SDP_PSM)
-        self.channel = result
+        self.channel = await connection.create_l2cap_channel(
+            spec=l2cap.ClassicChannelSpec(SDP_PSM)
+        )
 
     async def disconnect(self) -> None:
         if self.channel:
@@ -921,7 +922,7 @@ class Client:
 # -----------------------------------------------------------------------------
 class Server:
     CONTINUATION_STATE = bytes([0x01, 0x43])
-    channel: Optional[l2cap.Channel]
+    channel: Optional[l2cap.ClassicChannel]
     Service = NewType('Service', List[ServiceAttribute])
     service_records: Dict[int, Service]
     current_response: Union[None, bytes, Tuple[int, List[int]]]
@@ -933,7 +934,9 @@ class Server:
         self.current_response = None
 
     def register(self, l2cap_channel_manager: l2cap.ChannelManager) -> None:
-        l2cap_channel_manager.register_server(SDP_PSM, self.on_connection)
+        l2cap_channel_manager.create_classic_server(
+            spec=l2cap.ClassicChannelSpec(psm=SDP_PSM), handler=self.on_connection
+        )
 
     def send_response(self, response):
         logger.debug(f'{color(">>> Sending SDP Response", "blue")}: {response}')

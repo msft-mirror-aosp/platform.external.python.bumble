@@ -18,3 +18,4 @@
 //! to discover.
 
 pub(crate) mod drivers;
+pub(crate) mod hci;
