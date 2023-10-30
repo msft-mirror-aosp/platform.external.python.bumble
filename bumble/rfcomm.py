@@ -674,7 +674,7 @@ class Multiplexer(EventEmitter):
     acceptor: Optional[Callable[[int], bool]]
     dlcs: Dict[int, DLC]
 
-    def __init__(self, l2cap_channel: l2cap.Channel, role: Role) -> None:
+    def __init__(self, l2cap_channel: l2cap.ClassicChannel, role: Role) -> None:
         super().__init__()
         self.role = role
         self.l2cap_channel = l2cap_channel
@@ -887,7 +887,7 @@ class Multiplexer(EventEmitter):
 # -----------------------------------------------------------------------------
 class Client:
     multiplexer: Optional[Multiplexer]
-    l2cap_channel: Optional[l2cap.Channel]
+    l2cap_channel: Optional[l2cap.ClassicChannel]
 
     def __init__(self, device: Device, connection: Connection) -> None:
         self.device = device
@@ -898,8 +898,8 @@ class Client:
     async def start(self) -> Multiplexer:
         # Create a new L2CAP connection
         try:
-            self.l2cap_channel = await self.device.l2cap_channel_manager.connect(
-                self.connection, RFCOMM_PSM
+            self.l2cap_channel = await self.connection.create_l2cap_channel(
+                spec=l2cap.ClassicChannelSpec(RFCOMM_PSM)
             )
         except ProtocolError as error:
             logger.warning(f'L2CAP connection failed: {error}')
@@ -936,7 +936,9 @@ class Server(EventEmitter):
         self.acceptors = {}
 
         # Register ourselves with the L2CAP channel manager
-        device.register_l2cap_server(RFCOMM_PSM, self.on_connection)
+        device.create_l2cap_server(
+            spec=l2cap.ClassicChannelSpec(psm=RFCOMM_PSM), handler=self.on_connection
+        )
 
     def listen(self, acceptor: Callable[[DLC], None], channel: int = 0) -> int:
         if channel:
@@ -960,11 +962,11 @@ class Server(EventEmitter):
         self.acceptors[channel] = acceptor
         return channel
 
-    def on_connection(self, l2cap_channel: l2cap.Channel) -> None:
+    def on_connection(self, l2cap_channel: l2cap.ClassicChannel) -> None:
         logger.debug(f'+++ new L2CAP connection: {l2cap_channel}')
         l2cap_channel.on('open', lambda: self.on_l2cap_channel_open(l2cap_channel))
 
-    def on_l2cap_channel_open(self, l2cap_channel: l2cap.Channel) -> None:
+    def on_l2cap_channel_open(self, l2cap_channel: l2cap.ClassicChannel) -> None:
         logger.debug(f'$$$ L2CAP channel open: {l2cap_channel}')
 
         # Create a new multiplexer for the channel

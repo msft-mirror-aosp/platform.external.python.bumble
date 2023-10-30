@@ -18,6 +18,7 @@
 import asyncio
 import logging
 import os
+import pytest
 
 from bumble.core import UUID, BT_L2CAP_PROTOCOL_ID, BT_RFCOMM_PROTOCOL_ID
 from bumble.sdp import (
@@ -99,13 +100,13 @@ def test_data_elements() -> None:
     e = DataElement(DataElement.UUID, UUID('61A3512C-09BE-4DDC-A6A6-0B03667AAFC6'))
     basic_check(e)
 
-    e = DataElement(DataElement.TEXT_STRING, 'hello')
+    e = DataElement(DataElement.TEXT_STRING, b'hello')
     basic_check(e)
 
-    e = DataElement(DataElement.TEXT_STRING, 'hello' * 60)
+    e = DataElement(DataElement.TEXT_STRING, b'hello' * 60)
     basic_check(e)
 
-    e = DataElement(DataElement.TEXT_STRING, 'hello' * 20000)
+    e = DataElement(DataElement.TEXT_STRING, b'hello' * 20000)
     basic_check(e)
 
     e = DataElement(DataElement.BOOLEAN, True)
@@ -121,7 +122,7 @@ def test_data_elements() -> None:
         DataElement.SEQUENCE,
         [
             DataElement(DataElement.BOOLEAN, True),
-            DataElement(DataElement.TEXT_STRING, 'hello'),
+            DataElement(DataElement.TEXT_STRING, b'hello'),
         ],
     )
     basic_check(e)
@@ -133,7 +134,7 @@ def test_data_elements() -> None:
         DataElement.ALTERNATIVE,
         [
             DataElement(DataElement.BOOLEAN, True),
-            DataElement(DataElement.TEXT_STRING, 'hello'),
+            DataElement(DataElement.TEXT_STRING, b'hello'),
         ],
     )
     basic_check(e)
@@ -151,19 +152,19 @@ def test_data_elements() -> None:
     e = DataElement.uuid(UUID.from_16_bits(1234))
     basic_check(e)
 
-    e = DataElement.text_string('hello')
+    e = DataElement.text_string(b'hello')
     basic_check(e)
 
     e = DataElement.boolean(True)
     basic_check(e)
 
     e = DataElement.sequence(
-        [DataElement.signed_integer(0, 1), DataElement.text_string('hello')]
+        [DataElement.signed_integer(0, 1), DataElement.text_string(b'hello')]
     )
     basic_check(e)
 
     e = DataElement.alternative(
-        [DataElement.signed_integer(0, 1), DataElement.text_string('hello')]
+        [DataElement.signed_integer(0, 1), DataElement.text_string(b'hello')]
     )
     basic_check(e)
 
@@ -202,6 +203,7 @@ def sdp_records():
 
 
 # -----------------------------------------------------------------------------
+@pytest.mark.asyncio
 async def test_service_search():
     # Setup connections
     devices = TwoDevices()
@@ -224,6 +226,7 @@ async def test_service_search():
 
 
 # -----------------------------------------------------------------------------
+@pytest.mark.asyncio
 async def test_service_attribute():
     # Setup connections
     devices = TwoDevices()
@@ -244,6 +247,7 @@ async def test_service_attribute():
 
 
 # -----------------------------------------------------------------------------
+@pytest.mark.asyncio
 async def test_service_search_attribute():
     # Setup connections
     devices = TwoDevices()
