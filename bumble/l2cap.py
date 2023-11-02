@@ -17,6 +17,7 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 import asyncio
+import enum
 import logging
 import struct
 
@@ -33,6 +34,7 @@ from typing import (
     Union,
     Deque,
     Iterable,
+    SupportsBytes,
     TYPE_CHECKING,
 )
 
@@ -47,6 +49,7 @@ from .hci import (
 
 if TYPE_CHECKING:
     from bumble.device import Connection
+    from bumble.host import Host
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -674,61 +677,40 @@ class L2CAP_LE_Flow_Control_Credit(L2CAP_Control_Frame):
 
 # -----------------------------------------------------------------------------
 class Channel(EventEmitter):
-    # States
-    CLOSED = 0x00
-    WAIT_CONNECT = 0x01
-    WAIT_CONNECT_RSP = 0x02
-    OPEN = 0x03
-    WAIT_DISCONNECT = 0x04
-    WAIT_CREATE = 0x05
-    WAIT_CREATE_RSP = 0x06
-    WAIT_MOVE = 0x07
-    WAIT_MOVE_RSP = 0x08
-    WAIT_MOVE_CONFIRM = 0x09
-    WAIT_CONFIRM_RSP = 0x0A
+    class State(enum.IntEnum):
+        # States
+        CLOSED = 0x00
+        WAIT_CONNECT = 0x01
+        WAIT_CONNECT_RSP = 0x02
+        OPEN = 0x03
+        WAIT_DISCONNECT = 0x04
+        WAIT_CREATE = 0x05
+        WAIT_CREATE_RSP = 0x06
+        WAIT_MOVE = 0x07
+        WAIT_MOVE_RSP = 0x08
+        WAIT_MOVE_CONFIRM = 0x09
+        WAIT_CONFIRM_RSP = 0x0A
 
-    # CONFIG substates
-    WAIT_CONFIG = 0x10
-    WAIT_SEND_CONFIG = 0x11
-    WAIT_CONFIG_REQ_RSP = 0x12
-    WAIT_CONFIG_RSP = 0x13
-    WAIT_CONFIG_REQ = 0x14
-    WAIT_IND_FINAL_RSP = 0x15
-    WAIT_FINAL_RSP = 0x16
-    WAIT_CONTROL_IND = 0x17
-
-    STATE_NAMES = {
-        CLOSED: 'CLOSED',
-        WAIT_CONNECT: 'WAIT_CONNECT',
-        WAIT_CONNECT_RSP: 'WAIT_CONNECT_RSP',
-        OPEN: 'OPEN',
-        WAIT_DISCONNECT: 'WAIT_DISCONNECT',
-        WAIT_CREATE: 'WAIT_CREATE',
-        WAIT_CREATE_RSP: 'WAIT_CREATE_RSP',
-        WAIT_MOVE: 'WAIT_MOVE',
-        WAIT_MOVE_RSP: 'WAIT_MOVE_RSP',
-        WAIT_MOVE_CONFIRM: 'WAIT_MOVE_CONFIRM',
-        WAIT_CONFIRM_RSP: 'WAIT_CONFIRM_RSP',
-        WAIT_CONFIG: 'WAIT_CONFIG',
-        WAIT_SEND_CONFIG: 'WAIT_SEND_CONFIG',
-        WAIT_CONFIG_REQ_RSP: 'WAIT_CONFIG_REQ_RSP',
-        WAIT_CONFIG_RSP: 'WAIT_CONFIG_RSP',
-        WAIT_CONFIG_REQ: 'WAIT_CONFIG_REQ',
-        WAIT_IND_FINAL_RSP: 'WAIT_IND_FINAL_RSP',
-        WAIT_FINAL_RSP: 'WAIT_FINAL_RSP',
-        WAIT_CONTROL_IND: 'WAIT_CONTROL_IND',
-    }
+        # CONFIG substates
+        WAIT_CONFIG = 0x10
+        WAIT_SEND_CONFIG = 0x11
+        WAIT_CONFIG_REQ_RSP = 0x12
+        WAIT_CONFIG_RSP = 0x13
+        WAIT_CONFIG_REQ = 0x14
+        WAIT_IND_FINAL_RSP = 0x15
+        WAIT_FINAL_RSP = 0x16
+        WAIT_CONTROL_IND = 0x17
 
     connection_result: Optional[asyncio.Future[None]]
     disconnection_result: Optional[asyncio.Future[None]]
     response: Optional[asyncio.Future[bytes]]
     sink: Optional[Callable[[bytes], Any]]
-    state: int
+    state: State
     connection: Connection
 
     def __init__(
         self,
-        manager: 'ChannelManager',
+        manager: ChannelManager,
         connection: Connection,
         signaling_cid: int,
         psm: int,
@@ -739,7 +721,7 @@ class Channel(EventEmitter):
         self.manager = manager
         self.connection = connection
         self.signaling_cid = signaling_cid
-        self.state = Channel.CLOSED
+        self.state = self.State.CLOSED
         self.mtu = mtu
         self.psm = psm
         self.source_cid = source_cid
@@ -749,30 +731,28 @@ class Channel(EventEmitter):
         self.disconnection_result = None
         self.sink = None
 
-    def change_state(self, new_state: int) -> None:
-        logger.debug(
-            f'{self} state change -> {color(Channel.STATE_NAMES[new_state], "cyan")}'
-        )
+    def _change_state(self, new_state: State) -> None:
+        logger.debug(f'{self} state change -> {color(new_state.name, "cyan")}')
         self.state = new_state
 
-    def send_pdu(self, pdu) -> None:
+    def send_pdu(self, pdu: Union[SupportsBytes, bytes]) -> None:
         self.manager.send_pdu(self.connection, self.destination_cid, pdu)
 
-    def send_control_frame(self, frame) -> None:
+    def send_control_frame(self, frame: L2CAP_Control_Frame) -> None:
         self.manager.send_control_frame(self.connection, self.signaling_cid, frame)
 
-    async def send_request(self, request) -> bytes:
+    async def send_request(self, request: SupportsBytes) -> bytes:
         # Check that there isn't already a request pending
         if self.response:
             raise InvalidStateError('request already pending')
-        if self.state != Channel.OPEN:
+        if self.state != self.State.OPEN:
             raise InvalidStateError('channel not open')
 
         self.response = asyncio.get_running_loop().create_future()
         self.send_pdu(request)
         return await self.response
 
-    def on_pdu(self, pdu) -> None:
+    def on_pdu(self, pdu: bytes) -> None:
         if self.response:
             self.response.set_result(pdu)
             self.response = None
@@ -785,14 +765,14 @@ class Channel(EventEmitter):
             )
 
     async def connect(self) -> None:
-        if self.state != Channel.CLOSED:
+        if self.state != self.State.CLOSED:
             raise InvalidStateError('invalid state')
 
         # Check that we can start a new connection
         if self.connection_result:
             raise RuntimeError('connection already pending')
 
-        self.change_state(Channel.WAIT_CONNECT_RSP)
+        self._change_state(self.State.WAIT_CONNECT_RSP)
         self.send_control_frame(
             L2CAP_Connection_Request(
                 identifier=self.manager.next_identifier(self.connection),
@@ -812,10 +792,10 @@ class Channel(EventEmitter):
             self.connection_result = None
 
     async def disconnect(self) -> None:
-        if self.state != Channel.OPEN:
+        if self.state != self.State.OPEN:
             raise InvalidStateError('invalid state')
 
-        self.change_state(Channel.WAIT_DISCONNECT)
+        self._change_state(self.State.WAIT_DISCONNECT)
         self.send_control_frame(
             L2CAP_Disconnection_Request(
                 identifier=self.manager.next_identifier(self.connection),
@@ -830,8 +810,8 @@ class Channel(EventEmitter):
         return await self.disconnection_result
 
     def abort(self) -> None:
-        if self.state == self.OPEN:
-            self.change_state(self.CLOSED)
+        if self.state == self.State.OPEN:
+            self._change_state(self.State.CLOSED)
             self.emit('close')
 
     def send_configure_request(self) -> None:
@@ -854,7 +834,7 @@ class Channel(EventEmitter):
 
     def on_connection_request(self, request) -> None:
         self.destination_cid = request.source_cid
-        self.change_state(Channel.WAIT_CONNECT)
+        self._change_state(self.State.WAIT_CONNECT)
         self.send_control_frame(
             L2CAP_Connection_Response(
                 identifier=request.identifier,
@@ -864,24 +844,24 @@ class Channel(EventEmitter):
                 status=0x0000,
             )
         )
-        self.change_state(Channel.WAIT_CONFIG)
+        self._change_state(self.State.WAIT_CONFIG)
         self.send_configure_request()
-        self.change_state(Channel.WAIT_CONFIG_REQ_RSP)
+        self._change_state(self.State.WAIT_CONFIG_REQ_RSP)
 
     def on_connection_response(self, response):
-        if self.state != Channel.WAIT_CONNECT_RSP:
+        if self.state != self.State.WAIT_CONNECT_RSP:
             logger.warning(color('invalid state', 'red'))
             return
 
         if response.result == L2CAP_Connection_Response.CONNECTION_SUCCESSFUL:
             self.destination_cid = response.destination_cid
-            self.change_state(Channel.WAIT_CONFIG)
+            self._change_state(self.State.WAIT_CONFIG)
             self.send_configure_request()
-            self.change_state(Channel.WAIT_CONFIG_REQ_RSP)
+            self._change_state(self.State.WAIT_CONFIG_REQ_RSP)
         elif response.result == L2CAP_Connection_Response.CONNECTION_PENDING:
             pass
         else:
-            self.change_state(Channel.CLOSED)
+            self._change_state(self.State.CLOSED)
             self.connection_result.set_exception(
                 ProtocolError(
                     response.result,
@@ -893,9 +873,9 @@ class Channel(EventEmitter):
 
     def on_configure_request(self, request) -> None:
         if self.state not in (
-            Channel.WAIT_CONFIG,
-            Channel.WAIT_CONFIG_REQ,
-            Channel.WAIT_CONFIG_REQ_RSP,
+            self.State.WAIT_CONFIG,
+            self.State.WAIT_CONFIG_REQ,
+            self.State.WAIT_CONFIG_REQ_RSP,
         ):
             logger.warning(color('invalid state', 'red'))
             return
@@ -916,25 +896,28 @@ class Channel(EventEmitter):
                 options=request.options,  # TODO: don't accept everything blindly
             )
         )
-        if self.state == Channel.WAIT_CONFIG:
-            self.change_state(Channel.WAIT_SEND_CONFIG)
+        if self.state == self.State.WAIT_CONFIG:
+            self._change_state(self.State.WAIT_SEND_CONFIG)
             self.send_configure_request()
-            self.change_state(Channel.WAIT_CONFIG_RSP)
-        elif self.state == Channel.WAIT_CONFIG_REQ:
-            self.change_state(Channel.OPEN)
+            self._change_state(self.State.WAIT_CONFIG_RSP)
+        elif self.state == self.State.WAIT_CONFIG_REQ:
+            self._change_state(self.State.OPEN)
             if self.connection_result:
                 self.connection_result.set_result(None)
                 self.connection_result = None
             self.emit('open')
-        elif self.state == Channel.WAIT_CONFIG_REQ_RSP:
-            self.change_state(Channel.WAIT_CONFIG_RSP)
+        elif self.state == self.State.WAIT_CONFIG_REQ_RSP:
+            self._change_state(self.State.WAIT_CONFIG_RSP)
 
     def on_configure_response(self, response) -> None:
         if response.result == L2CAP_Configure_Response.SUCCESS:
-            if self.state == Channel.WAIT_CONFIG_REQ_RSP:
-                self.change_state(Channel.WAIT_CONFIG_REQ)
-            elif self.state in (Channel.WAIT_CONFIG_RSP, Channel.WAIT_CONTROL_IND):
-                self.change_state(Channel.OPEN)
+            if self.state == self.State.WAIT_CONFIG_REQ_RSP:
+                self._change_state(self.State.WAIT_CONFIG_REQ)
+            elif self.state in (
+                self.State.WAIT_CONFIG_RSP,
+                self.State.WAIT_CONTROL_IND,
+            ):
+                self._change_state(self.State.OPEN)
                 if self.connection_result:
                     self.connection_result.set_result(None)
                     self.connection_result = None
@@ -964,7 +947,7 @@ class Channel(EventEmitter):
             # TODO: decide how to fail gracefully
 
     def on_disconnection_request(self, request) -> None:
-        if self.state in (Channel.OPEN, Channel.WAIT_DISCONNECT):
+        if self.state in (self.State.OPEN, self.State.WAIT_DISCONNECT):
             self.send_control_frame(
                 L2CAP_Disconnection_Response(
                     identifier=request.identifier,
@@ -972,14 +955,14 @@ class Channel(EventEmitter):
                     source_cid=request.source_cid,
                 )
             )
-            self.change_state(Channel.CLOSED)
+            self._change_state(self.State.CLOSED)
             self.emit('close')
             self.manager.on_channel_closed(self)
         else:
             logger.warning(color('invalid state', 'red'))
 
     def on_disconnection_response(self, response) -> None:
-        if self.state != Channel.WAIT_DISCONNECT:
+        if self.state != self.State.WAIT_DISCONNECT:
             logger.warning(color('invalid state', 'red'))
             return
 
@@ -990,7 +973,7 @@ class Channel(EventEmitter):
             logger.warning('unexpected source or destination CID')
             return
 
-        self.change_state(Channel.CLOSED)
+        self._change_state(self.State.CLOSED)
         if self.disconnection_result:
             self.disconnection_result.set_result(None)
             self.disconnection_result = None
@@ -1002,7 +985,7 @@ class Channel(EventEmitter):
             f'Channel({self.source_cid}->{self.destination_cid}, '
             f'PSM={self.psm}, '
             f'MTU={self.mtu}, '
-            f'state={Channel.STATE_NAMES[self.state]})'
+            f'state={self.state.name})'
         )
 
 
@@ -1012,36 +995,24 @@ class LeConnectionOrientedChannel(EventEmitter):
     LE Credit-based Connection Oriented Channel
     """
 
-    INIT = 0
-    CONNECTED = 1
-    CONNECTING = 2
-    DISCONNECTING = 3
-    DISCONNECTED = 4
-    CONNECTION_ERROR = 5
-
-    STATE_NAMES = {
-        INIT: 'INIT',
-        CONNECTED: 'CONNECTED',
-        CONNECTING: 'CONNECTING',
-        DISCONNECTING: 'DISCONNECTING',
-        DISCONNECTED: 'DISCONNECTED',
-        CONNECTION_ERROR: 'CONNECTION_ERROR',
-    }
+    class State(enum.IntEnum):
+        INIT = 0
+        CONNECTED = 1
+        CONNECTING = 2
+        DISCONNECTING = 3
+        DISCONNECTED = 4
+        CONNECTION_ERROR = 5
 
     out_queue: Deque[bytes]
     connection_result: Optional[asyncio.Future[LeConnectionOrientedChannel]]
     disconnection_result: Optional[asyncio.Future[None]]
     out_sdu: Optional[bytes]
-    state: int
+    state: State
     connection: Connection
-
-    @staticmethod
-    def state_name(state: int) -> str:
-        return name_or_number(LeConnectionOrientedChannel.STATE_NAMES, state)
 
     def __init__(
         self,
-        manager: 'ChannelManager',
+        manager: ChannelManager,
         connection: Connection,
         le_psm: int,
         source_cid: int,
@@ -1081,30 +1052,28 @@ class LeConnectionOrientedChannel(EventEmitter):
         self.drained.set()
 
         if connected:
-            self.state = LeConnectionOrientedChannel.CONNECTED
+            self.state = self.State.CONNECTED
         else:
-            self.state = LeConnectionOrientedChannel.INIT
+            self.state = self.State.INIT
 
-    def change_state(self, new_state: int) -> None:
-        logger.debug(
-            f'{self} state change -> {color(self.state_name(new_state), "cyan")}'
-        )
+    def _change_state(self, new_state: State) -> None:
+        logger.debug(f'{self} state change -> {color(new_state.name, "cyan")}')
         self.state = new_state
 
-        if new_state == self.CONNECTED:
+        if new_state == self.State.CONNECTED:
             self.emit('open')
-        elif new_state == self.DISCONNECTED:
+        elif new_state == self.State.DISCONNECTED:
             self.emit('close')
 
-    def send_pdu(self, pdu) -> None:
+    def send_pdu(self, pdu: Union[SupportsBytes, bytes]) -> None:
         self.manager.send_pdu(self.connection, self.destination_cid, pdu)
 
-    def send_control_frame(self, frame) -> None:
+    def send_control_frame(self, frame: L2CAP_Control_Frame) -> None:
         self.manager.send_control_frame(self.connection, L2CAP_LE_SIGNALING_CID, frame)
 
     async def connect(self) -> LeConnectionOrientedChannel:
         # Check that we're in the right state
-        if self.state != self.INIT:
+        if self.state != self.State.INIT:
             raise InvalidStateError('not in a connectable state')
 
         # Check that we can start a new connection
@@ -1112,7 +1081,7 @@ class LeConnectionOrientedChannel(EventEmitter):
         if identifier in self.manager.le_coc_requests:
             raise RuntimeError('too many concurrent connection requests')
 
-        self.change_state(self.CONNECTING)
+        self._change_state(self.State.CONNECTING)
         request = L2CAP_LE_Credit_Based_Connection_Request(
             identifier=identifier,
             le_psm=self.le_psm,
@@ -1132,10 +1101,10 @@ class LeConnectionOrientedChannel(EventEmitter):
 
     async def disconnect(self) -> None:
         # Check that we're connected
-        if self.state != self.CONNECTED:
+        if self.state != self.State.CONNECTED:
             raise InvalidStateError('not connected')
 
-        self.change_state(self.DISCONNECTING)
+        self._change_state(self.State.DISCONNECTING)
         self.flush_output()
         self.send_control_frame(
             L2CAP_Disconnection_Request(
@@ -1151,15 +1120,15 @@ class LeConnectionOrientedChannel(EventEmitter):
         return await self.disconnection_result
 
     def abort(self) -> None:
-        if self.state == self.CONNECTED:
-            self.change_state(self.DISCONNECTED)
+        if self.state == self.State.CONNECTED:
+            self._change_state(self.State.DISCONNECTED)
 
-    def on_pdu(self, pdu) -> None:
+    def on_pdu(self, pdu: bytes) -> None:
         if self.sink is None:
             logger.warning('received pdu without a sink')
             return
 
-        if self.state != self.CONNECTED:
+        if self.state != self.State.CONNECTED:
             logger.warning('received PDU while not connected, dropping')
 
         # Manage the peer credits
@@ -1238,7 +1207,7 @@ class LeConnectionOrientedChannel(EventEmitter):
             self.credits = response.initial_credits
             self.connected = True
             self.connection_result.set_result(self)
-            self.change_state(self.CONNECTED)
+            self._change_state(self.State.CONNECTED)
         else:
             self.connection_result.set_exception(
                 ProtocolError(
@@ -1249,7 +1218,7 @@ class LeConnectionOrientedChannel(EventEmitter):
                     ),
                 )
             )
-            self.change_state(self.CONNECTION_ERROR)
+            self._change_state(self.State.CONNECTION_ERROR)
 
         # Cleanup
         self.connection_result = None
@@ -1269,11 +1238,11 @@ class LeConnectionOrientedChannel(EventEmitter):
                 source_cid=request.source_cid,
             )
         )
-        self.change_state(self.DISCONNECTED)
+        self._change_state(self.State.DISCONNECTED)
         self.flush_output()
 
     def on_disconnection_response(self, response) -> None:
-        if self.state != self.DISCONNECTING:
+        if self.state != self.State.DISCONNECTING:
             logger.warning(color('invalid state', 'red'))
             return
 
@@ -1284,7 +1253,7 @@ class LeConnectionOrientedChannel(EventEmitter):
             logger.warning('unexpected source or destination CID')
             return
 
-        self.change_state(self.DISCONNECTED)
+        self._change_state(self.State.DISCONNECTED)
         if self.disconnection_result:
             self.disconnection_result.set_result(None)
             self.disconnection_result = None
@@ -1337,7 +1306,7 @@ class LeConnectionOrientedChannel(EventEmitter):
                 return
 
     def write(self, data: bytes) -> None:
-        if self.state != self.CONNECTED:
+        if self.state != self.State.CONNECTED:
             logger.warning('not connected, dropping data')
             return
 
@@ -1365,7 +1334,7 @@ class LeConnectionOrientedChannel(EventEmitter):
     def __str__(self) -> str:
         return (
             f'CoC({self.source_cid}->{self.destination_cid}, '
-            f'State={self.state_name(self.state)}, '
+            f'State={self.state.name}, '
             f'PSM={self.le_psm}, '
             f'MTU={self.mtu}/{self.peer_mtu}, '
             f'MPS={self.mps}/{self.peer_mps}, '
@@ -1384,6 +1353,8 @@ class ChannelManager:
     ]
     le_coc_requests: Dict[int, L2CAP_LE_Credit_Based_Connection_Request]
     fixed_channels: Dict[int, Optional[Callable[[int, bytes], Any]]]
+    _host: Optional[Host]
+    connection_parameters_update_response: Optional[asyncio.Future[int]]
 
     def __init__(
         self,
@@ -1405,13 +1376,15 @@ class ChannelManager:
         self.le_coc_requests = {}  # LE CoC connection requests, by identifier
         self.extended_features = extended_features
         self.connectionless_mtu = connectionless_mtu
+        self.connection_parameters_update_response = None
 
     @property
-    def host(self):
+    def host(self) -> Host:
+        assert self._host
         return self._host
 
     @host.setter
-    def host(self, host):
+    def host(self, host: Host) -> None:
         if self._host is not None:
             self._host.remove_listener('disconnection', self.on_disconnection)
         self._host = host
@@ -1565,7 +1538,7 @@ class ChannelManager:
         if connection_handle in self.identifiers:
             del self.identifiers[connection_handle]
 
-    def send_pdu(self, connection, cid: int, pdu) -> None:
+    def send_pdu(self, connection, cid: int, pdu: Union[SupportsBytes, bytes]) -> None:
         pdu_str = pdu.hex() if isinstance(pdu, bytes) else str(pdu)
         logger.debug(
             f'{color(">>> Sending L2CAP PDU", "blue")} '
@@ -1574,7 +1547,7 @@ class ChannelManager:
         )
         self.host.send_l2cap_pdu(connection.handle, cid, bytes(pdu))
 
-    def on_pdu(self, connection: Connection, cid: int, pdu) -> None:
+    def on_pdu(self, connection: Connection, cid: int, pdu: bytes) -> None:
         if cid in (L2CAP_SIGNALING_CID, L2CAP_LE_SIGNALING_CID):
             # Parse the L2CAP payload into a Control Frame object
             control_frame = L2CAP_Control_Frame.from_bytes(pdu)
@@ -1596,7 +1569,7 @@ class ChannelManager:
             channel.on_pdu(pdu)
 
     def send_control_frame(
-        self, connection: Connection, cid: int, control_frame
+        self, connection: Connection, cid: int, control_frame: L2CAP_Control_Frame
     ) -> None:
         logger.debug(
             f'{color(">>> Sending L2CAP Signaling Control Frame", "blue")} '
@@ -1605,7 +1578,9 @@ class ChannelManager:
         )
         self.host.send_l2cap_pdu(connection.handle, cid, bytes(control_frame))
 
-    def on_control_frame(self, connection: Connection, cid: int, control_frame) -> None:
+    def on_control_frame(
+        self, connection: Connection, cid: int, control_frame: L2CAP_Control_Frame
+    ) -> None:
         logger.debug(
             f'{color("<<< Received L2CAP Signaling Control Frame", "green")} '
             f'on connection [0x{connection.handle:04X}] (CID={cid}) '
@@ -1859,11 +1834,45 @@ class ChannelManager:
                 ),
             )
 
+    async def update_connection_parameters(
+        self,
+        connection: Connection,
+        interval_min: int,
+        interval_max: int,
+        latency: int,
+        timeout: int,
+    ) -> int:
+        # Check that there isn't already a request pending
+        if self.connection_parameters_update_response:
+            raise InvalidStateError('request already pending')
+        self.connection_parameters_update_response = (
+            asyncio.get_running_loop().create_future()
+        )
+        self.send_control_frame(
+            connection,
+            L2CAP_LE_SIGNALING_CID,
+            L2CAP_Connection_Parameter_Update_Request(
+                interval_min=interval_min,
+                interval_max=interval_max,
+                latency=latency,
+                timeout=timeout,
+            ),
+        )
+        return await self.connection_parameters_update_response
+
     def on_l2cap_connection_parameter_update_response(
         self, connection: Connection, cid: int, response
     ) -> None:
-        # TODO: check response
-        pass
+        if self.connection_parameters_update_response:
+            self.connection_parameters_update_response.set_result(response.result)
+            self.connection_parameters_update_response = None
+        else:
+            logger.warning(
+                color(
+                    'received l2cap_connection_parameter_update_response without a pending request',
+                    'red',
+                )
+            )
 
     def on_l2cap_le_credit_based_connection_request(
         self, connection: Connection, cid: int, request
@@ -2072,7 +2081,8 @@ class ChannelManager:
         # Connect
         try:
             await channel.connect()
-        except Exception:
+        except Exception as e:
             del connection_channels[source_cid]
+            raise e
 
         return channel

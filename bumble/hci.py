@@ -16,11 +16,11 @@
 # Imports
 # -----------------------------------------------------------------------------
 from __future__ import annotations
-import struct
 import collections
-import logging
 import functools
-from typing import Dict, Type, Union
+import logging
+import struct
+from typing import Any, Dict, Callable, Optional, Type, Union
 
 from .colors import color
 from .core import (
@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 def hci_command_op_code(ogf, ocf):
     return ogf << 10 | ocf
+
+
+def hci_vendor_command_op_code(ocf):
+    return hci_command_op_code(HCI_VENDOR_OGF, ocf)
 
 
 def key_with_value(dictionary, target_value):
@@ -100,6 +104,8 @@ def phy_list_to_bits(phys):
 # -----------------------------------------------------------------------------
 # fmt: off
 # pylint: disable=line-too-long
+
+HCI_VENDOR_OGF = 0x3F
 
 # HCI Version
 HCI_VERSION_BLUETOOTH_CORE_1_0B    = 0
@@ -206,10 +212,8 @@ HCI_INQUIRY_RESPONSE_NOTIFICATION_EVENT                          = 0X56
 HCI_AUTHENTICATED_PAYLOAD_TIMEOUT_EXPIRED_EVENT                  = 0X57
 HCI_SAM_STATUS_CHANGE_EVENT                                      = 0X58
 
-HCI_EVENT_NAMES = {
-    event_code: event_name for (event_name, event_code) in globals().items()
-    if event_name.startswith('HCI_') and event_name.endswith('_EVENT')
-}
+HCI_VENDOR_EVENT = 0xFF
+
 
 # HCI Subevent Codes
 HCI_LE_CONNECTION_COMPLETE_EVENT                         = 0x01
@@ -248,10 +252,6 @@ HCI_LE_TRANSMIT_POWER_REPORTING_EVENT                    = 0X21
 HCI_LE_BIGINFO_ADVERTISING_REPORT_EVENT                  = 0X22
 HCI_LE_SUBRATE_CHANGE_EVENT                              = 0X23
 
-HCI_SUBEVENT_NAMES = {
-    event_code: event_name for (event_name, event_code) in globals().items()
-    if event_name.startswith('HCI_LE_') and event_name.endswith('_EVENT') and event_code != HCI_LE_META_EVENT
-}
 
 # HCI Command
 HCI_INQUIRY_COMMAND                                                      = hci_command_op_code(0x01, 0x0001)
@@ -557,10 +557,6 @@ HCI_LE_SET_DATA_RELATED_ADDRESS_CHANGES_COMMAND                          = hci_c
 HCI_LE_SET_DEFAULT_SUBRATE_COMMAND                                       = hci_command_op_code(0x08, 0x007D)
 HCI_LE_SUBRATE_REQUEST_COMMAND                                           = hci_command_op_code(0x08, 0x007E)
 
-HCI_COMMAND_NAMES = {
-    command_code: command_name for (command_name, command_code) in globals().items()
-    if command_name.startswith('HCI_') and command_name.endswith('_COMMAND')
-}
 
 # HCI Error Codes
 # See Bluetooth spec Vol 2, Part D - 1.3 LIST OF ERROR CODES
@@ -1918,7 +1914,7 @@ class HCI_Packet:
     hci_packet_type: int
 
     @staticmethod
-    def from_bytes(packet):
+    def from_bytes(packet: bytes) -> HCI_Packet:
         packet_type = packet[0]
 
         if packet_type == HCI_COMMAND_PACKET:
@@ -1960,6 +1956,7 @@ class HCI_Command(HCI_Packet):
     '''
 
     hci_packet_type = HCI_COMMAND_PACKET
+    command_names: Dict[int, str] = {}
     command_classes: Dict[int, Type[HCI_Command]] = {}
 
     @staticmethod
@@ -1970,9 +1967,9 @@ class HCI_Command(HCI_Packet):
 
         def inner(cls):
             cls.name = cls.__name__.upper()
-            cls.op_code = key_with_value(HCI_COMMAND_NAMES, cls.name)
+            cls.op_code = key_with_value(cls.command_names, cls.name)
             if cls.op_code is None:
-                raise KeyError(f'command {cls.name} not found in HCI_COMMAND_NAMES')
+                raise KeyError(f'command {cls.name} not found in command_names')
             cls.fields = fields
             cls.return_parameters_fields = return_parameters_fields
 
@@ -1992,7 +1989,19 @@ class HCI_Command(HCI_Packet):
         return inner
 
     @staticmethod
-    def from_bytes(packet):
+    def command_map(symbols: Dict[str, Any]) -> Dict[int, str]:
+        return {
+            command_code: command_name
+            for (command_name, command_code) in symbols.items()
+            if command_name.startswith('HCI_') and command_name.endswith('_COMMAND')
+        }
+
+    @classmethod
+    def register_commands(cls, symbols: Dict[str, Any]) -> None:
+        cls.command_names.update(cls.command_map(symbols))
+
+    @staticmethod
+    def from_bytes(packet: bytes) -> HCI_Command:
         op_code, length = struct.unpack_from('<HB', packet, 1)
         parameters = packet[4:]
         if len(parameters) != length:
@@ -2011,11 +2020,11 @@ class HCI_Command(HCI_Packet):
             HCI_Object.init_from_bytes(self, parameters, 0, fields)
             return self
 
-        return cls.from_parameters(parameters)
+        return cls.from_parameters(parameters)  # type: ignore
 
     @staticmethod
     def command_name(op_code):
-        name = HCI_COMMAND_NAMES.get(op_code)
+        name = HCI_Command.command_names.get(op_code)
         if name is not None:
             return name
         return f'[OGF=0x{op_code >> 10:02x}, OCF=0x{op_code & 0x3FF:04x}]'
@@ -2023,6 +2032,16 @@ class HCI_Command(HCI_Packet):
     @classmethod
     def create_return_parameters(cls, **kwargs):
         return HCI_Object(cls.return_parameters_fields, **kwargs)
+
+    @classmethod
+    def parse_return_parameters(cls, parameters):
+        if not cls.return_parameters_fields:
+            return None
+        return_parameters = HCI_Object.from_bytes(
+            parameters, 0, cls.return_parameters_fields
+        )
+        return_parameters.fields = cls.return_parameters_fields
+        return return_parameters
 
     def __init__(self, op_code, parameters=None, **kwargs):
         super().__init__(HCI_Command.command_name(op_code))
@@ -2051,6 +2070,9 @@ class HCI_Command(HCI_Packet):
             if self.parameters:
                 result += f': {self.parameters.hex()}'
         return result
+
+
+HCI_Command.register_commands(globals())
 
 
 # -----------------------------------------------------------------------------
@@ -4308,8 +4330,8 @@ class HCI_Event(HCI_Packet):
     '''
 
     hci_packet_type = HCI_EVENT_PACKET
+    event_names: Dict[int, str] = {}
     event_classes: Dict[int, Type[HCI_Event]] = {}
-    meta_event_classes: Dict[int, Type[HCI_LE_Meta_Event]] = {}
 
     @staticmethod
     def event(fields=()):
@@ -4319,9 +4341,9 @@ class HCI_Event(HCI_Packet):
 
         def inner(cls):
             cls.name = cls.__name__.upper()
-            cls.event_code = key_with_value(HCI_EVENT_NAMES, cls.name)
+            cls.event_code = key_with_value(cls.event_names, cls.name)
             if cls.event_code is None:
-                raise KeyError('event not found in HCI_EVENT_NAMES')
+                raise KeyError(f'event {cls.name} not found in event_names')
             cls.fields = fields
 
             # Patch the __init__ method to fix the event_code
@@ -4338,11 +4360,29 @@ class HCI_Event(HCI_Packet):
         return inner
 
     @staticmethod
+    def event_map(symbols: Dict[str, Any]) -> Dict[int, str]:
+        return {
+            event_code: event_name
+            for (event_name, event_code) in symbols.items()
+            if event_name.startswith('HCI_')
+            and not event_name.startswith('HCI_LE_')
+            and event_name.endswith('_EVENT')
+        }
+
+    @staticmethod
+    def event_name(event_code):
+        return name_or_number(HCI_Event.event_names, event_code)
+
+    @staticmethod
+    def register_events(symbols: Dict[str, Any]) -> None:
+        HCI_Event.event_names.update(HCI_Event.event_map(symbols))
+
+    @staticmethod
     def registered(event_class):
         event_class.name = event_class.__name__.upper()
-        event_class.event_code = key_with_value(HCI_EVENT_NAMES, event_class.name)
+        event_class.event_code = key_with_value(HCI_Event.event_names, event_class.name)
         if event_class.event_code is None:
-            raise KeyError('event not found in HCI_EVENT_NAMES')
+            raise KeyError(f'event {event_class.name} not found in event_names')
 
         # Register a factory for this class
         HCI_Event.event_classes[event_class.event_code] = event_class
@@ -4350,22 +4390,28 @@ class HCI_Event(HCI_Packet):
         return event_class
 
     @staticmethod
-    def from_bytes(packet):
+    def from_bytes(packet: bytes) -> HCI_Event:
         event_code = packet[1]
         length = packet[2]
         parameters = packet[3:]
         if len(parameters) != length:
             raise ValueError('invalid packet length')
 
+        cls: Any
         if event_code == HCI_LE_META_EVENT:
             # We do this dispatch here and not in the subclass in order to avoid call
             # loops
             subevent_code = parameters[0]
-            cls = HCI_Event.meta_event_classes.get(subevent_code)
+            cls = HCI_LE_Meta_Event.subevent_classes.get(subevent_code)
             if cls is None:
                 # No class registered, just use a generic class instance
                 return HCI_LE_Meta_Event(subevent_code, parameters)
-
+        elif event_code == HCI_VENDOR_EVENT:
+            subevent_code = parameters[0]
+            cls = HCI_Vendor_Event.subevent_classes.get(subevent_code)
+            if cls is None:
+                # No class registered, just use a generic class instance
+                return HCI_Vendor_Event(subevent_code, parameters)
         else:
             cls = HCI_Event.event_classes.get(event_code)
             if cls is None:
@@ -4373,7 +4419,7 @@ class HCI_Event(HCI_Packet):
                 return HCI_Event(event_code, parameters)
 
         # Invoke the factory to create a new instance
-        return cls.from_parameters(parameters)
+        return cls.from_parameters(parameters)  # type: ignore
 
     @classmethod
     def from_parameters(cls, parameters):
@@ -4382,10 +4428,6 @@ class HCI_Event(HCI_Packet):
         if fields := getattr(self, 'fields', None):
             HCI_Object.init_from_bytes(self, parameters, 0, fields)
         return self
-
-    @staticmethod
-    def event_name(event_code):
-        return name_or_number(HCI_EVENT_NAMES, event_code)
 
     def __init__(self, event_code, parameters=None, **kwargs):
         super().__init__(HCI_Event.event_name(event_code))
@@ -4413,51 +4455,73 @@ class HCI_Event(HCI_Packet):
         return result
 
 
+HCI_Event.register_events(globals())
+
+
 # -----------------------------------------------------------------------------
-class HCI_LE_Meta_Event(HCI_Event):
+class HCI_Extended_Event(HCI_Event):
     '''
-    See Bluetooth spec @ 7.7.65 LE Meta Event
+    HCI_Event subclass for events that has a subevent code.
     '''
 
-    @staticmethod
-    def event(fields=()):
+    subevent_names: Dict[int, str] = {}
+    subevent_classes: Dict[int, Type[HCI_Extended_Event]]
+
+    @classmethod
+    def event(cls, fields=()):
         '''
         Decorator used to declare and register subclasses
         '''
 
         def inner(cls):
             cls.name = cls.__name__.upper()
-            cls.subevent_code = key_with_value(HCI_SUBEVENT_NAMES, cls.name)
+            cls.subevent_code = key_with_value(cls.subevent_names, cls.name)
             if cls.subevent_code is None:
-                raise KeyError('subevent not found in HCI_SUBEVENT_NAMES')
+                raise KeyError(f'subevent {cls.name} not found in subevent_names')
             cls.fields = fields
 
             # Patch the __init__ method to fix the subevent_code
+            original_init = cls.__init__
+
             def init(self, parameters=None, **kwargs):
-                return HCI_LE_Meta_Event.__init__(
-                    self, cls.subevent_code, parameters, **kwargs
-                )
+                return original_init(self, cls.subevent_code, parameters, **kwargs)
 
             cls.__init__ = init
 
             # Register a factory for this class
-            HCI_Event.meta_event_classes[cls.subevent_code] = cls
+            cls.subevent_classes[cls.subevent_code] = cls
 
             return cls
 
         return inner
 
     @classmethod
+    def subevent_name(cls, subevent_code):
+        subevent_name = cls.subevent_names.get(subevent_code)
+        if subevent_name is not None:
+            return subevent_name
+
+        return f'{cls.__name__.upper()}[0x{subevent_code:02X}]'
+
+    @staticmethod
+    def subevent_map(symbols: Dict[str, Any]) -> Dict[int, str]:
+        return {
+            subevent_code: subevent_name
+            for (subevent_name, subevent_code) in symbols.items()
+            if subevent_name.startswith('HCI_') and subevent_name.endswith('_EVENT')
+        }
+
+    @classmethod
+    def register_subevents(cls, symbols: Dict[str, Any]) -> None:
+        cls.subevent_names.update(cls.subevent_map(symbols))
+
+    @classmethod
     def from_parameters(cls, parameters):
         self = cls.__new__(cls)
-        HCI_LE_Meta_Event.__init__(self, self.subevent_code, parameters)
+        HCI_Extended_Event.__init__(self, self.subevent_code, parameters)
         if fields := getattr(self, 'fields', None):
             HCI_Object.init_from_bytes(self, parameters, 1, fields)
         return self
-
-    @staticmethod
-    def subevent_name(subevent_code):
-        return name_or_number(HCI_SUBEVENT_NAMES, subevent_code)
 
     def __init__(self, subevent_code, parameters, **kwargs):
         self.subevent_code = subevent_code
@@ -4465,19 +4529,37 @@ class HCI_LE_Meta_Event(HCI_Event):
             parameters = bytes([subevent_code]) + HCI_Object.dict_to_bytes(
                 kwargs, fields
             )
-        super().__init__(HCI_LE_META_EVENT, parameters, **kwargs)
+        super().__init__(self.event_code, parameters, **kwargs)
 
         # Override the name in order to adopt the subevent name instead
         self.name = self.subevent_name(subevent_code)
 
-    def __str__(self):
-        result = color(self.subevent_name(self.subevent_code), 'magenta')
-        if fields := getattr(self, 'fields', None):
-            result += ':\n' + HCI_Object.format_fields(self.__dict__, fields, '  ')
-        else:
-            if self.parameters:
-                result += f': {self.parameters.hex()}'
-        return result
+
+# -----------------------------------------------------------------------------
+class HCI_LE_Meta_Event(HCI_Extended_Event):
+    '''
+    See Bluetooth spec @ 7.7.65 LE Meta Event
+    '''
+
+    event_code: int = HCI_LE_META_EVENT
+    subevent_classes = {}
+
+    @staticmethod
+    def subevent_map(symbols: Dict[str, Any]) -> Dict[int, str]:
+        return {
+            subevent_code: subevent_name
+            for (subevent_name, subevent_code) in symbols.items()
+            if subevent_name.startswith('HCI_LE_') and subevent_name.endswith('_EVENT')
+        }
+
+
+HCI_LE_Meta_Event.register_subevents(globals())
+
+
+# -----------------------------------------------------------------------------
+class HCI_Vendor_Event(HCI_Extended_Event):
+    event_code: int = HCI_VENDOR_EVENT
+    subevent_classes = {}
 
 
 # -----------------------------------------------------------------------------
@@ -4591,7 +4673,7 @@ class HCI_LE_Advertising_Report_Event(HCI_LE_Meta_Event):
         return f'{color(self.subevent_name(self.subevent_code), "magenta")}:\n{reports}'
 
 
-HCI_Event.meta_event_classes[
+HCI_LE_Meta_Event.subevent_classes[
     HCI_LE_ADVERTISING_REPORT_EVENT
 ] = HCI_LE_Advertising_Report_Event
 
@@ -4845,7 +4927,7 @@ class HCI_LE_Extended_Advertising_Report_Event(HCI_LE_Meta_Event):
         return f'{color(self.subevent_name(self.subevent_code), "magenta")}:\n{reports}'
 
 
-HCI_Event.meta_event_classes[
+HCI_LE_Meta_Event.subevent_classes[
     HCI_LE_EXTENDED_ADVERTISING_REPORT_EVENT
 ] = HCI_LE_Extended_Advertising_Report_Event
 
@@ -5086,6 +5168,7 @@ class HCI_Command_Complete_Event(HCI_Event):
     '''
 
     return_parameters = b''
+    command_opcode: int
 
     def map_return_parameters(self, return_parameters):
         '''Map simple 'status' return parameters to their named constant form'''
@@ -5118,11 +5201,11 @@ class HCI_Command_Complete_Event(HCI_Event):
             self.return_parameters = self.return_parameters[0]
         else:
             cls = HCI_Command.command_classes.get(self.command_opcode)
-            if cls and cls.return_parameters_fields:
-                self.return_parameters = HCI_Object.from_bytes(
-                    self.return_parameters, 0, cls.return_parameters_fields
-                )
-                self.return_parameters.fields = cls.return_parameters_fields
+            if cls:
+                # Try to parse the return parameters bytes into an object.
+                return_parameters = cls.parse_return_parameters(self.return_parameters)
+                if return_parameters is not None:
+                    self.return_parameters = return_parameters
 
         return self
 
@@ -5605,7 +5688,7 @@ class HCI_Remote_Host_Supported_Features_Notification_Event(HCI_Event):
 
 
 # -----------------------------------------------------------------------------
-class HCI_AclDataPacket:
+class HCI_AclDataPacket(HCI_Packet):
     '''
     See Bluetooth spec @ 5.4.2 HCI ACL Data Packets
     '''
@@ -5613,7 +5696,7 @@ class HCI_AclDataPacket:
     hci_packet_type = HCI_ACL_DATA_PACKET
 
     @staticmethod
-    def from_bytes(packet):
+    def from_bytes(packet: bytes) -> HCI_AclDataPacket:
         # Read the header
         h, data_total_length = struct.unpack_from('<HH', packet, 1)
         connection_handle = h & 0xFFF
@@ -5655,12 +5738,14 @@ class HCI_AclDataPacket:
 
 # -----------------------------------------------------------------------------
 class HCI_AclDataPacketAssembler:
-    def __init__(self, callback):
+    current_data: Optional[bytes]
+
+    def __init__(self, callback: Callable[[bytes], Any]) -> None:
         self.callback = callback
         self.current_data = None
         self.l2cap_pdu_length = 0
 
-    def feed_packet(self, packet):
+    def feed_packet(self, packet: HCI_AclDataPacket) -> None:
         if packet.pb_flag in (
             HCI_ACL_PB_FIRST_NON_FLUSHABLE,
             HCI_ACL_PB_FIRST_FLUSHABLE,
@@ -5674,6 +5759,7 @@ class HCI_AclDataPacketAssembler:
                 return
             self.current_data += packet.data
 
+        assert self.current_data is not None
         if len(self.current_data) == self.l2cap_pdu_length + 4:
             # The packet is complete, invoke the callback
             logger.debug(f'<<< ACL PDU: {self.current_data.hex()}')
