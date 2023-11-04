@@ -15,16 +15,19 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+import collections.abc
 import logging
 import asyncio
 import dataclasses
 import enum
 import traceback
-from typing import Dict, List, Union, Set
+import warnings
+from typing import Dict, List, Union, Set, TYPE_CHECKING
 
 from . import at
 from . import rfcomm
 
+from bumble.colors import color
 from bumble.core import (
     ProtocolError,
     BT_GENERIC_AUDIO_SERVICE,
@@ -47,6 +50,71 @@ from bumble.sdp import (
 # Logging
 # -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Error
+# -----------------------------------------------------------------------------
+
+
+class HfpProtocolError(ProtocolError):
+    def __init__(self, error_name: str = '', details: str = ''):
+        super().__init__(None, 'hfp', error_name, details)
+
+
+# -----------------------------------------------------------------------------
+# Protocol Support
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+class HfpProtocol:
+    dlc: rfcomm.DLC
+    buffer: str
+    lines: collections.deque
+    lines_available: asyncio.Event
+
+    def __init__(self, dlc: rfcomm.DLC) -> None:
+        warnings.warn("See HfProtocol", DeprecationWarning)
+        self.dlc = dlc
+        self.buffer = ''
+        self.lines = collections.deque()
+        self.lines_available = asyncio.Event()
+
+        dlc.sink = self.feed
+
+    def feed(self, data: Union[bytes, str]) -> None:
+        # Convert the data to a string if needed
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+
+        logger.debug(f'<<< Data received: {data}')
+
+        # Add to the buffer and look for lines
+        self.buffer += data
+        while (separator := self.buffer.find('\r')) >= 0:
+            line = self.buffer[:separator].strip()
+            self.buffer = self.buffer[separator + 1 :]
+            if len(line) > 0:
+                self.on_line(line)
+
+    def on_line(self, line: str) -> None:
+        self.lines.append(line)
+        self.lines_available.set()
+
+    def send_command_line(self, line: str) -> None:
+        logger.debug(color(f'>>> {line}', 'yellow'))
+        self.dlc.write(line + '\r')
+
+    def send_response_line(self, line: str) -> None:
+        logger.debug(color(f'>>> {line}', 'yellow'))
+        self.dlc.write('\r\n' + line + '\r\n')
+
+    async def next_line(self) -> str:
+        await self.lines_available.wait()
+        line = self.lines.popleft()
+        if not self.lines:
+            self.lines_available.clear()
+        logger.debug(color(f'<<< {line}', 'green'))
+        return line
 
 
 # -----------------------------------------------------------------------------
@@ -302,8 +370,12 @@ class HfProtocol:
 
     dlc: rfcomm.DLC
     command_lock: asyncio.Lock
-    response_queue: asyncio.Queue
-    unsolicited_queue: asyncio.Queue
+    if TYPE_CHECKING:
+        response_queue: asyncio.Queue[AtResponse]
+        unsolicited_queue: asyncio.Queue[AtResponse]
+    else:
+        response_queue: asyncio.Queue
+        unsolicited_queue: asyncio.Queue
     read_buffer: bytearray
 
     def __init__(self, dlc: rfcomm.DLC, configuration: Configuration):
@@ -368,7 +440,7 @@ class HfProtocol:
         else:
             logger.warning(f"dropping unexpected response with code '{response.code}'")
 
-    # Send an AT command and wait for the peer resposne.
+    # Send an AT command and wait for the peer response.
     # Wait for the AT responses sent by the peer, to the status code.
     # Raises asyncio.TimeoutError if the status is not received
     # after a timeout (default 1 second).
@@ -390,7 +462,7 @@ class HfProtocol:
                 )
                 if result.code == 'OK':
                     if response_type == AtResponseType.SINGLE and len(responses) != 1:
-                        raise ProtocolError("NO ANSWER")
+                        raise HfpProtocolError("NO ANSWER")
 
                     if response_type == AtResponseType.MULTIPLE:
                         return responses
@@ -398,7 +470,7 @@ class HfProtocol:
                         return responses[0]
                     return None
                 if result.code in STATUS_CODES:
-                    raise ProtocolError(result.code)
+                    raise HfpProtocolError(result.code)
                 responses.append(result)
 
     # 4.2.1 Service Level Connection Initialization.
