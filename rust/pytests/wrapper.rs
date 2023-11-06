@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bumble::{wrapper, wrapper::transport::Transport};
+use bumble::wrapper::{drivers::rtk::DriverInfo, transport::Transport};
 use nix::sys::stat::Mode;
-use pyo3::prelude::*;
+use pyo3::PyResult;
 
 #[pyo3_asyncio::tokio::test]
 async fn fifo_transport_can_open() -> PyResult<()> {
@@ -31,7 +31,7 @@ async fn fifo_transport_can_open() -> PyResult<()> {
 }
 
 #[pyo3_asyncio::tokio::test]
-async fn company_ids() -> PyResult<()> {
-    assert!(wrapper::assigned_numbers::COMPANY_IDS.len() > 2000);
+async fn realtek_driver_info_all_drivers() -> PyResult<()> {
+    assert_eq!(12, DriverInfo::all_drivers()?.len());
     Ok(())
 }
