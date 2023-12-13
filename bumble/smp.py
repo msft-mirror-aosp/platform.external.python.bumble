@@ -37,6 +37,7 @@ from typing import (
     Optional,
     Tuple,
     Type,
+    cast,
 )
 
 from pyee import EventEmitter
@@ -1272,7 +1273,7 @@ class Session:
             keys.link_key = PairingKeys.Key(
                 value=self.link_key, authenticated=authenticated
             )
-        self.manager.on_pairing(self, peer_address, keys)
+        await self.manager.on_pairing(self, peer_address, keys)
 
     def on_pairing_failure(self, reason: int) -> None:
         logger.warning(f'pairing failure ({error_name(reason)})')
@@ -1771,7 +1772,26 @@ class Manager(EventEmitter):
         cid = SMP_BR_CID if connection.transport == BT_BR_EDR_TRANSPORT else SMP_CID
         connection.send_l2cap_pdu(cid, command.to_bytes())
 
+    def on_smp_security_request_command(
+        self, connection: Connection, request: SMP_Security_Request_Command
+    ) -> None:
+        connection.emit('security_request', request.auth_req)
+
     def on_smp_pdu(self, connection: Connection, pdu: bytes) -> None:
+        # Parse the L2CAP payload into an SMP Command object
+        command = SMP_Command.from_bytes(pdu)
+        logger.debug(
+            f'<<< Received SMP Command on connection [0x{connection.handle:04X}] '
+            f'{connection.peer_address}: {command}'
+        )
+
+        # Security request is more than just pairing, so let applications handle them
+        if command.code == SMP_SECURITY_REQUEST_COMMAND:
+            self.on_smp_security_request_command(
+                connection, cast(SMP_Security_Request_Command, command)
+            )
+            return
+
         # Look for a session with this connection, and create one if none exists
         if not (session := self.sessions.get(connection.handle)):
             if connection.role == BT_CENTRAL_ROLE:
@@ -1781,13 +1801,6 @@ class Manager(EventEmitter):
                 self, connection, pairing_config, is_initiator=False
             )
             self.sessions[connection.handle] = session
-
-        # Parse the L2CAP payload into an SMP Command object
-        command = SMP_Command.from_bytes(pdu)
-        logger.debug(
-            f'<<< Received SMP Command on connection [0x{connection.handle:04X}] '
-            f'{connection.peer_address}: {command}'
-        )
 
         # Delegate the handling of the command to the session
         session.on_smp_command(command)
@@ -1827,20 +1840,14 @@ class Manager(EventEmitter):
     def on_session_start(self, session: Session) -> None:
         self.device.on_pairing_start(session.connection)
 
-    def on_pairing(
+    async def on_pairing(
         self, session: Session, identity_address: Optional[Address], keys: PairingKeys
     ) -> None:
         # Store the keys in the key store
         if self.device.keystore and identity_address is not None:
-
-            async def store_keys():
-                try:
-                    assert self.device.keystore
-                    await self.device.keystore.update(str(identity_address), keys)
-                except Exception as error:
-                    logger.warning(f'!!! error while storing keys: {error}')
-
-            self.device.abort_on('flush', store_keys())
+            self.device.abort_on(
+                'flush', self.device.update_keys(str(identity_address), keys)
+            )
 
         # Notify the device
         self.device.on_pairing(session.connection, identity_address, keys, session.sc)
