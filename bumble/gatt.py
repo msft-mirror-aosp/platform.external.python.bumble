@@ -28,7 +28,7 @@ import enum
 import functools
 import logging
 import struct
-from typing import Optional, Sequence, List
+from typing import Optional, Sequence, Iterable, List, Union
 
 from .colors import color
 from .core import UUID, get_dict_key_by_value
@@ -187,7 +187,7 @@ GATT_CENTRAL_ADDRESS_RESOLUTION__CHARACTERISTIC                = UUID.from_16_bi
 # -----------------------------------------------------------------------------
 
 
-def show_services(services):
+def show_services(services: Iterable[Service]) -> None:
     for service in services:
         print(color(str(service), 'cyan'))
 
@@ -210,11 +210,11 @@ class Service(Attribute):
 
     def __init__(
         self,
-        uuid,
+        uuid: Union[str, UUID],
         characteristics: List[Characteristic],
         primary=True,
         included_services: List[Service] = [],
-    ):
+    ) -> None:
         # Convert the uuid to a UUID object if it isn't already
         if isinstance(uuid, str):
             uuid = UUID(uuid)
@@ -239,7 +239,7 @@ class Service(Attribute):
         """
         return None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'Service(handle=0x{self.handle:04X}, '
             f'end=0x{self.end_group_handle:04X}, '
@@ -255,9 +255,11 @@ class TemplateService(Service):
     to expose their UUID as a class property
     '''
 
-    UUID: Optional[UUID] = None
+    UUID: UUID
 
-    def __init__(self, characteristics, primary=True):
+    def __init__(
+        self, characteristics: List[Characteristic], primary: bool = True
+    ) -> None:
         super().__init__(self.UUID, characteristics, primary)
 
 
@@ -269,7 +271,7 @@ class IncludedServiceDeclaration(Attribute):
 
     service: Service
 
-    def __init__(self, service):
+    def __init__(self, service: Service) -> None:
         declaration_bytes = struct.pack(
             '<HH2s', service.handle, service.end_group_handle, service.uuid.to_bytes()
         )
@@ -278,13 +280,12 @@ class IncludedServiceDeclaration(Attribute):
         )
         self.service = service
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'IncludedServiceDefinition(handle=0x{self.handle:04X}, '
             f'group_starting_handle=0x{self.service.handle:04X}, '
             f'group_ending_handle=0x{self.service.end_group_handle:04X}, '
-            f'uuid={self.service.uuid}, '
-            f'{self.service.properties!s})'
+            f'uuid={self.service.uuid})'
         )
 
 
@@ -309,30 +310,32 @@ class Characteristic(Attribute):
         AUTHENTICATED_SIGNED_WRITES = 0x40
         EXTENDED_PROPERTIES = 0x80
 
-        @staticmethod
-        def from_string(properties_str: str) -> Characteristic.Properties:
-            property_names: List[str] = []
-            for property in Characteristic.Properties:
-                if property.name is None:
-                    raise TypeError()
-                property_names.append(property.name)
-
-            def string_to_property(property_string) -> Characteristic.Properties:
-                for property in zip(Characteristic.Properties, property_names):
-                    if property_string == property[1]:
-                        return property[0]
-                raise TypeError(f"Unable to convert {property_string} to Property")
-
+        @classmethod
+        def from_string(cls, properties_str: str) -> Characteristic.Properties:
             try:
                 return functools.reduce(
-                    lambda x, y: x | string_to_property(y),
-                    properties_str.split(","),
+                    lambda x, y: x | cls[y],
+                    properties_str.replace("|", ",").split(","),
                     Characteristic.Properties(0),
                 )
-            except TypeError:
+            except (TypeError, KeyError):
+                # The check for `p.name is not None` here is needed because for InFlag
+                # enums, the .name property can be None, when the enum value is 0,
+                # so the type hint for .name is Optional[str].
+                enum_list: List[str] = [p.name for p in cls if p.name is not None]
+                enum_list_str = ",".join(enum_list)
                 raise TypeError(
-                    f"Characteristic.Properties::from_string() error:\nExpected a string containing any of the keys, separated by commas: {','.join(property_names)}\nGot: {properties_str}"
+                    f"Characteristic.Properties::from_string() error:\nExpected a string containing any of the keys, separated by , or |: {enum_list_str}\nGot: {properties_str}"
                 )
+
+        def __str__(self) -> str:
+            # NOTE: we override this method to offer a consistent result between python
+            # versions: the value returned by IntFlag.__str__() changed in version 11.
+            return '|'.join(
+                flag.name
+                for flag in Characteristic.Properties
+                if self.value & flag.value and flag.name is not None
+            )
 
     # For backwards compatibility these are defined here
     # For new code, please use Characteristic.Properties.X
@@ -347,10 +350,10 @@ class Characteristic(Attribute):
 
     def __init__(
         self,
-        uuid,
+        uuid: Union[str, bytes, UUID],
         properties: Characteristic.Properties,
-        permissions,
-        value=b'',
+        permissions: Union[str, Attribute.Permissions],
+        value: Union[str, bytes, CharacteristicValue] = b'',
         descriptors: Sequence[Descriptor] = (),
     ):
         super().__init__(uuid, permissions, value)
@@ -368,12 +371,12 @@ class Characteristic(Attribute):
     def has_properties(self, properties: Characteristic.Properties) -> bool:
         return self.properties & properties == properties
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'Characteristic(handle=0x{self.handle:04X}, '
             f'end=0x{self.end_group_handle:04X}, '
             f'uuid={self.uuid}, '
-            f'{self.properties!s})'
+            f'{self.properties})'
         )
 
 
@@ -385,7 +388,7 @@ class CharacteristicDeclaration(Attribute):
 
     characteristic: Characteristic
 
-    def __init__(self, characteristic, value_handle):
+    def __init__(self, characteristic: Characteristic, value_handle: int) -> None:
         declaration_bytes = (
             struct.pack('<BH', characteristic.properties, value_handle)
             + characteristic.uuid.to_pdu_bytes()
@@ -396,12 +399,12 @@ class CharacteristicDeclaration(Attribute):
         self.value_handle = value_handle
         self.characteristic = characteristic
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'CharacteristicDeclaration(handle=0x{self.handle:04X}, '
             f'value_handle=0x{self.value_handle:04X}, '
             f'uuid={self.characteristic.uuid}, '
-            f'{self.characteristic.properties!s})'
+            f'{self.characteristic.properties})'
         )
 
 
@@ -519,7 +522,7 @@ class CharacteristicAdapter:
 
         return self.wrapped_characteristic.unsubscribe(subscriber)
 
-    def __str__(self):
+    def __str__(self) -> str:
         wrapped = str(self.wrapped_characteristic)
         return f'{self.__class__.__name__}({wrapped})'
 
@@ -599,10 +602,10 @@ class UTF8CharacteristicAdapter(CharacteristicAdapter):
     Adapter that converts strings to/from bytes using UTF-8 encoding
     '''
 
-    def encode_value(self, value):
+    def encode_value(self, value: str) -> bytes:
         return value.encode('utf-8')
 
-    def decode_value(self, value):
+    def decode_value(self, value: bytes) -> str:
         return value.decode('utf-8')
 
 
@@ -612,7 +615,7 @@ class Descriptor(Attribute):
     See Vol 3, Part G - 3.3.3 Characteristic Descriptor Declarations
     '''
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'Descriptor(handle=0x{self.handle:04X}, '
             f'type={self.type}, '
