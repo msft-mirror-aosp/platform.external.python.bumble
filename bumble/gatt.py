@@ -28,7 +28,7 @@ import enum
 import functools
 import logging
 import struct
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Iterable, List, Union
 
 from .colors import color
 from .core import UUID, get_dict_key_by_value
@@ -187,7 +187,7 @@ GATT_CENTRAL_ADDRESS_RESOLUTION__CHARACTERISTIC                = UUID.from_16_bi
 # -----------------------------------------------------------------------------
 
 
-def show_services(services):
+def show_services(services: Iterable[Service]) -> None:
     for service in services:
         print(color(str(service), 'cyan'))
 
@@ -205,8 +205,16 @@ class Service(Attribute):
     '''
 
     uuid: UUID
+    characteristics: List[Characteristic]
+    included_services: List[Service]
 
-    def __init__(self, uuid, characteristics: list[Characteristic], primary=True):
+    def __init__(
+        self,
+        uuid: Union[str, UUID],
+        characteristics: List[Characteristic],
+        primary=True,
+        included_services: List[Service] = [],
+    ) -> None:
         # Convert the uuid to a UUID object if it isn't already
         if isinstance(uuid, str):
             uuid = UUID(uuid)
@@ -219,7 +227,7 @@ class Service(Attribute):
             uuid.to_pdu_bytes(),
         )
         self.uuid = uuid
-        # self.included_services = []
+        self.included_services = included_services[:]
         self.characteristics = characteristics[:]
         self.primary = primary
 
@@ -231,7 +239,7 @@ class Service(Attribute):
         """
         return None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'Service(handle=0x{self.handle:04X}, '
             f'end=0x{self.end_group_handle:04X}, '
@@ -247,10 +255,38 @@ class TemplateService(Service):
     to expose their UUID as a class property
     '''
 
-    UUID = None
+    UUID: UUID
 
-    def __init__(self, characteristics, primary=True):
+    def __init__(
+        self, characteristics: List[Characteristic], primary: bool = True
+    ) -> None:
         super().__init__(self.UUID, characteristics, primary)
+
+
+# -----------------------------------------------------------------------------
+class IncludedServiceDeclaration(Attribute):
+    '''
+    See Vol 3, Part G - 3.2 INCLUDE DEFINITION
+    '''
+
+    service: Service
+
+    def __init__(self, service: Service) -> None:
+        declaration_bytes = struct.pack(
+            '<HH2s', service.handle, service.end_group_handle, service.uuid.to_bytes()
+        )
+        super().__init__(
+            GATT_INCLUDE_ATTRIBUTE_TYPE, Attribute.READABLE, declaration_bytes
+        )
+        self.service = service
+
+    def __str__(self) -> str:
+        return (
+            f'IncludedServiceDefinition(handle=0x{self.handle:04X}, '
+            f'group_starting_handle=0x{self.service.handle:04X}, '
+            f'group_ending_handle=0x{self.service.end_group_handle:04X}, '
+            f'uuid={self.service.uuid})'
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -259,63 +295,70 @@ class Characteristic(Attribute):
     See Vol 3, Part G - 3.3 CHARACTERISTIC DEFINITION
     '''
 
-    # Property flags
-    BROADCAST = 0x01
-    READ = 0x02
-    WRITE_WITHOUT_RESPONSE = 0x04
-    WRITE = 0x08
-    NOTIFY = 0x10
-    INDICATE = 0x20
-    AUTHENTICATED_SIGNED_WRITES = 0x40
-    EXTENDED_PROPERTIES = 0x80
+    uuid: UUID
+    properties: Characteristic.Properties
 
-    PROPERTY_NAMES = {
-        BROADCAST: 'BROADCAST',
-        READ: 'READ',
-        WRITE_WITHOUT_RESPONSE: 'WRITE_WITHOUT_RESPONSE',
-        WRITE: 'WRITE',
-        NOTIFY: 'NOTIFY',
-        INDICATE: 'INDICATE',
-        AUTHENTICATED_SIGNED_WRITES: 'AUTHENTICATED_SIGNED_WRITES',
-        EXTENDED_PROPERTIES: 'EXTENDED_PROPERTIES',
-    }
+    class Properties(enum.IntFlag):
+        """Property flags"""
 
-    @staticmethod
-    def property_name(property_int):
-        return Characteristic.PROPERTY_NAMES.get(property_int, '')
+        BROADCAST = 0x01
+        READ = 0x02
+        WRITE_WITHOUT_RESPONSE = 0x04
+        WRITE = 0x08
+        NOTIFY = 0x10
+        INDICATE = 0x20
+        AUTHENTICATED_SIGNED_WRITES = 0x40
+        EXTENDED_PROPERTIES = 0x80
 
-    @staticmethod
-    def properties_as_string(properties):
-        return ','.join(
-            [
-                Characteristic.property_name(p)
-                for p in Characteristic.PROPERTY_NAMES
-                if properties & p
-            ]
-        )
+        @classmethod
+        def from_string(cls, properties_str: str) -> Characteristic.Properties:
+            try:
+                return functools.reduce(
+                    lambda x, y: x | cls[y],
+                    properties_str.replace("|", ",").split(","),
+                    Characteristic.Properties(0),
+                )
+            except (TypeError, KeyError):
+                # The check for `p.name is not None` here is needed because for InFlag
+                # enums, the .name property can be None, when the enum value is 0,
+                # so the type hint for .name is Optional[str].
+                enum_list: List[str] = [p.name for p in cls if p.name is not None]
+                enum_list_str = ",".join(enum_list)
+                raise TypeError(
+                    f"Characteristic.Properties::from_string() error:\nExpected a string containing any of the keys, separated by , or |: {enum_list_str}\nGot: {properties_str}"
+                )
 
-    @staticmethod
-    def string_to_properties(properties_str: str):
-        return functools.reduce(
-            lambda x, y: x | get_dict_key_by_value(Characteristic.PROPERTY_NAMES, y),
-            properties_str.split(","),
-            0,
-        )
+        def __str__(self) -> str:
+            # NOTE: we override this method to offer a consistent result between python
+            # versions: the value returned by IntFlag.__str__() changed in version 11.
+            return '|'.join(
+                flag.name
+                for flag in Characteristic.Properties
+                if self.value & flag.value and flag.name is not None
+            )
+
+    # For backwards compatibility these are defined here
+    # For new code, please use Characteristic.Properties.X
+    BROADCAST = Properties.BROADCAST
+    READ = Properties.READ
+    WRITE_WITHOUT_RESPONSE = Properties.WRITE_WITHOUT_RESPONSE
+    WRITE = Properties.WRITE
+    NOTIFY = Properties.NOTIFY
+    INDICATE = Properties.INDICATE
+    AUTHENTICATED_SIGNED_WRITES = Properties.AUTHENTICATED_SIGNED_WRITES
+    EXTENDED_PROPERTIES = Properties.EXTENDED_PROPERTIES
 
     def __init__(
         self,
-        uuid,
-        properties,
-        permissions,
-        value=b'',
+        uuid: Union[str, bytes, UUID],
+        properties: Characteristic.Properties,
+        permissions: Union[str, Attribute.Permissions],
+        value: Union[str, bytes, CharacteristicValue] = b'',
         descriptors: Sequence[Descriptor] = (),
     ):
         super().__init__(uuid, permissions, value)
         self.uuid = self.type
-        if isinstance(properties, str):
-            self.properties = Characteristic.string_to_properties(properties)
-        else:
-            self.properties = properties
+        self.properties = properties
         self.descriptors = descriptors
 
     def get_descriptor(self, descriptor_type):
@@ -325,12 +368,15 @@ class Characteristic(Attribute):
 
         return None
 
-    def __str__(self):
+    def has_properties(self, properties: Characteristic.Properties) -> bool:
+        return self.properties & properties == properties
+
+    def __str__(self) -> str:
         return (
             f'Characteristic(handle=0x{self.handle:04X}, '
             f'end=0x{self.end_group_handle:04X}, '
             f'uuid={self.uuid}, '
-            f'properties={Characteristic.properties_as_string(self.properties)})'
+            f'{self.properties})'
         )
 
 
@@ -340,7 +386,9 @@ class CharacteristicDeclaration(Attribute):
     See Vol 3, Part G - 3.3.1 CHARACTERISTIC DECLARATION
     '''
 
-    def __init__(self, characteristic, value_handle):
+    characteristic: Characteristic
+
+    def __init__(self, characteristic: Characteristic, value_handle: int) -> None:
         declaration_bytes = (
             struct.pack('<BH', characteristic.properties, value_handle)
             + characteristic.uuid.to_pdu_bytes()
@@ -351,12 +399,12 @@ class CharacteristicDeclaration(Attribute):
         self.value_handle = value_handle
         self.characteristic = characteristic
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'CharacteristicDeclaration(handle=0x{self.handle:04X}, '
             f'value_handle=0x{self.value_handle:04X}, '
-            f'uuid={self.characteristic.uuid}, properties='
-            f'{Characteristic.properties_as_string(self.characteristic.properties)})'
+            f'uuid={self.characteristic.uuid}, '
+            f'{self.characteristic.properties})'
         )
 
 
@@ -474,7 +522,7 @@ class CharacteristicAdapter:
 
         return self.wrapped_characteristic.unsubscribe(subscriber)
 
-    def __str__(self):
+    def __str__(self) -> str:
         wrapped = str(self.wrapped_characteristic)
         return f'{self.__class__.__name__}({wrapped})'
 
@@ -554,10 +602,10 @@ class UTF8CharacteristicAdapter(CharacteristicAdapter):
     Adapter that converts strings to/from bytes using UTF-8 encoding
     '''
 
-    def encode_value(self, value):
+    def encode_value(self, value: str) -> bytes:
         return value.encode('utf-8')
 
-    def decode_value(self, value):
+    def decode_value(self, value: bytes) -> str:
         return value.decode('utf-8')
 
 
@@ -567,7 +615,7 @@ class Descriptor(Attribute):
     See Vol 3, Part G - 3.3.3 Characteristic Descriptor Declarations
     '''
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f'Descriptor(handle=0x{self.handle:04X}, '
             f'type={self.type}, '

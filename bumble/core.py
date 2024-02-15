@@ -17,7 +17,7 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 import struct
-from typing import List, Optional, Tuple, Union, cast
+from typing import List, Optional, Tuple, Union, cast, Dict
 
 from .company_ids import COMPANY_IDENTIFIERS
 
@@ -53,7 +53,7 @@ def bit_flags_to_strings(bits, bit_flag_names):
     return names
 
 
-def name_or_number(dictionary, number, width=2):
+def name_or_number(dictionary: Dict[int, str], number: int, width: int = 2) -> str:
     name = dictionary.get(number)
     if name is not None:
         return name
@@ -78,7 +78,13 @@ def get_dict_key_by_value(dictionary, value):
 class BaseError(Exception):
     """Base class for errors with an error code, error name and namespace"""
 
-    def __init__(self, error_code, error_namespace='', error_name='', details=''):
+    def __init__(
+        self,
+        error_code: Optional[int],
+        error_namespace: str = '',
+        error_name: str = '',
+        details: str = '',
+    ):
         super().__init__()
         self.error_code = error_code
         self.error_namespace = error_namespace
@@ -90,12 +96,14 @@ class BaseError(Exception):
             namespace = f'{self.error_namespace}/'
         else:
             namespace = ''
-        if self.error_name:
-            name = f'{self.error_name} [0x{self.error_code:X}]'
-        else:
-            name = f'0x{self.error_code:X}'
+        error_text = {
+            (True, True): f'{self.error_name} [0x{self.error_code:X}]',
+            (True, False): self.error_name,
+            (False, True): f'0x{self.error_code:X}',
+            (False, False): '',
+        }[(self.error_name != '', self.error_code is not None)]
 
-        return f'{type(self).__name__}({namespace}{name})'
+        return f'{type(self).__name__}({namespace}{error_text})'
 
 
 class ProtocolError(BaseError):
@@ -134,6 +142,10 @@ class ConnectionError(BaseError):  # pylint: disable=redefined-builtin
         self.peer_address = peer_address
 
 
+class ConnectionParameterUpdateError(BaseError):
+    """Connection Parameter Update Error"""
+
+
 # -----------------------------------------------------------------------------
 # UUID
 #
@@ -152,7 +164,12 @@ class UUID:
     BASE_UUID = bytes.fromhex('00001000800000805F9B34FB')[::-1]  # little-endian
     UUIDS: List[UUID] = []  # Registry of all instances created
 
-    def __init__(self, uuid_str_or_int, name=None):
+    uuid_bytes: bytes
+    name: Optional[str]
+
+    def __init__(
+        self, uuid_str_or_int: Union[str, int], name: Optional[str] = None
+    ) -> None:
         if isinstance(uuid_str_or_int, int):
             self.uuid_bytes = struct.pack('<H', uuid_str_or_int)
         else:
@@ -172,7 +189,7 @@ class UUID:
             self.uuid_bytes = bytes(reversed(bytes.fromhex(uuid_str)))
         self.name = name
 
-    def register(self):
+    def register(self) -> UUID:
         # Register this object in the class registry, and update the entry's name if
         # it wasn't set already
         for uuid in self.UUIDS:
@@ -196,22 +213,22 @@ class UUID:
         raise ValueError('only 2, 4 and 16 bytes are allowed')
 
     @classmethod
-    def from_16_bits(cls, uuid_16, name=None):
+    def from_16_bits(cls, uuid_16: int, name: Optional[str] = None) -> UUID:
         return cls.from_bytes(struct.pack('<H', uuid_16), name)
 
     @classmethod
-    def from_32_bits(cls, uuid_32, name=None):
+    def from_32_bits(cls, uuid_32: int, name: Optional[str] = None) -> UUID:
         return cls.from_bytes(struct.pack('<I', uuid_32), name)
 
     @classmethod
-    def parse_uuid(cls, uuid_as_bytes, offset):
+    def parse_uuid(cls, uuid_as_bytes: bytes, offset: int) -> Tuple[int, UUID]:
         return len(uuid_as_bytes), cls.from_bytes(uuid_as_bytes[offset:])
 
     @classmethod
-    def parse_uuid_2(cls, uuid_as_bytes, offset):
+    def parse_uuid_2(cls, uuid_as_bytes: bytes, offset: int) -> Tuple[int, UUID]:
         return offset + 2, cls.from_bytes(uuid_as_bytes[offset : offset + 2])
 
-    def to_bytes(self, force_128=False):
+    def to_bytes(self, force_128: bool = False) -> bytes:
         '''
         Serialize UUID in little-endian byte-order
         '''
@@ -227,7 +244,7 @@ class UUID:
         else:
             assert False, "unreachable"
 
-    def to_pdu_bytes(self):
+    def to_pdu_bytes(self) -> bytes:
         '''
         Convert to bytes for use in an ATT PDU.
         According to Vol 3, Part F - 3.2.1 Attribute Type:
@@ -236,11 +253,11 @@ class UUID:
         '''
         return self.to_bytes(force_128=(len(self.uuid_bytes) == 4))
 
-    def to_hex_str(self) -> str:
+    def to_hex_str(self, separator: str = '') -> str:
         if len(self.uuid_bytes) == 2 or len(self.uuid_bytes) == 4:
             return bytes(reversed(self.uuid_bytes)).hex().upper()
 
-        return ''.join(
+        return separator.join(
             [
                 bytes(reversed(self.uuid_bytes[12:16])).hex(),
                 bytes(reversed(self.uuid_bytes[10:12])).hex(),
@@ -250,10 +267,10 @@ class UUID:
             ]
         ).upper()
 
-    def __bytes__(self):
+    def __bytes__(self) -> bytes:
         return self.to_bytes()
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, UUID):
             return self.to_bytes(force_128=True) == other.to_bytes(force_128=True)
 
@@ -262,34 +279,18 @@ class UUID:
 
         return False
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash(self.uuid_bytes)
 
-    def __str__(self):
+    def __str__(self) -> str:
+        result = self.to_hex_str(separator='-')
         if len(self.uuid_bytes) == 2:
-            uuid = struct.unpack('<H', self.uuid_bytes)[0]
-            result = f'UUID-16:{uuid:04X}'
+            result = 'UUID-16:' + result
         elif len(self.uuid_bytes) == 4:
-            uuid = struct.unpack('<I', self.uuid_bytes)[0]
-            result = f'UUID-32:{uuid:08X}'
-        else:
-            result = '-'.join(
-                [
-                    bytes(reversed(self.uuid_bytes[12:16])).hex(),
-                    bytes(reversed(self.uuid_bytes[10:12])).hex(),
-                    bytes(reversed(self.uuid_bytes[8:10])).hex(),
-                    bytes(reversed(self.uuid_bytes[6:8])).hex(),
-                    bytes(reversed(self.uuid_bytes[0:6])).hex(),
-                ]
-            ).upper()
-
+            result = 'UUID-32:' + result
         if self.name is not None:
-            return result + f' ({self.name})'
-
+            result += f' ({self.name})'
         return result
-
-    def __repr__(self):
-        return str(self)
 
 
 # -----------------------------------------------------------------------------
@@ -573,11 +574,82 @@ class DeviceClass:
         PERIPHERAL_HANDHELD_GESTURAL_INPUT_DEVICE_MINOR_DEVICE_CLASS: 'Handheld gestural input device'
     }
 
+    WEARABLE_UNCATEGORIZED_MINOR_DEVICE_CLASS = 0x00
+    WEARABLE_WRISTWATCH_MINOR_DEVICE_CLASS    = 0x01
+    WEARABLE_PAGER_MINOR_DEVICE_CLASS         = 0x02
+    WEARABLE_JACKET_MINOR_DEVICE_CLASS        = 0x03
+    WEARABLE_HELMET_MINOR_DEVICE_CLASS        = 0x04
+    WEARABLE_GLASSES_MINOR_DEVICE_CLASS       = 0x05
+
+    WEARABLE_MINOR_DEVICE_CLASS_NAMES = {
+        WEARABLE_UNCATEGORIZED_MINOR_DEVICE_CLASS: 'Uncategorized',
+        WEARABLE_WRISTWATCH_MINOR_DEVICE_CLASS:    'Wristwatch',
+        WEARABLE_PAGER_MINOR_DEVICE_CLASS:         'Pager',
+        WEARABLE_JACKET_MINOR_DEVICE_CLASS:        'Jacket',
+        WEARABLE_HELMET_MINOR_DEVICE_CLASS:        'Helmet',
+        WEARABLE_GLASSES_MINOR_DEVICE_CLASS:       'Glasses',
+    }
+
+    TOY_UNCATEGORIZED_MINOR_DEVICE_CLASS      = 0x00
+    TOY_ROBOT_MINOR_DEVICE_CLASS              = 0x01
+    TOY_VEHICLE_MINOR_DEVICE_CLASS            = 0x02
+    TOY_DOLL_ACTION_FIGURE_MINOR_DEVICE_CLASS = 0x03
+    TOY_CONTROLLER_MINOR_DEVICE_CLASS         = 0x04
+    TOY_GAME_MINOR_DEVICE_CLASS               = 0x05
+
+    TOY_MINOR_DEVICE_CLASS_NAMES = {
+        TOY_UNCATEGORIZED_MINOR_DEVICE_CLASS:      'Uncategorized',
+        TOY_ROBOT_MINOR_DEVICE_CLASS:              'Robot',
+        TOY_VEHICLE_MINOR_DEVICE_CLASS:            'Vehicle',
+        TOY_DOLL_ACTION_FIGURE_MINOR_DEVICE_CLASS: 'Doll/Action figure',
+        TOY_CONTROLLER_MINOR_DEVICE_CLASS:         'Controller',
+        TOY_GAME_MINOR_DEVICE_CLASS:               'Game',
+    }
+
+    HEALTH_UNDEFINED_MINOR_DEVICE_CLASS                 = 0x00
+    HEALTH_BLOOD_PRESSURE_MONITOR_MINOR_DEVICE_CLASS    = 0x01
+    HEALTH_THERMOMETER_MINOR_DEVICE_CLASS               = 0x02
+    HEALTH_WEIGHING_SCALE_MINOR_DEVICE_CLASS            = 0x03
+    HEALTH_GLUCOSE_METER_MINOR_DEVICE_CLASS             = 0x04
+    HEALTH_PULSE_OXIMETER_MINOR_DEVICE_CLASS            = 0x05
+    HEALTH_HEART_PULSE_RATE_MONITOR_MINOR_DEVICE_CLASS  = 0x06
+    HEALTH_HEALTH_DATA_DISPLAY_MINOR_DEVICE_CLASS       = 0x07
+    HEALTH_STEP_COUNTER_MINOR_DEVICE_CLASS              = 0x08
+    HEALTH_BODY_COMPOSITION_ANALYZER_MINOR_DEVICE_CLASS = 0x09
+    HEALTH_PEAK_FLOW_MONITOR_MINOR_DEVICE_CLASS         = 0x0A
+    HEALTH_MEDICATION_MONITOR_MINOR_DEVICE_CLASS        = 0x0B
+    HEALTH_KNEE_PROSTHESIS_MINOR_DEVICE_CLASS           = 0x0C
+    HEALTH_ANKLE_PROSTHESIS_MINOR_DEVICE_CLASS          = 0x0D
+    HEALTH_GENERIC_HEALTH_MANAGER_MINOR_DEVICE_CLASS    = 0x0E
+    HEALTH_PERSONAL_MOBILITY_DEVICE_MINOR_DEVICE_CLASS  = 0x0F
+
+    HEALTH_MINOR_DEVICE_CLASS_NAMES = {
+        HEALTH_UNDEFINED_MINOR_DEVICE_CLASS:                 'Undefined',
+        HEALTH_BLOOD_PRESSURE_MONITOR_MINOR_DEVICE_CLASS:    'Blood Pressure Monitor',
+        HEALTH_THERMOMETER_MINOR_DEVICE_CLASS:               'Thermometer',
+        HEALTH_WEIGHING_SCALE_MINOR_DEVICE_CLASS:            'Weighing Scale',
+        HEALTH_GLUCOSE_METER_MINOR_DEVICE_CLASS:             'Glucose Meter',
+        HEALTH_PULSE_OXIMETER_MINOR_DEVICE_CLASS:            'Pulse Oximeter',
+        HEALTH_HEART_PULSE_RATE_MONITOR_MINOR_DEVICE_CLASS:  'Heart/Pulse Rate Monitor',
+        HEALTH_HEALTH_DATA_DISPLAY_MINOR_DEVICE_CLASS:       'Health Data Display',
+        HEALTH_STEP_COUNTER_MINOR_DEVICE_CLASS:              'Step Counter',
+        HEALTH_BODY_COMPOSITION_ANALYZER_MINOR_DEVICE_CLASS: 'Body Composition Analyzer',
+        HEALTH_PEAK_FLOW_MONITOR_MINOR_DEVICE_CLASS:         'Peak Flow Monitor',
+        HEALTH_MEDICATION_MONITOR_MINOR_DEVICE_CLASS:        'Medication Monitor',
+        HEALTH_KNEE_PROSTHESIS_MINOR_DEVICE_CLASS:           'Knee Prosthesis',
+        HEALTH_ANKLE_PROSTHESIS_MINOR_DEVICE_CLASS:          'Ankle Prosthesis',
+        HEALTH_GENERIC_HEALTH_MANAGER_MINOR_DEVICE_CLASS:    'Generic Health Manager',
+        HEALTH_PERSONAL_MOBILITY_DEVICE_MINOR_DEVICE_CLASS:  'Personal Mobility Device',
+    }
+
     MINOR_DEVICE_CLASS_NAMES = {
         COMPUTER_MAJOR_DEVICE_CLASS:    COMPUTER_MINOR_DEVICE_CLASS_NAMES,
         PHONE_MAJOR_DEVICE_CLASS:       PHONE_MINOR_DEVICE_CLASS_NAMES,
         AUDIO_VIDEO_MAJOR_DEVICE_CLASS: AUDIO_VIDEO_MINOR_DEVICE_CLASS_NAMES,
-        PERIPHERAL_MAJOR_DEVICE_CLASS:  PERIPHERAL_MINOR_DEVICE_CLASS_NAMES
+        PERIPHERAL_MAJOR_DEVICE_CLASS:  PERIPHERAL_MINOR_DEVICE_CLASS_NAMES,
+        WEARABLE_MAJOR_DEVICE_CLASS:    WEARABLE_MINOR_DEVICE_CLASS_NAMES,
+        TOY_MAJOR_DEVICE_CLASS:         TOY_MINOR_DEVICE_CLASS_NAMES,
+        HEALTH_MAJOR_DEVICE_CLASS:      HEALTH_MINOR_DEVICE_CLASS_NAMES,
     }
 
     # fmt: on
@@ -773,7 +845,7 @@ class AdvertisingData:
     def uuid_list_to_objects(ad_data: bytes, uuid_size: int) -> List[UUID]:
         uuids = []
         offset = 0
-        while (uuid_size * (offset + 1)) <= len(ad_data):
+        while (offset + uuid_size) <= len(ad_data):
             uuids.append(UUID.from_bytes(ad_data[offset : offset + uuid_size]))
             offset += uuid_size
         return uuids

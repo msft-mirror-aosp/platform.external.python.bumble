@@ -36,6 +36,9 @@ nav:
     - HCI Socket: transports/hci_socket.md
     - Android Emulator: transports/android_emulator.md
     - File: transports/file.md
+  - Drivers:
+    - Overview: drivers/index.md
+    - Realtek: drivers/realtek.md
   - API:
     - Guide: api/guide.md
     - Examples: api/examples.md
@@ -44,6 +47,7 @@ nav:
     - Overview: apps_and_tools/index.md
     - Console: apps_and_tools/console.md
     - Bench: apps_and_tools/bench.md
+    - Speaker: apps_and_tools/speaker.md
     - HCI Bridge: apps_and_tools/hci_bridge.md
     - Golden Gate Bridge: apps_and_tools/gg_bridge.md
     - Show: apps_and_tools/show.md
@@ -60,8 +64,12 @@ nav:
     - Linux: platforms/linux.md
     - Windows: platforms/windows.md
     - Android: platforms/android.md
+    - Zephyr: platforms/zephyr.md
   - Examples:
     - Overview: examples/index.md
+  - Extras:
+    - Overview: extras/index.md
+    - Android Remote HCI: extras/android_remote_hci.md
 
 copyright: Copyright 2021-2023 Google LLC
 

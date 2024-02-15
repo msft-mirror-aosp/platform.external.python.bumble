@@ -21,13 +21,13 @@ import os
 import random
 import pytest
 
-from bumble.controller import Controller
-from bumble.link import LocalLink
-from bumble.device import Device
-from bumble.host import Host
-from bumble.transport import AsyncPipeSink
 from bumble.core import ProtocolError
-from bumble.l2cap import L2CAP_Connection_Request
+from bumble.l2cap import (
+    L2CAP_Connection_Request,
+    ClassicChannelSpec,
+    LeCreditBasedChannelSpec,
+)
+from .test_utils import TwoDevices
 
 
 # -----------------------------------------------------------------------------
@@ -37,60 +37,6 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
-class TwoDevices:
-    def __init__(self):
-        self.connections = [None, None]
-
-        self.link = LocalLink()
-        self.controllers = [
-            Controller('C1', link=self.link),
-            Controller('C2', link=self.link),
-        ]
-        self.devices = [
-            Device(
-                address='F0:F1:F2:F3:F4:F5',
-                host=Host(self.controllers[0], AsyncPipeSink(self.controllers[0])),
-            ),
-            Device(
-                address='F5:F4:F3:F2:F1:F0',
-                host=Host(self.controllers[1], AsyncPipeSink(self.controllers[1])),
-            ),
-        ]
-
-        self.paired = [None, None]
-
-    def on_connection(self, which, connection):
-        self.connections[which] = connection
-
-    def on_paired(self, which, keys):
-        self.paired[which] = keys
-
-
-# -----------------------------------------------------------------------------
-async def setup_connection():
-    # Create two devices, each with a controller, attached to the same link
-    two_devices = TwoDevices()
-
-    # Attach listeners
-    two_devices.devices[0].on(
-        'connection', lambda connection: two_devices.on_connection(0, connection)
-    )
-    two_devices.devices[1].on(
-        'connection', lambda connection: two_devices.on_connection(1, connection)
-    )
-
-    # Start
-    await two_devices.devices[0].power_on()
-    await two_devices.devices[1].power_on()
-
-    # Connect the two devices
-    await two_devices.devices[0].connect(two_devices.devices[1].random_address)
-
-    # Check the post conditions
-    assert two_devices.connections[0] is not None
-    assert two_devices.connections[1] is not None
-
-    return two_devices
 
 
 # -----------------------------------------------------------------------------
@@ -132,12 +78,15 @@ def test_helpers():
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_basic_connection():
-    devices = await setup_connection()
+    devices = TwoDevices()
+    await devices.setup_connection()
     psm = 1234
 
     # Check that if there's no one listening, we can't connect
     with pytest.raises(ProtocolError):
-        l2cap_channel = await devices.connections[0].open_l2cap_channel(psm)
+        l2cap_channel = await devices.connections[0].create_l2cap_channel(
+            spec=LeCreditBasedChannelSpec(psm)
+        )
 
     # Now add a listener
     incoming_channel = None
@@ -152,8 +101,12 @@ async def test_basic_connection():
 
         channel.sink = on_data
 
-    devices.devices[1].register_l2cap_channel_server(psm, on_coc)
-    l2cap_channel = await devices.connections[0].open_l2cap_channel(psm)
+    devices.devices[1].create_l2cap_server(
+        spec=LeCreditBasedChannelSpec(psm=1234), handler=on_coc
+    )
+    l2cap_channel = await devices.connections[0].create_l2cap_channel(
+        spec=LeCreditBasedChannelSpec(psm)
+    )
 
     messages = (bytes([1, 2, 3]), bytes([4, 5, 6]), bytes(10000))
     for message in messages:
@@ -184,7 +137,8 @@ async def test_basic_connection():
 
 # -----------------------------------------------------------------------------
 async def transfer_payload(max_credits, mtu, mps):
-    devices = await setup_connection()
+    devices = TwoDevices()
+    await devices.setup_connection()
 
     received = []
 
@@ -194,10 +148,13 @@ async def transfer_payload(max_credits, mtu, mps):
 
         channel.sink = on_data
 
-    psm = devices.devices[1].register_l2cap_channel_server(
-        psm=0, server=on_coc, max_credits=max_credits, mtu=mtu, mps=mps
+    server = devices.devices[1].create_l2cap_server(
+        spec=LeCreditBasedChannelSpec(max_credits=max_credits, mtu=mtu, mps=mps),
+        handler=on_coc,
     )
-    l2cap_channel = await devices.connections[0].open_l2cap_channel(psm)
+    l2cap_channel = await devices.connections[0].create_l2cap_channel(
+        spec=LeCreditBasedChannelSpec(server.psm)
+    )
 
     messages = [bytes([1, 2, 3, 4, 5, 6, 7]) * x for x in (3, 10, 100, 789)]
     for message in messages:
@@ -226,7 +183,8 @@ async def test_transfer():
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_bidirectional_transfer():
-    devices = await setup_connection()
+    devices = TwoDevices()
+    await devices.setup_connection()
 
     client_received = []
     server_received = []
@@ -244,8 +202,12 @@ async def test_bidirectional_transfer():
     def on_client_data(data):
         client_received.append(data)
 
-    psm = devices.devices[1].register_l2cap_channel_server(psm=0, server=on_server_coc)
-    client_channel = await devices.connections[0].open_l2cap_channel(psm)
+    server = devices.devices[1].create_l2cap_server(
+        spec=LeCreditBasedChannelSpec(), handler=on_server_coc
+    )
+    client_channel = await devices.connections[0].create_l2cap_channel(
+        spec=LeCreditBasedChannelSpec(server.psm)
+    )
     client_channel.sink = on_client_data
 
     messages = [bytes([1, 2, 3, 4, 5, 6, 7]) * x for x in (3, 10, 100)]

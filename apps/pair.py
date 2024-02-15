@@ -24,7 +24,7 @@ from prompt_toolkit.shortcuts import PromptSession
 from bumble.colors import color
 from bumble.device import Device, Peer
 from bumble.transport import open_transport_or_link
-from bumble.smp import PairingDelegate, PairingConfig
+from bumble.pairing import PairingDelegate, PairingConfig
 from bumble.smp import error_name as smp_error_name
 from bumble.keys import JsonKeyStore
 from bumble.core import ProtocolError
@@ -157,6 +157,26 @@ class Delegate(PairingDelegate):
         self.print(f'### PIN: {number:0{digits}}')
         self.print('###-----------------------------------')
 
+    async def get_string(self, max_length: int):
+        await self.update_peer_name()
+
+        # Prompt a PIN (for legacy pairing in classic)
+        self.print('###-----------------------------------')
+        self.print(f'### Pairing with {self.peer_name}')
+        self.print('###-----------------------------------')
+        count = 0
+        while True:
+            response = await self.prompt('>>> Enter PIN (1-6 chars):')
+            if len(response) == 0:
+                count += 1
+                if count > 3:
+                    self.print('too many tries, stopping the pairing')
+                    return None
+
+                self.print('no PIN was entered, try again')
+                continue
+            return response
+
 
 # -----------------------------------------------------------------------------
 async def get_peer_name(peer, mode):
@@ -207,7 +227,7 @@ def on_connection(connection, request):
 
     # Listen for pairing events
     connection.on('pairing_start', on_pairing_start)
-    connection.on('pairing', on_pairing)
+    connection.on('pairing', lambda keys: on_pairing(connection.peer_address, keys))
     connection.on('pairing_failure', on_pairing_failure)
 
     # Listen for encryption changes
@@ -242,9 +262,9 @@ def on_pairing_start():
 
 
 # -----------------------------------------------------------------------------
-def on_pairing(keys):
+def on_pairing(address, keys):
     print(color('***-----------------------------------', 'cyan'))
-    print(color('*** Paired!', 'cyan'))
+    print(color(f'*** Paired! (peer identity={address})', 'cyan'))
     keys.print(prefix=color('*** ', 'cyan'))
     print(color('***-----------------------------------', 'cyan'))
     Waiter.instance.terminate()
@@ -264,6 +284,7 @@ async def pair(
     sc,
     mitm,
     bond,
+    ctkd,
     io,
     prompt,
     request,
@@ -282,27 +303,18 @@ async def pair(
         # Create a device to manage the host
         device = Device.from_config_file_with_hci(device_config, hci_source, hci_sink)
 
-        # Set a custom keystore if specified on the command line
-        if keystore_file:
-            device.keystore = JsonKeyStore(namespace=None, filename=keystore_file)
-
-        # Print the existing keys before pairing
-        if print_keys and device.keystore:
-            print(color('@@@-----------------------------------', 'blue'))
-            print(color('@@@ Pairing Keys:', 'blue'))
-            await device.keystore.print(prefix=color('@@@ ', 'blue'))
-            print(color('@@@-----------------------------------', 'blue'))
-
         # Expose a GATT characteristic that can be used to trigger pairing by
         # responding with an authentication error when read
         if mode == 'le':
+            device.le_enabled = True
             device.add_service(
                 Service(
                     '50DB505C-8AC4-4738-8448-3B1D9CC09CC5',
                     [
                         Characteristic(
                             '552957FB-CF1F-4A31-9535-E78847E1A714',
-                            Characteristic.READ | Characteristic.WRITE,
+                            Characteristic.Properties.READ
+                            | Characteristic.Properties.WRITE,
                             Characteristic.READABLE | Characteristic.WRITEABLE,
                             CharacteristicValue(
                                 read=read_with_error, write=write_with_error
@@ -315,10 +327,21 @@ async def pair(
         # Select LE or Classic
         if mode == 'classic':
             device.classic_enabled = True
-            device.le_enabled = False
+            device.classic_smp_enabled = ctkd
 
         # Get things going
         await device.power_on()
+
+        # Set a custom keystore if specified on the command line
+        if keystore_file:
+            device.keystore = JsonKeyStore.from_device(device, filename=keystore_file)
+
+        # Print the existing keys before pairing
+        if print_keys and device.keystore:
+            print(color('@@@-----------------------------------', 'blue'))
+            print(color('@@@ Pairing Keys:', 'blue'))
+            await device.keystore.print(prefix=color('@@@ ', 'blue'))
+            print(color('@@@-----------------------------------', 'blue'))
 
         # Set up a pairing config factory
         device.pairing_config_factory = lambda connection: PairingConfig(
@@ -342,8 +365,13 @@ async def pair(
                     print(color(f'Pairing failed: {error}', 'red'))
                     return
         else:
-            # Advertise so that peers can find us and connect
-            await device.start_advertising(auto_restart=True)
+            if mode == 'le':
+                # Advertise so that peers can find us and connect
+                await device.start_advertising(auto_restart=True)
+            else:
+                # Become discoverable and connectable
+                await device.set_discoverable(True)
+                await device.set_connectable(True)
 
         # Run until the user asks to exit
         await Waiter.instance.wait_until_terminated()
@@ -379,6 +407,13 @@ class LogHandler(logging.Handler):
     '--bond', type=bool, default=True, help='Enable bonding', show_default=True
 )
 @click.option(
+    '--ctkd',
+    type=bool,
+    default=True,
+    help='Enable CTKD',
+    show_default=True,
+)
+@click.option(
     '--io',
     type=click.Choice(
         ['keyboard', 'display', 'display+keyboard', 'display+yes/no', 'none']
@@ -404,6 +439,7 @@ def main(
     sc,
     mitm,
     bond,
+    ctkd,
     io,
     prompt,
     request,
@@ -426,6 +462,7 @@ def main(
             sc,
             mitm,
             bond,
+            ctkd,
             io,
             prompt,
             request,

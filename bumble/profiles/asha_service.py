@@ -19,6 +19,8 @@
 import struct
 import logging
 from typing import List
+
+from bumble import l2cap
 from ..core import AdvertisingData
 from ..device import Device, Connection
 from ..gatt import (
@@ -103,7 +105,7 @@ class AshaService(TemplateService):
 
         self.read_only_properties_characteristic = Characteristic(
             GATT_ASHA_READ_ONLY_PROPERTIES_CHARACTERISTIC,
-            Characteristic.READ,
+            Characteristic.Properties.READ,
             Characteristic.READABLE,
             bytes(
                 [
@@ -120,19 +122,20 @@ class AshaService(TemplateService):
 
         self.audio_control_point_characteristic = Characteristic(
             GATT_ASHA_AUDIO_CONTROL_POINT_CHARACTERISTIC,
-            Characteristic.WRITE | Characteristic.WRITE_WITHOUT_RESPONSE,
+            Characteristic.Properties.WRITE
+            | Characteristic.Properties.WRITE_WITHOUT_RESPONSE,
             Characteristic.WRITEABLE,
             CharacteristicValue(write=on_audio_control_point_write),
         )
         self.audio_status_characteristic = Characteristic(
             GATT_ASHA_AUDIO_STATUS_CHARACTERISTIC,
-            Characteristic.READ | Characteristic.NOTIFY,
+            Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
             Characteristic.READABLE,
             bytes([0]),
         )
         self.volume_characteristic = Characteristic(
             GATT_ASHA_VOLUME_CHARACTERISTIC,
-            Characteristic.WRITE_WITHOUT_RESPONSE,
+            Characteristic.Properties.WRITE_WITHOUT_RESPONSE,
             Characteristic.WRITEABLE,
             CharacteristicValue(write=on_volume_write),
         )
@@ -148,10 +151,13 @@ class AshaService(TemplateService):
             channel.sink = on_data
 
         # let the server find a free PSM
-        self.psm = self.device.register_l2cap_channel_server(self.psm, on_coc, 8)
+        self.psm = device.create_l2cap_server(
+            spec=l2cap.LeCreditBasedChannelSpec(psm=self.psm, max_credits=8),
+            handler=on_coc,
+        ).psm
         self.le_psm_out_characteristic = Characteristic(
             GATT_ASHA_LE_PSM_OUT_CHARACTERISTIC,
-            Characteristic.READ,
+            Characteristic.Properties.READ,
             Characteristic.READABLE,
             struct.pack('<H', self.psm),
         )
