@@ -23,8 +23,10 @@ import pytest
 from typing import Tuple
 
 from .test_utils import TwoDevices
+from bumble import core
 from bumble import hfp
 from bumble import rfcomm
+from bumble import hci
 
 
 # -----------------------------------------------------------------------------
@@ -43,12 +45,10 @@ async def make_hfp_connections(
 
     # Setup RFCOMM channel
     wait_dlc = asyncio.get_running_loop().create_future()
-    rfcomm_channel = rfcomm.Server(devices.devices[0]).listen(
-        lambda dlc: wait_dlc.set_result(dlc)
-    )
+    rfcomm_channel = rfcomm.Server(devices.devices[0]).listen(wait_dlc.set_result)
     assert devices.connections[0]
     assert devices.connections[1]
-    client_mux = await rfcomm.Client(devices.devices[1], devices.connections[1]).start()
+    client_mux = await rfcomm.Client(devices.connections[1]).start()
 
     client_dlc = await client_mux.open_dlc(rfcomm_channel)
     server_dlc = await wait_dlc
@@ -87,6 +87,68 @@ async def test_slc():
 
     await hf.initiate_slc()
     ag_task.cancel()
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_sco_setup():
+    devices = TwoDevices()
+
+    # Enable Classic connections
+    devices[0].classic_enabled = True
+    devices[1].classic_enabled = True
+
+    # Start
+    await devices[0].power_on()
+    await devices[1].power_on()
+
+    connections = await asyncio.gather(
+        devices[0].connect(
+            devices[1].public_address, transport=core.BT_BR_EDR_TRANSPORT
+        ),
+        devices[1].accept(devices[0].public_address),
+    )
+
+    def on_sco_request(_connection, _link_type: int):
+        connections[1].abort_on(
+            'disconnection',
+            devices[1].send_command(
+                hci.HCI_Enhanced_Accept_Synchronous_Connection_Request_Command(
+                    bd_addr=connections[1].peer_address,
+                    **hfp.ESCO_PARAMETERS[
+                        hfp.DefaultCodecParameters.ESCO_CVSD_S1
+                    ].asdict(),
+                )
+            ),
+        )
+
+    devices[1].on('sco_request', on_sco_request)
+
+    sco_connection_futures = [
+        asyncio.get_running_loop().create_future(),
+        asyncio.get_running_loop().create_future(),
+    ]
+
+    for device, future in zip(devices, sco_connection_futures):
+        device.on('sco_connection', future.set_result)
+
+    await devices[0].send_command(
+        hci.HCI_Enhanced_Setup_Synchronous_Connection_Command(
+            connection_handle=connections[0].handle,
+            **hfp.ESCO_PARAMETERS[hfp.DefaultCodecParameters.ESCO_CVSD_S1].asdict(),
+        )
+    )
+    sco_connections = await asyncio.gather(*sco_connection_futures)
+
+    sco_disconnection_futures = [
+        asyncio.get_running_loop().create_future(),
+        asyncio.get_running_loop().create_future(),
+    ]
+    for future, sco_connection in zip(sco_disconnection_futures, sco_connections):
+        sco_connection.on('disconnection', future.set_result)
+
+    await sco_connections[0].disconnect()
+    await asyncio.gather(*sco_disconnection_futures)
 
 
 # -----------------------------------------------------------------------------
