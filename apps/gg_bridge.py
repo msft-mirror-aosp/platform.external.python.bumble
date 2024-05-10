@@ -21,6 +21,7 @@ import struct
 import logging
 import click
 
+from bumble import l2cap
 from bumble.colors import color
 from bumble.device import Device, Peer
 from bumble.core import AdvertisingData
@@ -204,7 +205,7 @@ class GattlinkHubBridge(GattlinkL2capEndpoint, Device.Listener):
 
 # -----------------------------------------------------------------------------
 class GattlinkNodeBridge(GattlinkL2capEndpoint, Device.Listener):
-    def __init__(self, device):
+    def __init__(self, device: Device):
         super().__init__()
         self.device = device
         self.peer = None
@@ -218,7 +219,12 @@ class GattlinkNodeBridge(GattlinkL2capEndpoint, Device.Listener):
 
         # Listen for incoming L2CAP CoC connections
         psm = 0xFB
-        device.register_l2cap_channel_server(0xFB, self.on_coc)
+        device.create_l2cap_server(
+            spec=l2cap.LeCreditBasedChannelSpec(
+                psm=0xFB,
+            ),
+            handler=self.on_coc,
+        )
         print(f'### Listening for CoC connection on PSM {psm}')
 
         # Setup the Gattlink service
@@ -230,13 +236,13 @@ class GattlinkNodeBridge(GattlinkL2capEndpoint, Device.Listener):
         )
         self.tx_characteristic = Characteristic(
             GG_GATTLINK_TX_CHARACTERISTIC_UUID,
-            Characteristic.NOTIFY,
+            Characteristic.Properties.NOTIFY,
             Characteristic.READABLE,
         )
         self.tx_characteristic.on('subscription', self.on_tx_subscription)
         self.psm_characteristic = Characteristic(
             GG_GATTLINK_L2CAP_CHANNEL_PSM_CHARACTERISTIC_UUID,
-            Characteristic.READ | Characteristic.NOTIFY,
+            Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
             Characteristic.READABLE,
             bytes([psm, 0]),
         )
@@ -339,8 +345,7 @@ async def run(
 
         # Create a UDP to TX bridge (receive from TX, send to UDP)
         bridge.tx_socket, _ = await loop.create_datagram_endpoint(
-            # pylint: disable-next=unnecessary-lambda
-            lambda: asyncio.DatagramProtocol(),
+            asyncio.DatagramProtocol,
             remote_addr=(send_host, send_port),
         )
 

@@ -19,13 +19,20 @@ import logging
 import asyncio
 from functools import partial
 
+from bumble.core import BT_PERIPHERAL_ROLE, BT_BR_EDR_TRANSPORT, BT_LE_TRANSPORT
 from bumble.colors import color
 from bumble.hci import (
     Address,
     HCI_SUCCESS,
     HCI_CONNECTION_ACCEPT_TIMEOUT_ERROR,
     HCI_CONNECTION_TIMEOUT_ERROR,
+    HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR,
+    HCI_PAGE_TIMEOUT_ERROR,
+    HCI_Connection_Complete_Event,
 )
+from bumble import controller
+
+from typing import Optional, Set
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -54,9 +61,16 @@ class LocalLink:
     Link bus for controllers to communicate with each other
     '''
 
+    controllers: Set[controller.Controller]
+
     def __init__(self):
         self.controllers = set()
         self.pending_connection = None
+        self.pending_classic_connection = None
+
+    ############################################################
+    # Common utils
+    ############################################################
 
     def add_controller(self, controller):
         logger.debug(f'new controller: {controller}')
@@ -71,11 +85,23 @@ class LocalLink:
                 return controller
         return None
 
-    def on_address_changed(self, controller):
-        pass
+    def find_classic_controller(
+        self, address: Address
+    ) -> Optional[controller.Controller]:
+        for controller in self.controllers:
+            if controller.public_address == address:
+                return controller
+        return None
 
     def get_pending_connection(self):
         return self.pending_connection
+
+    ############################################################
+    # LE handlers
+    ############################################################
+
+    def on_address_changed(self, controller):
+        pass
 
     def send_advertising_data(self, sender_address, data):
         # Send the advertising data to all controllers, except the sender
@@ -83,10 +109,17 @@ class LocalLink:
             if controller.random_address != sender_address:
                 controller.on_link_advertising_data(sender_address, data)
 
-    def send_acl_data(self, sender_address, destination_address, data):
+    def send_acl_data(self, sender_controller, destination_address, transport, data):
         # Send the data to the first controller with a matching address
-        if controller := self.find_controller(destination_address):
-            controller.on_link_acl_data(sender_address, data)
+        if transport == BT_LE_TRANSPORT:
+            destination_controller = self.find_controller(destination_address)
+            source_address = sender_controller.random_address
+        elif transport == BT_BR_EDR_TRANSPORT:
+            destination_controller = self.find_classic_controller(destination_address)
+            source_address = sender_controller.public_address
+
+        if destination_controller is not None:
+            destination_controller.on_link_acl_data(source_address, transport, data)
 
     def on_connection_complete(self):
         # Check that we expect this call
@@ -163,6 +196,189 @@ class LocalLink:
         if peripheral_controller := self.find_controller(peripheral_address):
             peripheral_controller.on_link_encrypted(central_address, rand, ediv, ltk)
 
+    def create_cis(
+        self,
+        central_controller: controller.Controller,
+        peripheral_address: Address,
+        cig_id: int,
+        cis_id: int,
+    ) -> None:
+        logger.debug(
+            f'$$$ CIS Request {central_controller.random_address} -> {peripheral_address}'
+        )
+        if peripheral_controller := self.find_controller(peripheral_address):
+            asyncio.get_running_loop().call_soon(
+                peripheral_controller.on_link_cis_request,
+                central_controller.random_address,
+                cig_id,
+                cis_id,
+            )
+
+    def accept_cis(
+        self,
+        peripheral_controller: controller.Controller,
+        central_address: Address,
+        cig_id: int,
+        cis_id: int,
+    ) -> None:
+        logger.debug(
+            f'$$$ CIS Accept {peripheral_controller.random_address} -> {central_address}'
+        )
+        if central_controller := self.find_controller(central_address):
+            asyncio.get_running_loop().call_soon(
+                central_controller.on_link_cis_established, cig_id, cis_id
+            )
+            asyncio.get_running_loop().call_soon(
+                peripheral_controller.on_link_cis_established, cig_id, cis_id
+            )
+
+    def disconnect_cis(
+        self,
+        initiator_controller: controller.Controller,
+        peer_address: Address,
+        cig_id: int,
+        cis_id: int,
+    ) -> None:
+        logger.debug(
+            f'$$$ CIS Disconnect {initiator_controller.random_address} -> {peer_address}'
+        )
+        if peer_controller := self.find_controller(peer_address):
+            asyncio.get_running_loop().call_soon(
+                initiator_controller.on_link_cis_disconnected, cig_id, cis_id
+            )
+            asyncio.get_running_loop().call_soon(
+                peer_controller.on_link_cis_disconnected, cig_id, cis_id
+            )
+
+    ############################################################
+    # Classic handlers
+    ############################################################
+
+    def classic_connect(self, initiator_controller, responder_address):
+        logger.debug(
+            f'[Classic] {initiator_controller.public_address} connects to {responder_address}'
+        )
+        responder_controller = self.find_classic_controller(responder_address)
+        if responder_controller is None:
+            initiator_controller.on_classic_connection_complete(
+                responder_address, HCI_PAGE_TIMEOUT_ERROR
+            )
+            return
+        self.pending_classic_connection = (initiator_controller, responder_controller)
+
+        responder_controller.on_classic_connection_request(
+            initiator_controller.public_address,
+            HCI_Connection_Complete_Event.ACL_LINK_TYPE,
+        )
+
+    def classic_accept_connection(
+        self, responder_controller, initiator_address, responder_role
+    ):
+        logger.debug(
+            f'[Classic] {responder_controller.public_address} accepts to connect {initiator_address}'
+        )
+        initiator_controller = self.find_classic_controller(initiator_address)
+        if initiator_controller is None:
+            responder_controller.on_classic_connection_complete(
+                responder_controller.public_address, HCI_PAGE_TIMEOUT_ERROR
+            )
+            return
+
+        async def task():
+            if responder_role != BT_PERIPHERAL_ROLE:
+                initiator_controller.on_classic_role_change(
+                    responder_controller.public_address, int(not (responder_role))
+                )
+            initiator_controller.on_classic_connection_complete(
+                responder_controller.public_address, HCI_SUCCESS
+            )
+
+        asyncio.create_task(task())
+        responder_controller.on_classic_role_change(
+            initiator_controller.public_address, responder_role
+        )
+        responder_controller.on_classic_connection_complete(
+            initiator_controller.public_address, HCI_SUCCESS
+        )
+        self.pending_classic_connection = None
+
+    def classic_disconnect(self, initiator_controller, responder_address, reason):
+        logger.debug(
+            f'[Classic] {initiator_controller.public_address} disconnects {responder_address}'
+        )
+        responder_controller = self.find_classic_controller(responder_address)
+
+        async def task():
+            initiator_controller.on_classic_disconnected(responder_address, reason)
+
+        asyncio.create_task(task())
+        responder_controller.on_classic_disconnected(
+            initiator_controller.public_address, reason
+        )
+
+    def classic_switch_role(
+        self, initiator_controller, responder_address, initiator_new_role
+    ):
+        responder_controller = self.find_classic_controller(responder_address)
+        if responder_controller is None:
+            return
+
+        async def task():
+            initiator_controller.on_classic_role_change(
+                responder_address, initiator_new_role
+            )
+
+        asyncio.create_task(task())
+        responder_controller.on_classic_role_change(
+            initiator_controller.public_address, int(not (initiator_new_role))
+        )
+
+    def classic_sco_connect(
+        self,
+        initiator_controller: controller.Controller,
+        responder_address: Address,
+        link_type: int,
+    ):
+        logger.debug(
+            f'[Classic] {initiator_controller.public_address} connects SCO to {responder_address}'
+        )
+        responder_controller = self.find_classic_controller(responder_address)
+        # Initiator controller should handle it.
+        assert responder_controller
+
+        responder_controller.on_classic_connection_request(
+            initiator_controller.public_address,
+            link_type,
+        )
+
+    def classic_accept_sco_connection(
+        self,
+        responder_controller: controller.Controller,
+        initiator_address: Address,
+        link_type: int,
+    ):
+        logger.debug(
+            f'[Classic] {responder_controller.public_address} accepts to connect SCO {initiator_address}'
+        )
+        initiator_controller = self.find_classic_controller(initiator_address)
+        if initiator_controller is None:
+            responder_controller.on_classic_sco_connection_complete(
+                responder_controller.public_address,
+                HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR,
+                link_type,
+            )
+            return
+
+        async def task():
+            initiator_controller.on_classic_sco_connection_complete(
+                responder_controller.public_address, HCI_SUCCESS, link_type
+            )
+
+        asyncio.create_task(task())
+        responder_controller.on_classic_sco_connection_complete(
+            initiator_controller.public_address, HCI_SUCCESS, link_type
+        )
+
 
 # -----------------------------------------------------------------------------
 class RemoteLink:
@@ -199,6 +415,9 @@ class RemoteLink:
 
     def get_pending_connection(self):
         return self.pending_connection
+
+    def get_pending_classic_connection(self):
+        return self.pending_classic_connection
 
     async def wait_until_connected(self):
         await self.websocket
@@ -366,7 +585,8 @@ class RemoteLink:
     async def send_acl_data_to_relay(self, peer_address, data):
         await self.send_targeted_message(peer_address, f'acl:{data.hex()}')
 
-    def send_acl_data(self, _, peer_address, data):
+    def send_acl_data(self, _, peer_address, _transport, data):
+        # TODO: handle different transport
         self.execute(partial(self.send_acl_data_to_relay, peer_address, data))
 
     async def send_connection_request_to_relay(self, peer_address):

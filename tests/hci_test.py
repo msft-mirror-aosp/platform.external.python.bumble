@@ -23,13 +23,18 @@ from bumble.hci import (
     HCI_LE_READ_BUFFER_SIZE_COMMAND,
     HCI_RESET_COMMAND,
     HCI_SUCCESS,
+    HCI_LE_CONNECTION_COMPLETE_EVENT,
+    HCI_LE_ENHANCED_CONNECTION_COMPLETE_V2_EVENT,
     Address,
+    CodingFormat,
+    CodecID,
     HCI_Command,
     HCI_Command_Complete_Event,
     HCI_Command_Status_Event,
     HCI_CustomPacket,
     HCI_Disconnect_Command,
     HCI_Event,
+    HCI_IsoDataPacket,
     HCI_LE_Add_Device_To_Filter_Accept_List_Command,
     HCI_LE_Advertising_Report_Event,
     HCI_LE_Channel_Selection_Algorithm_Event,
@@ -46,12 +51,15 @@ from bumble.hci import (
     HCI_LE_Set_Advertising_Parameters_Command,
     HCI_LE_Set_Default_PHY_Command,
     HCI_LE_Set_Event_Mask_Command,
+    HCI_LE_Set_Extended_Advertising_Enable_Command,
     HCI_LE_Set_Extended_Scan_Parameters_Command,
     HCI_LE_Set_Random_Address_Command,
     HCI_LE_Set_Scan_Enable_Command,
     HCI_LE_Set_Scan_Parameters_Command,
+    HCI_LE_Setup_ISO_Data_Path_Command,
     HCI_Number_Of_Completed_Packets_Event,
     HCI_Packet,
+    HCI_PIN_Code_Request_Reply_Command,
     HCI_Read_Local_Supported_Commands_Command,
     HCI_Read_Local_Supported_Features_Command,
     HCI_Read_Local_Version_Information_Command,
@@ -213,6 +221,23 @@ def test_HCI_Command():
 
 
 # -----------------------------------------------------------------------------
+def test_HCI_PIN_Code_Request_Reply_Command():
+    pin_code = b'1234'
+    pin_code_length = len(pin_code)
+    # here to make the test pass, we need to
+    # pad pin_code, as HCI_Object.format_fields
+    # does not do it for us
+    padded_pin_code = pin_code + bytes(16 - pin_code_length)
+    command = HCI_PIN_Code_Request_Reply_Command(
+        bd_addr=Address(
+            '00:11:22:33:44:55', address_type=Address.PUBLIC_DEVICE_ADDRESS
+        ),
+        pin_code_length=pin_code_length,
+        pin_code=padded_pin_code,
+    )
+    basic_check(command)
+
+
 def test_HCI_Reset_Command():
     command = HCI_Reset_Command()
     basic_check(command)
@@ -251,8 +276,14 @@ def test_HCI_Set_Event_Mask_Command():
 # -----------------------------------------------------------------------------
 def test_HCI_LE_Set_Event_Mask_Command():
     command = HCI_LE_Set_Event_Mask_Command(
-        le_event_mask=bytes.fromhex('0011223344556677')
+        le_event_mask=HCI_LE_Set_Event_Mask_Command.mask(
+            [
+                HCI_LE_CONNECTION_COMPLETE_EVENT,
+                HCI_LE_ENHANCED_CONNECTION_COMPLETE_V2_EVENT,
+            ]
+        )
     )
+    assert command.le_event_mask == bytes.fromhex('0100000000010000')
     basic_check(command)
 
 
@@ -405,6 +436,47 @@ def test_HCI_LE_Set_Extended_Scan_Parameters_Command():
 
 
 # -----------------------------------------------------------------------------
+def test_HCI_LE_Set_Extended_Advertising_Enable_Command():
+    command = HCI_Packet.from_bytes(
+        bytes.fromhex('0139200e010301050008020600090307000a')
+    )
+    assert command.enable == 1
+    assert command.advertising_handles == [1, 2, 3]
+    assert command.durations == [5, 6, 7]
+    assert command.max_extended_advertising_events == [8, 9, 10]
+
+    command = HCI_LE_Set_Extended_Advertising_Enable_Command(
+        enable=1,
+        advertising_handles=[1, 2, 3],
+        durations=[5, 6, 7],
+        max_extended_advertising_events=[8, 9, 10],
+    )
+    basic_check(command)
+
+
+# -----------------------------------------------------------------------------
+def test_HCI_LE_Setup_ISO_Data_Path_Command():
+    command = HCI_Packet.from_bytes(bytes.fromhex('016e200d60000001030000000000000000'))
+
+    assert command.connection_handle == 0x0060
+    assert command.data_path_direction == 0x00
+    assert command.data_path_id == 0x01
+    assert command.codec_id == CodingFormat(CodecID.TRANSPARENT)
+    assert command.controller_delay == 0
+    assert command.codec_configuration == b''
+
+    command = HCI_LE_Setup_ISO_Data_Path_Command(
+        connection_handle=0x0060,
+        data_path_direction=0x00,
+        data_path_id=0x01,
+        codec_id=CodingFormat(CodecID.TRANSPARENT),
+        controller_delay=0x00,
+        codec_configuration=b'',
+    )
+    basic_check(command)
+
+
+# -----------------------------------------------------------------------------
 def test_address():
     a = Address('C4:F2:17:1A:1D:BB')
     assert not a.is_public
@@ -424,6 +496,29 @@ def test_custom():
 
 
 # -----------------------------------------------------------------------------
+def test_iso_data_packet():
+    data = bytes.fromhex(
+        '05616044002ac9f0a193003c00e83b477b00eba8d41dc018bf1a980f0290afe1e7c37652096697'
+        '52b6a535a8df61e22931ef5a36281bc77ed6a3206d984bcdabee6be831c699cb50e2'
+    )
+    packet = HCI_IsoDataPacket.from_bytes(data)
+    assert packet.connection_handle == 0x0061
+    assert packet.packet_status_flag == 0
+    assert packet.pb_flag == 0x02
+    assert packet.ts_flag == 0x01
+    assert packet.data_total_length == 68
+    assert packet.time_stamp == 2716911914
+    assert packet.packet_sequence_number == 147
+    assert packet.iso_sdu_length == 60
+    assert packet.iso_sdu_fragment == bytes.fromhex(
+        'e83b477b00eba8d41dc018bf1a980f0290afe1e7c3765209669752b6a535a8df61e22931ef5a3'
+        '6281bc77ed6a3206d984bcdabee6be831c699cb50e2'
+    )
+
+    assert packet.to_bytes() == data
+
+
+# -----------------------------------------------------------------------------
 def run_test_events():
     test_HCI_Event()
     test_HCI_LE_Connection_Complete_Event()
@@ -440,6 +535,7 @@ def run_test_events():
 def run_test_commands():
     test_HCI_Command()
     test_HCI_Reset_Command()
+    test_HCI_PIN_Code_Request_Reply_Command()
     test_HCI_Read_Local_Version_Information_Command()
     test_HCI_Read_Local_Supported_Commands_Command()
     test_HCI_Read_Local_Supported_Features_Command()
@@ -459,6 +555,8 @@ def run_test_commands():
     test_HCI_LE_Read_Remote_Features_Command()
     test_HCI_LE_Set_Default_PHY_Command()
     test_HCI_LE_Set_Extended_Scan_Parameters_Command()
+    test_HCI_LE_Set_Extended_Advertising_Enable_Command()
+    test_HCI_LE_Setup_ISO_Data_Path_Command()
 
 
 # -----------------------------------------------------------------------------
@@ -467,3 +565,4 @@ if __name__ == '__main__':
     run_test_commands()
     test_address()
     test_custom()
+    test_iso_data_packet()

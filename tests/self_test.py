@@ -21,19 +21,24 @@ import logging
 import os
 import pytest
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from bumble.controller import Controller
+from bumble.core import BT_BR_EDR_TRANSPORT, BT_PERIPHERAL_ROLE, BT_CENTRAL_ROLE
 from bumble.link import LocalLink
 from bumble.device import Device, Peer
 from bumble.host import Host
 from bumble.gatt import Service, Characteristic
 from bumble.transport import AsyncPipeSink
+from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.smp import (
-    PairingConfig,
-    PairingDelegate,
     SMP_PAIRING_NOT_SUPPORTED_ERROR,
     SMP_CONFIRM_VALUE_FAILED_ERROR,
+    OobContext,
+    OobLegacyContext,
 )
 from bumble.core import ProtocolError
+from bumble.keys import PairingKeys
 
 
 # -----------------------------------------------------------------------------
@@ -47,29 +52,33 @@ class TwoDevices:
     def __init__(self):
         self.connections = [None, None]
 
+        addresses = ['F0:F1:F2:F3:F4:F5', 'F5:F4:F3:F2:F1:F0']
         self.link = LocalLink()
         self.controllers = [
-            Controller('C1', link=self.link),
-            Controller('C2', link=self.link),
+            Controller('C1', link=self.link, public_address=addresses[0]),
+            Controller('C2', link=self.link, public_address=addresses[1]),
         ]
         self.devices = [
             Device(
-                address='F0:F1:F2:F3:F4:F5',
+                address=addresses[0],
                 host=Host(self.controllers[0], AsyncPipeSink(self.controllers[0])),
             ),
             Device(
-                address='F5:F4:F3:F2:F1:F0',
+                address=addresses[1],
                 host=Host(self.controllers[1], AsyncPipeSink(self.controllers[1])),
             ),
         ]
 
-        self.paired = [None, None]
+        self.paired = [
+            asyncio.get_event_loop().create_future(),
+            asyncio.get_event_loop().create_future(),
+        ]
 
     def on_connection(self, which, connection):
         self.connections[which] = connection
 
-    def on_paired(self, which, keys):
-        self.paired[which] = keys
+    def on_paired(self, which: int, keys: PairingKeys):
+        self.paired[which].set_result(keys)
 
 
 # -----------------------------------------------------------------------------
@@ -100,6 +109,60 @@ async def test_self_connection():
 
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'responder_role,',
+    (BT_CENTRAL_ROLE, BT_PERIPHERAL_ROLE),
+)
+async def test_self_classic_connection(responder_role):
+    # Create two devices, each with a controller, attached to the same link
+    two_devices = TwoDevices()
+
+    # Attach listeners
+    two_devices.devices[0].on(
+        'connection', lambda connection: two_devices.on_connection(0, connection)
+    )
+    two_devices.devices[1].on(
+        'connection', lambda connection: two_devices.on_connection(1, connection)
+    )
+
+    # Enable Classic connections
+    two_devices.devices[0].classic_enabled = True
+    two_devices.devices[1].classic_enabled = True
+
+    # Start
+    await two_devices.devices[0].power_on()
+    await two_devices.devices[1].power_on()
+
+    # Connect the two devices
+    await asyncio.gather(
+        two_devices.devices[0].connect(
+            two_devices.devices[1].public_address, transport=BT_BR_EDR_TRANSPORT
+        ),
+        two_devices.devices[1].accept(
+            two_devices.devices[0].public_address, responder_role
+        ),
+    )
+
+    # Check the post conditions
+    assert two_devices.connections[0] is not None
+    assert two_devices.connections[1] is not None
+
+    # Check the role
+    assert two_devices.connections[0].role != responder_role
+    assert two_devices.connections[1].role == responder_role
+
+    # Role switch
+    await two_devices.connections[0].switch_role(responder_role)
+
+    # Check the role
+    assert two_devices.connections[0].role == responder_role
+    assert two_devices.connections[1].role != responder_role
+
+    await two_devices.connections[0].disconnect()
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
 async def test_self_gatt():
     # Create two devices, each with a controller, attached to the same link
     two_devices = TwoDevices()
@@ -107,32 +170,37 @@ async def test_self_gatt():
     # Add some GATT characteristics to device 1
     c1 = Characteristic(
         '3A143AD7-D4A7-436B-97D6-5B62C315E833',
-        Characteristic.READ,
+        Characteristic.Properties.READ,
         Characteristic.READABLE,
         bytes([1, 2, 3]),
     )
     c2 = Characteristic(
         '9557CCE2-DB37-46EB-94C4-50AE5B9CB0F8',
-        Characteristic.READ | Characteristic.WRITE,
+        Characteristic.Properties.READ | Characteristic.Properties.WRITE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([4, 5, 6]),
     )
     c3 = Characteristic(
         '84FC1A2E-C52D-4A2D-B8C3-8855BAB86638',
-        Characteristic.READ | Characteristic.WRITE_WITHOUT_RESPONSE,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.WRITE_WITHOUT_RESPONSE,
         Characteristic.READABLE | Characteristic.WRITEABLE,
         bytes([7, 8, 9]),
     )
     c4 = Characteristic(
         '84FC1A2E-C52D-4A2D-B8C3-8855BAB86638',
-        Characteristic.READ | Characteristic.NOTIFY | Characteristic.INDICATE,
+        Characteristic.Properties.READ
+        | Characteristic.Properties.NOTIFY
+        | Characteristic.Properties.INDICATE,
         Characteristic.READABLE,
         bytes([1, 1, 1]),
     )
 
     s1 = Service('8140E247-04F0-42C1-BC34-534C344DAFCA', [c1, c2, c3])
     s2 = Service('97210A0F-1875-4D05-9E5D-326EB171257A', [c4])
-    two_devices.devices[1].add_services([s1, s2])
+    s3 = Service('1853', [])
+    s4 = Service('3A12C182-14E2-4FE0-8C5B-65D7C569F9DB', [], included_services=[s2, s3])
+    two_devices.devices[1].add_services([s1, s2, s4])
 
     # Start
     await two_devices.devices[0].power_on()
@@ -167,6 +235,13 @@ async def test_self_gatt():
     assert result is not None
     assert result == c1.value
 
+    result = await peer.discover_service(s4.uuid)
+    assert len(result) == 1
+    result = await peer.discover_included_services(result[0])
+    assert len(result) == 2
+    # Service UUID is only present when the UUID is 16-bit Bluetooth UUID
+    assert result[1].uuid.to_bytes() == s3.uuid.to_bytes()
+
 
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -178,7 +253,7 @@ async def test_self_gatt_long_read():
     characteristics = [
         Characteristic(
             f'3A143AD7-D4A7-436B-97D6-5B62C315{i:04X}',
-            Characteristic.READ,
+            Characteristic.Properties.READ,
             Characteristic.READABLE,
             bytes([x & 255 for x in range(i)]),
         )
@@ -203,7 +278,7 @@ async def test_self_gatt_long_read():
     found_service = result[0]
     found_characteristics = await found_service.discover_characteristics()
     assert len(found_characteristics) == 513
-    for (i, characteristic) in enumerate(found_characteristics):
+    for i, characteristic in enumerate(found_characteristics):
         value = await characteristic.read_value()
         assert value == characteristics[i].value
 
@@ -252,17 +327,17 @@ async def _test_self_smp_with_configs(pairing_config1, pairing_config2):
     # Pair
     await two_devices.devices[0].pair(connection)
     assert connection.is_encrypted
-    assert two_devices.paired[0] is not None
-    assert two_devices.paired[1] is not None
+    assert await two_devices.paired[0] is not None
+    assert await two_devices.paired[1] is not None
 
 
 # -----------------------------------------------------------------------------
 IO_CAP = [
-    PairingDelegate.NO_OUTPUT_NO_INPUT,
-    PairingDelegate.KEYBOARD_INPUT_ONLY,
-    PairingDelegate.DISPLAY_OUTPUT_ONLY,
-    PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
-    PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
+    PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT,
+    PairingDelegate.IoCapability.KEYBOARD_INPUT_ONLY,
+    PairingDelegate.IoCapability.DISPLAY_OUTPUT_ONLY,
+    PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
+    PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
 ]
 SC = [False, True]
 MITM = [False, True]
@@ -276,7 +351,10 @@ KEY_DIST = range(16)
     itertools.chain(
         itertools.product([IO_CAP], SC, MITM, [15]),
         itertools.product(
-            [[PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT]], SC, MITM, KEY_DIST
+            [[PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT]],
+            SC,
+            MITM,
+            KEY_DIST,
         ),
     ),
 )
@@ -319,7 +397,7 @@ async def test_self_smp(io_caps, sc, mitm, key_dist):
             else:
                 if (
                     self.peer_delegate.io_capability
-                    == PairingDelegate.KEYBOARD_INPUT_ONLY
+                    == PairingDelegate.IoCapability.KEYBOARD_INPUT_ONLY
                 ):
                     peer_number = 6789
                 else:
@@ -362,7 +440,7 @@ async def test_self_smp(io_caps, sc, mitm, key_dist):
 async def test_self_smp_reject():
     class RejectingDelegate(PairingDelegate):
         def __init__(self):
-            super().__init__(PairingDelegate.NO_OUTPUT_NO_INPUT)
+            super().__init__(PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT)
 
         async def accept(self):
             return False
@@ -383,12 +461,14 @@ async def test_self_smp_reject():
 async def test_self_smp_wrong_pin():
     class WrongPinDelegate(PairingDelegate):
         def __init__(self):
-            super().__init__(PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT)
+            super().__init__(
+                PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT
+            )
 
         async def compare_numbers(self, number, digits):
             return False
 
-    wrong_pin_pairing_config = PairingConfig(delegate=WrongPinDelegate())
+    wrong_pin_pairing_config = PairingConfig(mitm=True, delegate=WrongPinDelegate())
     paired = False
     try:
         await _test_self_smp_with_configs(
@@ -402,6 +482,171 @@ async def test_self_smp_wrong_pin():
 
 
 # -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_over_classic():
+    # Create two devices, each with a controller, attached to the same link
+    two_devices = TwoDevices()
+
+    # Attach listeners
+    two_devices.devices[0].on(
+        'connection', lambda connection: two_devices.on_connection(0, connection)
+    )
+    two_devices.devices[1].on(
+        'connection', lambda connection: two_devices.on_connection(1, connection)
+    )
+
+    # Enable Classic connections
+    two_devices.devices[0].classic_enabled = True
+    two_devices.devices[1].classic_enabled = True
+
+    # Start
+    await two_devices.devices[0].power_on()
+    await two_devices.devices[1].power_on()
+
+    # Connect the two devices
+    await asyncio.gather(
+        two_devices.devices[0].connect(
+            two_devices.devices[1].public_address, transport=BT_BR_EDR_TRANSPORT
+        ),
+        two_devices.devices[1].accept(two_devices.devices[0].public_address),
+    )
+
+    # Check the post conditions
+    assert two_devices.connections[0] is not None
+    assert two_devices.connections[1] is not None
+
+    # Mock connection
+    # TODO: Implement Classic SSP and encryption in link relayer
+    LINK_KEY = bytes.fromhex('287ad379dca402530a39f1f43047b835')
+    two_devices.devices[0].get_link_key = AsyncMock(return_value=LINK_KEY)
+    two_devices.devices[1].get_link_key = AsyncMock(return_value=LINK_KEY)
+    two_devices.connections[0].encryption = 1
+    two_devices.connections[1].encryption = 1
+
+    two_devices.connections[0].on(
+        'pairing', lambda keys: two_devices.on_paired(0, keys)
+    )
+    two_devices.connections[1].on(
+        'pairing', lambda keys: two_devices.on_paired(1, keys)
+    )
+
+    # Mock SMP
+    with patch('bumble.smp.Session', spec=True) as MockSmpSession:
+        MockSmpSession.send_pairing_confirm_command = MagicMock()
+        MockSmpSession.send_pairing_dhkey_check_command = MagicMock()
+        MockSmpSession.send_public_key_command = MagicMock()
+        MockSmpSession.send_pairing_random_command = MagicMock()
+
+        # Start CTKD
+        await two_devices.connections[0].pair()
+        await asyncio.gather(*two_devices.paired)
+
+        # Phase 2 commands should not be invoked
+        MockSmpSession.send_pairing_confirm_command.assert_not_called()
+        MockSmpSession.send_pairing_dhkey_check_command.assert_not_called()
+        MockSmpSession.send_public_key_command.assert_not_called()
+        MockSmpSession.send_pairing_random_command.assert_not_called()
+
+    for i in range(2):
+        assert (
+            await two_devices.devices[i].keystore.get(
+                str(two_devices.connections[i].peer_address)
+            )
+        ).link_key
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_public_address():
+    pairing_config = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        identity_address_type=PairingConfig.AddressType.PUBLIC,
+        delegate=PairingDelegate(
+            PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
+            PairingDelegate.KeyDistribution.DISTRIBUTE_ENCRYPTION_KEY
+            | PairingDelegate.KeyDistribution.DISTRIBUTE_IDENTITY_KEY
+            | PairingDelegate.KeyDistribution.DISTRIBUTE_SIGNING_KEY
+            | PairingDelegate.KeyDistribution.DISTRIBUTE_LINK_KEY,
+        ),
+    )
+
+    await _test_self_smp_with_configs(pairing_config, pairing_config)
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_oob_sc():
+    oob_context_1 = OobContext()
+    oob_context_2 = OobContext()
+
+    pairing_config_1 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_1, oob_context_2.share(), None),
+    )
+
+    pairing_config_2 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_2, oob_context_1.share(), None),
+    )
+
+    await _test_self_smp_with_configs(pairing_config_1, pairing_config_2)
+
+    pairing_config_3 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_2, None, None),
+    )
+
+    await _test_self_smp_with_configs(pairing_config_1, pairing_config_3)
+    await _test_self_smp_with_configs(pairing_config_3, pairing_config_1)
+
+    pairing_config_4 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_2, oob_context_2.share(), None),
+    )
+
+    with pytest.raises(ProtocolError) as error:
+        await _test_self_smp_with_configs(pairing_config_1, pairing_config_4)
+    assert error.value.error_code == SMP_CONFIRM_VALUE_FAILED_ERROR
+
+    with pytest.raises(ProtocolError):
+        await _test_self_smp_with_configs(pairing_config_4, pairing_config_1)
+    assert error.value.error_code == SMP_CONFIRM_VALUE_FAILED_ERROR
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_oob_legacy():
+    legacy_context = OobLegacyContext()
+
+    pairing_config_1 = PairingConfig(
+        mitm=True,
+        sc=False,
+        bonding=True,
+        oob=PairingConfig.OobConfig(None, None, legacy_context),
+    )
+
+    pairing_config_2 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(OobContext(), None, legacy_context),
+    )
+
+    await _test_self_smp_with_configs(pairing_config_1, pairing_config_2)
+    await _test_self_smp_with_configs(pairing_config_2, pairing_config_1)
+
+
+# -----------------------------------------------------------------------------
 async def run_test_self():
     await test_self_connection()
     await test_self_gatt()
@@ -409,6 +654,10 @@ async def run_test_self():
     await test_self_smp()
     await test_self_smp_reject()
     await test_self_smp_wrong_pin()
+    await test_self_smp_over_classic()
+    await test_self_smp_public_address()
+    await test_self_smp_oob_sc()
+    await test_self_smp_oob_legacy()
 
 
 # -----------------------------------------------------------------------------

@@ -8,8 +8,7 @@ The project initially only supported BLE (Bluetooth Low Energy), but support for
 eventually added. Support for BLE is therefore currently somewhat more advanced than for Classic.
 
 !!! warning
-    This project is still very much experimental and in an alpha state where a lot of things are still missing or broken, and what's there changes frequently.
-    Also, there are still a few hardcoded values/parameters in some of the examples and apps which need to be changed (those will eventually be command line arguments, as appropriate)
+    This project is still in an early state of development where some things are still missing or broken, and what's implemented may change and evolve frequently.
 
 Overview
 --------
@@ -153,11 +152,23 @@ Some platforms support features that not all platforms support
 
 See the [Platforms page](platforms/index.md) for details.
 
+
+Hive
+----
+
+The Hive is a collection of example apps and virtual devices that are implemented using the
+Python Bumble API, running entirely in a web page. This is a convenient way to try out some
+of the examples without any Python installation, when you have some other virtual Bluetooth
+device that you can connect to or from, such as the Android Emulator.
+
+See the [Bumble Hive](hive/index.md) for details.
+
 Roadmap
 -------
 
 Future features to be considered include:
 
+  * More profiles
   * More device examples
   * Add a new type of virtual link (beyond the two existing ones) to allow for link-level simulation (timing, loss, etc)
   * Bindings for languages other than Python

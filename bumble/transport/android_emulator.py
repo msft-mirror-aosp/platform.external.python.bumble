@@ -16,14 +16,16 @@
 # Imports
 # -----------------------------------------------------------------------------
 import logging
-import grpc
+import grpc.aio
 
-from .common import PumpedTransport, PumpedPacketSource, PumpedPacketSink
-from .emulated_bluetooth_pb2_grpc import EmulatedBluetoothServiceStub
-from .emulated_bluetooth_vhci_pb2_grpc import VhciForwardingServiceStub
+from typing import Optional, Union
 
-# pylint: disable-next=no-name-in-module
-from .emulated_bluetooth_packets_pb2 import HCIPacket
+from .common import PumpedTransport, PumpedPacketSource, PumpedPacketSink, Transport
+
+# pylint: disable=no-name-in-module
+from .grpc_protobuf.emulated_bluetooth_pb2_grpc import EmulatedBluetoothServiceStub
+from .grpc_protobuf.emulated_bluetooth_packets_pb2 import HCIPacket
+from .grpc_protobuf.emulated_bluetooth_vhci_pb2_grpc import VhciForwardingServiceStub
 
 
 # -----------------------------------------------------------------------------
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
-async def open_android_emulator_transport(spec):
+async def open_android_emulator_transport(spec: Optional[str]) -> Transport:
     '''
     Open a transport connection to an Android emulator via its gRPC interface.
     The parameter string has this syntax:
@@ -66,8 +68,8 @@ async def open_android_emulator_transport(spec):
     # Parse the parameters
     mode = 'host'
     server_host = 'localhost'
-    server_port = 8554
-    if spec is not None:
+    server_port = '8554'
+    if spec:
         params = spec.split(',')
         for param in params:
             if param.startswith('mode='):
@@ -82,6 +84,7 @@ async def open_android_emulator_transport(spec):
     logger.debug(f'connecting to gRPC server at {server_address}')
     channel = grpc.aio.insecure_channel(server_address)
 
+    service: Union[EmulatedBluetoothServiceStub, VhciForwardingServiceStub]
     if mode == 'host':
         # Connect as a host
         service = EmulatedBluetoothServiceStub(channel)
@@ -94,10 +97,13 @@ async def open_android_emulator_transport(spec):
         raise ValueError('invalid mode')
 
     # Create the transport object
-    transport = PumpedTransport(
-        PumpedPacketSource(hci_device.read),
-        PumpedPacketSink(hci_device.write),
-        channel.close,
+    class EmulatorTransport(PumpedTransport):
+        async def close(self):
+            await super().close()
+            await channel.close()
+
+    transport = EmulatorTransport(
+        PumpedPacketSource(hci_device.read), PumpedPacketSink(hci_device.write)
     )
     transport.start()
 

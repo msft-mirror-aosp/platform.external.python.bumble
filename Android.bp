@@ -19,10 +19,26 @@ python_library_host {
     name: "bumble",
     srcs: [
         "bumble/*.py",
+        "bumble/drivers/*.py",
         "bumble/profiles/*.py",
         "bumble/transport/*.py",
     ],
     libs: [
         "pyee",
+    ]
+}
+
+python_library_host {
+    name: "bumble-pandora",
+    srcs: [
+        "bumble/pandora/*.py",
+    ],
+    libs: [
+        "bumble",
+        "pandora-python",
+        "libprotobuf-python",
+    ],
+    data: [
+        "bumble/pandora/py.typed"
     ]
 }

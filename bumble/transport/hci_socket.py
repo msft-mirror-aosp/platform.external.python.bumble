@@ -23,6 +23,8 @@ import socket
 import ctypes
 import collections
 
+from typing import Optional
+
 from .common import Transport, ParserSource
 
 
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
-async def open_hci_socket_transport(spec):
+async def open_hci_socket_transport(spec: Optional[str]) -> Transport:
     '''
     Open an HCI Socket (only available on some platforms).
     The parameter string is either empty (to use the first/default Bluetooth adapter)
@@ -45,9 +47,9 @@ async def open_hci_socket_transport(spec):
     # Create a raw HCI socket
     try:
         hci_socket = socket.socket(
-            socket.AF_BLUETOOTH,
-            socket.SOCK_RAW | socket.SOCK_NONBLOCK,
-            socket.BTPROTO_HCI,
+            socket.AF_BLUETOOTH,  # type: ignore[attr-defined]
+            socket.SOCK_RAW | socket.SOCK_NONBLOCK,  # type: ignore[attr-defined]
+            socket.BTPROTO_HCI,  # type: ignore[attr-defined]
         )
     except AttributeError as error:
         # Not supported on this platform
@@ -57,10 +59,7 @@ async def open_hci_socket_transport(spec):
         ) from error
 
     # Compute the adapter index
-    if spec is None:
-        adapter_index = 0
-    else:
-        adapter_index = int(spec)
+    adapter_index = int(spec) if spec else 0
 
     # Bind the socket
     # NOTE: since Python doesn't support binding with the required address format (yet),
@@ -78,7 +77,7 @@ async def open_hci_socket_transport(spec):
     bind_address = struct.pack(
         # pylint: disable=no-member
         '<HHH',
-        socket.AF_BLUETOOTH,
+        socket.AF_BLUETOOTH,  # type: ignore[attr-defined]
         adapter_index,
         HCI_CHANNEL_USER,
     )

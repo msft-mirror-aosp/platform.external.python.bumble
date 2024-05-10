@@ -15,14 +15,32 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
+
 import logging
 import asyncio
+import dataclasses
+import enum
+from typing import Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing_extensions import Self
 
 from pyee import EventEmitter
 
-from . import core
+from bumble import core
+from bumble import l2cap
+from bumble import sdp
 from .colors import color
-from .core import BT_BR_EDR_TRANSPORT, InvalidStateError, ProtocolError
+from .core import (
+    UUID,
+    BT_RFCOMM_PROTOCOL_ID,
+    BT_BR_EDR_TRANSPORT,
+    BT_L2CAP_PROTOCOL_ID,
+    InvalidStateError,
+    ProtocolError,
+)
+
+if TYPE_CHECKING:
+    from bumble.device import Device, Connection
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -37,27 +55,18 @@ logger = logging.getLogger(__name__)
 
 RFCOMM_PSM = 0x0003
 
+class FrameType(enum.IntEnum):
+    SABM = 0x2F  # Control field [1,1,1,1,_,1,0,0] LSB-first
+    UA   = 0x63  # Control field [0,1,1,0,_,0,1,1] LSB-first
+    DM   = 0x0F  # Control field [1,1,1,1,_,0,0,0] LSB-first
+    DISC = 0x43  # Control field [0,1,0,_,0,0,1,1] LSB-first
+    UIH  = 0xEF  # Control field [1,1,1,_,1,1,1,1] LSB-first
+    UI   = 0x03  # Control field [0,0,0,_,0,0,1,1] LSB-first
 
-# Frame types
-RFCOMM_SABM_FRAME = 0x2F  # Control field [1,1,1,1,_,1,0,0] LSB-first
-RFCOMM_UA_FRAME   = 0x63  # Control field [0,1,1,0,_,0,1,1] LSB-first
-RFCOMM_DM_FRAME   = 0x0F  # Control field [1,1,1,1,_,0,0,0] LSB-first
-RFCOMM_DISC_FRAME = 0x43  # Control field [0,1,0,_,0,0,1,1] LSB-first
-RFCOMM_UIH_FRAME  = 0xEF  # Control field [1,1,1,_,1,1,1,1] LSB-first
-RFCOMM_UI_FRAME   = 0x03  # Control field [0,0,0,_,0,0,1,1] LSB-first
+class MccType(enum.IntEnum):
+    PN  = 0x20
+    MSC = 0x38
 
-RFCOMM_FRAME_TYPE_NAMES = {
-    RFCOMM_SABM_FRAME: 'SABM',
-    RFCOMM_UA_FRAME:   'UA',
-    RFCOMM_DM_FRAME:   'DM',
-    RFCOMM_DISC_FRAME: 'DISC',
-    RFCOMM_UIH_FRAME:  'UIH',
-    RFCOMM_UI_FRAME:   'UI'
-}
-
-# MCC Types
-RFCOMM_MCC_PN_TYPE  = 0x20
-RFCOMM_MCC_MSC_TYPE = 0x38
 
 # FCS CRC
 CRC_TABLE = bytes([
@@ -95,8 +104,9 @@ CRC_TABLE = bytes([
     0XBA, 0X2B, 0X59, 0XC8, 0XBD, 0X2C, 0X5E, 0XCF
 ])
 
-RFCOMM_DEFAULT_INITIAL_RX_CREDITS = 7
-RFCOMM_DEFAULT_PREFERRED_MTU      = 1280
+RFCOMM_DEFAULT_L2CAP_MTU      = 2048
+RFCOMM_DEFAULT_WINDOW_SIZE    = 7
+RFCOMM_DEFAULT_MAX_FRAME_SIZE = 2000
 
 RFCOMM_DYNAMIC_CHANNEL_NUMBER_START = 1
 RFCOMM_DYNAMIC_CHANNEL_NUMBER_END   = 30
@@ -105,7 +115,121 @@ RFCOMM_DYNAMIC_CHANNEL_NUMBER_END   = 30
 
 
 # -----------------------------------------------------------------------------
-def compute_fcs(buffer):
+def make_service_sdp_records(
+    service_record_handle: int, channel: int, uuid: Optional[UUID] = None
+) -> List[sdp.ServiceAttribute]:
+    """
+    Create SDP records for an RFComm service given a channel number and an
+    optional UUID. A Service Class Attribute is included only if the UUID is not None.
+    """
+    records = [
+        sdp.ServiceAttribute(
+            sdp.SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
+            sdp.DataElement.unsigned_integer_32(service_record_handle),
+        ),
+        sdp.ServiceAttribute(
+            sdp.SDP_BROWSE_GROUP_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
+                [sdp.DataElement.uuid(sdp.SDP_PUBLIC_BROWSE_ROOT)]
+            ),
+        ),
+        sdp.ServiceAttribute(
+            sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
+                [
+                    sdp.DataElement.sequence(
+                        [sdp.DataElement.uuid(BT_L2CAP_PROTOCOL_ID)]
+                    ),
+                    sdp.DataElement.sequence(
+                        [
+                            sdp.DataElement.uuid(BT_RFCOMM_PROTOCOL_ID),
+                            sdp.DataElement.unsigned_integer_8(channel),
+                        ]
+                    ),
+                ]
+            ),
+        ),
+    ]
+
+    if uuid:
+        records.append(
+            sdp.ServiceAttribute(
+                sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+                sdp.DataElement.sequence([sdp.DataElement.uuid(uuid)]),
+            )
+        )
+
+    return records
+
+
+# -----------------------------------------------------------------------------
+async def find_rfcomm_channels(connection: Connection) -> Dict[int, List[UUID]]:
+    """Searches all RFCOMM channels and their associated UUID from SDP service records.
+
+    Args:
+        connection: ACL connection to make SDP search.
+
+    Returns:
+        Dictionary mapping from channel number to service class UUID list.
+    """
+    results = {}
+    async with sdp.Client(connection) as sdp_client:
+        search_result = await sdp_client.search_attributes(
+            uuids=[core.BT_RFCOMM_PROTOCOL_ID],
+            attribute_ids=[
+                sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+            ],
+        )
+        for attribute_lists in search_result:
+            service_classes: List[UUID] = []
+            channel: Optional[int] = None
+            for attribute in attribute_lists:
+                # The layout is [[L2CAP_PROTOCOL], [RFCOMM_PROTOCOL, RFCOMM_CHANNEL]].
+                if attribute.id == sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID:
+                    protocol_descriptor_list = attribute.value.value
+                    channel = protocol_descriptor_list[1].value[1].value
+                elif attribute.id == sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID:
+                    service_class_id_list = attribute.value.value
+                    service_classes = [
+                        service_class.value for service_class in service_class_id_list
+                    ]
+            if not service_classes or not channel:
+                logger.warning(f"Bad result {attribute_lists}.")
+            else:
+                results[channel] = service_classes
+    return results
+
+
+# -----------------------------------------------------------------------------
+async def find_rfcomm_channel_with_uuid(
+    connection: Connection, uuid: str | UUID
+) -> Optional[int]:
+    """Searches an RFCOMM channel associated with given UUID from service records.
+
+    Args:
+        connection: ACL connection to make SDP search.
+        uuid: UUID of service record to search for.
+
+    Returns:
+        RFCOMM channel number if found, otherwise None.
+    """
+    if isinstance(uuid, str):
+        uuid = UUID(uuid)
+    return next(
+        (
+            channel
+            for channel, class_id_list in (
+                await find_rfcomm_channels(connection)
+            ).items()
+            if uuid in class_id_list
+        ),
+        None,
+    )
+
+
+# -----------------------------------------------------------------------------
+def compute_fcs(buffer: bytes) -> int:
     result = 0xFF
     for byte in buffer:
         result = CRC_TABLE[result ^ byte]
@@ -114,7 +238,15 @@ def compute_fcs(buffer):
 
 # -----------------------------------------------------------------------------
 class RFCOMM_Frame:
-    def __init__(self, frame_type, c_r, dlci, p_f, information=b'', with_credits=False):
+    def __init__(
+        self,
+        frame_type: FrameType,
+        c_r: int,
+        dlci: int,
+        p_f: int,
+        information: bytes = b'',
+        with_credits: bool = False,
+    ) -> None:
         self.type = frame_type
         self.c_r = c_r
         self.dlci = dlci
@@ -131,18 +263,15 @@ class RFCOMM_Frame:
             self.length = bytes([(length << 1) | 1])
         self.address = (dlci << 2) | (c_r << 1) | 1
         self.control = frame_type | (p_f << 4)
-        if frame_type == RFCOMM_UIH_FRAME:
+        if frame_type == FrameType.UIH:
             self.fcs = compute_fcs(bytes([self.address, self.control]))
         else:
             self.fcs = compute_fcs(bytes([self.address, self.control]) + self.length)
 
-    def type_name(self):
-        return RFCOMM_FRAME_TYPE_NAMES[self.type]
-
     @staticmethod
-    def parse_mcc(data):
+    def parse_mcc(data) -> Tuple[int, bool, bytes]:
         mcc_type = data[0] >> 2
-        c_r = (data[0] >> 1) & 1
+        c_r = bool((data[0] >> 1) & 1)
         length = data[1]
         if data[1] & 1:
             length >>= 1
@@ -154,40 +283,40 @@ class RFCOMM_Frame:
         return (mcc_type, c_r, value)
 
     @staticmethod
-    def make_mcc(mcc_type, c_r, data):
+    def make_mcc(mcc_type: int, c_r: int, data: bytes) -> bytes:
         return (
             bytes([(mcc_type << 2 | c_r << 1 | 1) & 0xFF, (len(data) & 0x7F) << 1 | 1])
             + data
         )
 
     @staticmethod
-    def sabm(c_r, dlci):
-        return RFCOMM_Frame(RFCOMM_SABM_FRAME, c_r, dlci, 1)
+    def sabm(c_r: int, dlci: int):
+        return RFCOMM_Frame(FrameType.SABM, c_r, dlci, 1)
 
     @staticmethod
-    def ua(c_r, dlci):
-        return RFCOMM_Frame(RFCOMM_UA_FRAME, c_r, dlci, 1)
+    def ua(c_r: int, dlci: int):
+        return RFCOMM_Frame(FrameType.UA, c_r, dlci, 1)
 
     @staticmethod
-    def dm(c_r, dlci):
-        return RFCOMM_Frame(RFCOMM_DM_FRAME, c_r, dlci, 1)
+    def dm(c_r: int, dlci: int):
+        return RFCOMM_Frame(FrameType.DM, c_r, dlci, 1)
 
     @staticmethod
-    def disc(c_r, dlci):
-        return RFCOMM_Frame(RFCOMM_DISC_FRAME, c_r, dlci, 1)
+    def disc(c_r: int, dlci: int):
+        return RFCOMM_Frame(FrameType.DISC, c_r, dlci, 1)
 
     @staticmethod
-    def uih(c_r, dlci, information, p_f=0):
+    def uih(c_r: int, dlci: int, information: bytes, p_f: int = 0):
         return RFCOMM_Frame(
-            RFCOMM_UIH_FRAME, c_r, dlci, p_f, information, with_credits=(p_f == 1)
+            FrameType.UIH, c_r, dlci, p_f, information, with_credits=(p_f == 1)
         )
 
     @staticmethod
-    def from_bytes(data):
+    def from_bytes(data: bytes) -> RFCOMM_Frame:
         # Extract fields
         dlci = (data[0] >> 2) & 0x3F
         c_r = (data[0] >> 1) & 0x01
-        frame_type = data[1] & 0xEF
+        frame_type = FrameType(data[1] & 0xEF)
         p_f = (data[1] >> 4) & 0x01
         length = data[2]
         if length & 0x01:
@@ -206,7 +335,7 @@ class RFCOMM_Frame:
 
         return frame
 
-    def __bytes__(self):
+    def __bytes__(self) -> bytes:
         return (
             bytes([self.address, self.control])
             + self.length
@@ -214,9 +343,9 @@ class RFCOMM_Frame:
             + bytes([self.fcs])
         )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
-            f'{color(self.type_name(), "yellow")}'
+            f'{color(self.type.name, "yellow")}'
             f'(c/r={self.c_r},'
             f'dlci={self.dlci},'
             f'p/f={self.p_f},'
@@ -226,27 +355,24 @@ class RFCOMM_Frame:
 
 
 # -----------------------------------------------------------------------------
+@dataclasses.dataclass
 class RFCOMM_MCC_PN:
-    def __init__(
-        self,
-        dlci,
-        cl,
-        priority,
-        ack_timer,
-        max_frame_size,
-        max_retransmissions,
-        window_size,
-    ):
-        self.dlci = dlci
-        self.cl = cl
-        self.priority = priority
-        self.ack_timer = ack_timer
-        self.max_frame_size = max_frame_size
-        self.max_retransmissions = max_retransmissions
-        self.window_size = window_size
+    dlci: int
+    cl: int
+    priority: int
+    ack_timer: int
+    max_frame_size: int
+    max_retransmissions: int
+    window_size: int
+
+    def __post_init__(self) -> None:
+        if self.window_size < 1 or self.window_size > 7:
+            logger.warning(
+                f'Error Recovery Window size {self.window_size} is out of range [1, 7].'
+            )
 
     @staticmethod
-    def from_bytes(data):
+    def from_bytes(data: bytes) -> RFCOMM_MCC_PN:
         return RFCOMM_MCC_PN(
             dlci=data[0],
             cl=data[1],
@@ -254,10 +380,10 @@ class RFCOMM_MCC_PN:
             ack_timer=data[3],
             max_frame_size=data[4] | data[5] << 8,
             max_retransmissions=data[6],
-            window_size=data[7],
+            window_size=data[7] & 0x07,
         )
 
-    def __bytes__(self):
+    def __bytes__(self) -> bytes:
         return bytes(
             [
                 self.dlci & 0xFF,
@@ -267,34 +393,24 @@ class RFCOMM_MCC_PN:
                 self.max_frame_size & 0xFF,
                 (self.max_frame_size >> 8) & 0xFF,
                 self.max_retransmissions & 0xFF,
-                self.window_size & 0xFF,
+                # Only 3 bits are meaningful.
+                self.window_size & 0x07,
             ]
-        )
-
-    def __str__(self):
-        return (
-            f'PN(dlci={self.dlci},'
-            f'cl={self.cl},'
-            f'priority={self.priority},'
-            f'ack_timer={self.ack_timer},'
-            f'max_frame_size={self.max_frame_size},'
-            f'max_retransmissions={self.max_retransmissions},'
-            f'window_size={self.window_size})'
         )
 
 
 # -----------------------------------------------------------------------------
+@dataclasses.dataclass
 class RFCOMM_MCC_MSC:
-    def __init__(self, dlci, fc, rtc, rtr, ic, dv):
-        self.dlci = dlci
-        self.fc = fc
-        self.rtc = rtc
-        self.rtr = rtr
-        self.ic = ic
-        self.dv = dv
+    dlci: int
+    fc: int
+    rtc: int
+    rtr: int
+    ic: int
+    dv: int
 
     @staticmethod
-    def from_bytes(data):
+    def from_bytes(data: bytes) -> RFCOMM_MCC_MSC:
         return RFCOMM_MCC_MSC(
             dlci=data[0] >> 2,
             fc=data[1] >> 1 & 1,
@@ -304,7 +420,7 @@ class RFCOMM_MCC_MSC:
             dv=data[1] >> 7 & 1,
         )
 
-    def __bytes__(self):
+    def __bytes__(self) -> bytes:
         return bytes(
             [
                 (self.dlci << 2) | 3,
@@ -317,75 +433,63 @@ class RFCOMM_MCC_MSC:
             ]
         )
 
-    def __str__(self):
-        return (
-            f'MSC(dlci={self.dlci},'
-            f'fc={self.fc},'
-            f'rtc={self.rtc},'
-            f'rtr={self.rtr},'
-            f'ic={self.ic},'
-            f'dv={self.dv})'
-        )
-
 
 # -----------------------------------------------------------------------------
 class DLC(EventEmitter):
-    # States
-    INIT = 0x00
-    CONNECTING = 0x01
-    CONNECTED = 0x02
-    DISCONNECTING = 0x03
-    DISCONNECTED = 0x04
-    RESET = 0x05
+    class State(enum.IntEnum):
+        INIT = 0x00
+        CONNECTING = 0x01
+        CONNECTED = 0x02
+        DISCONNECTING = 0x03
+        DISCONNECTED = 0x04
+        RESET = 0x05
 
-    STATE_NAMES = {
-        INIT: 'INIT',
-        CONNECTING: 'CONNECTING',
-        CONNECTED: 'CONNECTED',
-        DISCONNECTING: 'DISCONNECTING',
-        DISCONNECTED: 'DISCONNECTED',
-        RESET: 'RESET',
-    }
+    connection_result: Optional[asyncio.Future]
+    sink: Optional[Callable[[bytes], None]]
 
-    def __init__(self, multiplexer, dlci, max_frame_size, initial_tx_credits):
+    def __init__(
+        self,
+        multiplexer: Multiplexer,
+        dlci: int,
+        max_frame_size: int,
+        window_size: int,
+    ) -> None:
         super().__init__()
         self.multiplexer = multiplexer
         self.dlci = dlci
-        self.rx_credits = RFCOMM_DEFAULT_INITIAL_RX_CREDITS
-        self.rx_threshold = self.rx_credits // 2
-        self.tx_credits = initial_tx_credits
+        self.max_frame_size = max_frame_size
+        self.window_size = window_size
+        self.rx_credits = window_size
+        self.rx_threshold = window_size // 2
+        self.tx_credits = window_size
         self.tx_buffer = b''
-        self.state = DLC.INIT
+        self.state = DLC.State.INIT
         self.role = multiplexer.role
-        self.c_r = 1 if self.role == Multiplexer.INITIATOR else 0
+        self.c_r = 1 if self.role == Multiplexer.Role.INITIATOR else 0
         self.sink = None
         self.connection_result = None
+        self.drained = asyncio.Event()
+        self.drained.set()
 
         # Compute the MTU
         max_overhead = 4 + 1  # header with 2-byte length + fcs
         self.mtu = min(
-            max_frame_size, self.multiplexer.l2cap_channel.mtu - max_overhead
+            max_frame_size, self.multiplexer.l2cap_channel.peer_mtu - max_overhead
         )
 
-    @staticmethod
-    def state_name(state):
-        return DLC.STATE_NAMES[state]
-
-    def change_state(self, new_state):
-        logger.debug(
-            f'{self} state change -> {color(self.state_name(new_state), "magenta")}'
-        )
+    def change_state(self, new_state: State) -> None:
+        logger.debug(f'{self} state change -> {color(new_state.name, "magenta")}')
         self.state = new_state
 
-    def send_frame(self, frame):
+    def send_frame(self, frame: RFCOMM_Frame) -> None:
         self.multiplexer.send_frame(frame)
 
-    def on_frame(self, frame):
-        handler = getattr(self, f'on_{frame.type_name()}_frame'.lower())
+    def on_frame(self, frame: RFCOMM_Frame) -> None:
+        handler = getattr(self, f'on_{frame.type.name}_frame'.lower())
         handler(frame)
 
-    def on_sabm_frame(self, _frame):
-        if self.state != DLC.CONNECTING:
+    def on_sabm_frame(self, _frame: RFCOMM_Frame) -> None:
+        if self.state != DLC.State.CONNECTING:
             logger.warning(
                 color('!!! received SABM when not in CONNECTING state', 'red')
             )
@@ -395,17 +499,15 @@ class DLC(EventEmitter):
 
         # Exchange the modem status with the peer
         msc = RFCOMM_MCC_MSC(dlci=self.dlci, fc=0, rtc=1, rtr=1, ic=0, dv=1)
-        mcc = RFCOMM_Frame.make_mcc(
-            mcc_type=RFCOMM_MCC_MSC_TYPE, c_r=1, data=bytes(msc)
-        )
+        mcc = RFCOMM_Frame.make_mcc(mcc_type=MccType.MSC, c_r=1, data=bytes(msc))
         logger.debug(f'>>> MCC MSC Command: {msc}')
         self.send_frame(RFCOMM_Frame.uih(c_r=self.c_r, dlci=0, information=mcc))
 
-        self.change_state(DLC.CONNECTED)
+        self.change_state(DLC.State.CONNECTED)
         self.emit('open')
 
-    def on_ua_frame(self, _frame):
-        if self.state != DLC.CONNECTING:
+    def on_ua_frame(self, _frame: RFCOMM_Frame) -> None:
+        if self.state != DLC.State.CONNECTING:
             logger.warning(
                 color('!!! received SABM when not in CONNECTING state', 'red')
             )
@@ -413,24 +515,22 @@ class DLC(EventEmitter):
 
         # Exchange the modem status with the peer
         msc = RFCOMM_MCC_MSC(dlci=self.dlci, fc=0, rtc=1, rtr=1, ic=0, dv=1)
-        mcc = RFCOMM_Frame.make_mcc(
-            mcc_type=RFCOMM_MCC_MSC_TYPE, c_r=1, data=bytes(msc)
-        )
+        mcc = RFCOMM_Frame.make_mcc(mcc_type=MccType.MSC, c_r=1, data=bytes(msc))
         logger.debug(f'>>> MCC MSC Command: {msc}')
         self.send_frame(RFCOMM_Frame.uih(c_r=self.c_r, dlci=0, information=mcc))
 
-        self.change_state(DLC.CONNECTED)
+        self.change_state(DLC.State.CONNECTED)
         self.multiplexer.on_dlc_open_complete(self)
 
-    def on_dm_frame(self, frame):
+    def on_dm_frame(self, frame: RFCOMM_Frame) -> None:
         # TODO: handle all states
         pass
 
-    def on_disc_frame(self, _frame):
+    def on_disc_frame(self, _frame: RFCOMM_Frame) -> None:
         # TODO: handle all states
         self.send_frame(RFCOMM_Frame.ua(c_r=1 - self.c_r, dlci=self.dlci))
 
-    def on_uih_frame(self, frame):
+    def on_uih_frame(self, frame: RFCOMM_Frame) -> None:
         data = frame.information
         if frame.p_f == 1:
             # With credits
@@ -439,7 +539,7 @@ class DLC(EventEmitter):
 
             logger.debug(
                 f'<<< Credits [{self.dlci}]: '
-                f'received {credits}, total={self.tx_credits}'
+                f'received {received_credits}, total={self.tx_credits}'
             )
             data = data[1:]
 
@@ -448,45 +548,44 @@ class DLC(EventEmitter):
             f'[{self.dlci}] {len(data)} bytes, '
             f'rx_credits={self.rx_credits}: {data.hex()}'
         )
-        if len(data) and self.sink:
-            self.sink(data)  # pylint: disable=not-callable
+        if data:
+            if self.sink:
+                self.sink(data)  # pylint: disable=not-callable
 
-        # Update the credits
-        if self.rx_credits > 0:
-            self.rx_credits -= 1
-        else:
-            logger.warning(color('!!! received frame with no rx credits', 'red'))
+            # Update the credits
+            if self.rx_credits > 0:
+                self.rx_credits -= 1
+            else:
+                logger.warning(color('!!! received frame with no rx credits', 'red'))
 
         # Check if there's anything to send (including credits)
         self.process_tx()
 
-    def on_ui_frame(self, frame):
+    def on_ui_frame(self, frame: RFCOMM_Frame) -> None:
         pass
 
-    def on_mcc_msc(self, c_r, msc):
+    def on_mcc_msc(self, c_r: bool, msc: RFCOMM_MCC_MSC) -> None:
         if c_r:
             # Command
             logger.debug(f'<<< MCC MSC Command: {msc}')
             msc = RFCOMM_MCC_MSC(dlci=self.dlci, fc=0, rtc=1, rtr=1, ic=0, dv=1)
-            mcc = RFCOMM_Frame.make_mcc(
-                mcc_type=RFCOMM_MCC_MSC_TYPE, c_r=0, data=bytes(msc)
-            )
+            mcc = RFCOMM_Frame.make_mcc(mcc_type=MccType.MSC, c_r=0, data=bytes(msc))
             logger.debug(f'>>> MCC MSC Response: {msc}')
             self.send_frame(RFCOMM_Frame.uih(c_r=self.c_r, dlci=0, information=mcc))
         else:
             # Response
             logger.debug(f'<<< MCC MSC Response: {msc}')
 
-    def connect(self):
-        if self.state != DLC.INIT:
+    def connect(self) -> None:
+        if self.state != DLC.State.INIT:
             raise InvalidStateError('invalid state')
 
-        self.change_state(DLC.CONNECTING)
+        self.change_state(DLC.State.CONNECTING)
         self.connection_result = asyncio.get_running_loop().create_future()
         self.send_frame(RFCOMM_Frame.sabm(c_r=self.c_r, dlci=self.dlci))
 
-    def accept(self):
-        if self.state != DLC.INIT:
+    def accept(self) -> None:
+        if self.state != DLC.State.INIT:
             raise InvalidStateError('invalid state')
 
         pn = RFCOMM_MCC_PN(
@@ -494,22 +593,22 @@ class DLC(EventEmitter):
             cl=0xE0,
             priority=7,
             ack_timer=0,
-            max_frame_size=RFCOMM_DEFAULT_PREFERRED_MTU,
+            max_frame_size=self.max_frame_size,
             max_retransmissions=0,
-            window_size=RFCOMM_DEFAULT_INITIAL_RX_CREDITS,
+            window_size=self.window_size,
         )
-        mcc = RFCOMM_Frame.make_mcc(mcc_type=RFCOMM_MCC_PN_TYPE, c_r=0, data=bytes(pn))
+        mcc = RFCOMM_Frame.make_mcc(mcc_type=MccType.PN, c_r=0, data=bytes(pn))
         logger.debug(f'>>> PN Response: {pn}')
         self.send_frame(RFCOMM_Frame.uih(c_r=self.c_r, dlci=0, information=mcc))
-        self.change_state(DLC.CONNECTING)
+        self.change_state(DLC.State.CONNECTING)
 
-    def rx_credits_needed(self):
+    def rx_credits_needed(self) -> int:
         if self.rx_credits <= self.rx_threshold:
-            return RFCOMM_DEFAULT_INITIAL_RX_CREDITS - self.rx_credits
+            return self.window_size - self.rx_credits
 
         return 0
 
-    def process_tx(self):
+    def process_tx(self) -> None:
         # Send anything we can (or an empty frame if we need to send rx credits)
         rx_credits_needed = self.rx_credits_needed()
         while (self.tx_buffer and self.tx_credits > 0) or rx_credits_needed > 0:
@@ -545,9 +644,11 @@ class DLC(EventEmitter):
             )
 
             rx_credits_needed = 0
+            if not self.tx_buffer:
+                self.drained.set()
 
     # Stream protocol
-    def write(self, data):
+    def write(self, data: Union[bytes, str]) -> None:
         # We can only send bytes
         if not isinstance(data, bytes):
             if isinstance(data, str):
@@ -557,46 +658,42 @@ class DLC(EventEmitter):
                 raise ValueError('write only accept bytes or strings')
 
         self.tx_buffer += data
+        self.drained.clear()
         self.process_tx()
 
-    def drain(self):
-        # TODO
-        pass
+    async def drain(self) -> None:
+        await self.drained.wait()
 
-    def __str__(self):
-        return f'DLC(dlci={self.dlci},state={self.state_name(self.state)})'
+    def __str__(self) -> str:
+        return f'DLC(dlci={self.dlci},state={self.state.name})'
 
 
 # -----------------------------------------------------------------------------
 class Multiplexer(EventEmitter):
-    # Roles
-    INITIATOR = 0x00
-    RESPONDER = 0x01
+    class Role(enum.IntEnum):
+        INITIATOR = 0x00
+        RESPONDER = 0x01
 
-    # States
-    INIT = 0x00
-    CONNECTING = 0x01
-    CONNECTED = 0x02
-    OPENING = 0x03
-    DISCONNECTING = 0x04
-    DISCONNECTED = 0x05
-    RESET = 0x06
+    class State(enum.IntEnum):
+        INIT = 0x00
+        CONNECTING = 0x01
+        CONNECTED = 0x02
+        OPENING = 0x03
+        DISCONNECTING = 0x04
+        DISCONNECTED = 0x05
+        RESET = 0x06
 
-    STATE_NAMES = {
-        INIT: 'INIT',
-        CONNECTING: 'CONNECTING',
-        CONNECTED: 'CONNECTED',
-        OPENING: 'OPENING',
-        DISCONNECTING: 'DISCONNECTING',
-        DISCONNECTED: 'DISCONNECTED',
-        RESET: 'RESET',
-    }
+    connection_result: Optional[asyncio.Future]
+    disconnection_result: Optional[asyncio.Future]
+    open_result: Optional[asyncio.Future]
+    acceptor: Optional[Callable[[int], bool]]
+    dlcs: Dict[int, DLC]
 
-    def __init__(self, l2cap_channel, role):
+    def __init__(self, l2cap_channel: l2cap.ClassicChannel, role: Role) -> None:
         super().__init__()
         self.role = role
         self.l2cap_channel = l2cap_channel
-        self.state = Multiplexer.INIT
+        self.state = Multiplexer.State.INIT
         self.dlcs = {}  # DLCs, by DLCI
         self.connection_result = None
         self.disconnection_result = None
@@ -606,21 +703,15 @@ class Multiplexer(EventEmitter):
         # Become a sink for the L2CAP channel
         l2cap_channel.sink = self.on_pdu
 
-    @staticmethod
-    def state_name(state):
-        return Multiplexer.STATE_NAMES[state]
-
-    def change_state(self, new_state):
-        logger.debug(
-            f'{self} state change -> {color(self.state_name(new_state), "cyan")}'
-        )
+    def change_state(self, new_state: State) -> None:
+        logger.debug(f'{self} state change -> {color(new_state.name, "cyan")}')
         self.state = new_state
 
-    def send_frame(self, frame):
+    def send_frame(self, frame: RFCOMM_Frame) -> None:
         logger.debug(f'>>> Multiplexer sending {frame}')
         self.l2cap_channel.send_pdu(frame)
 
-    def on_pdu(self, pdu):
+    def on_pdu(self, pdu: bytes) -> None:
         frame = RFCOMM_Frame.from_bytes(pdu)
         logger.debug(f'<<< Multiplexer received {frame}')
 
@@ -628,7 +719,7 @@ class Multiplexer(EventEmitter):
         if frame.dlci == 0:
             self.on_frame(frame)
         else:
-            if frame.type == RFCOMM_DM_FRAME:
+            if frame.type == FrameType.DM:
                 # DM responses are for a DLCI, but since we only create the dlc when we
                 # receive a PN response (because we need the parameters), we handle DM
                 # frames at the Multiplexer level
@@ -640,32 +731,32 @@ class Multiplexer(EventEmitter):
                     return
                 dlc.on_frame(frame)
 
-    def on_frame(self, frame):
-        handler = getattr(self, f'on_{frame.type_name()}_frame'.lower())
+    def on_frame(self, frame: RFCOMM_Frame) -> None:
+        handler = getattr(self, f'on_{frame.type.name}_frame'.lower())
         handler(frame)
 
-    def on_sabm_frame(self, _frame):
-        if self.state != Multiplexer.INIT:
+    def on_sabm_frame(self, _frame: RFCOMM_Frame) -> None:
+        if self.state != Multiplexer.State.INIT:
             logger.debug('not in INIT state, ignoring SABM')
             return
-        self.change_state(Multiplexer.CONNECTED)
+        self.change_state(Multiplexer.State.CONNECTED)
         self.send_frame(RFCOMM_Frame.ua(c_r=1, dlci=0))
 
-    def on_ua_frame(self, _frame):
-        if self.state == Multiplexer.CONNECTING:
-            self.change_state(Multiplexer.CONNECTED)
+    def on_ua_frame(self, _frame: RFCOMM_Frame) -> None:
+        if self.state == Multiplexer.State.CONNECTING:
+            self.change_state(Multiplexer.State.CONNECTED)
             if self.connection_result:
                 self.connection_result.set_result(0)
                 self.connection_result = None
-        elif self.state == Multiplexer.DISCONNECTING:
-            self.change_state(Multiplexer.DISCONNECTED)
+        elif self.state == Multiplexer.State.DISCONNECTING:
+            self.change_state(Multiplexer.State.DISCONNECTED)
             if self.disconnection_result:
                 self.disconnection_result.set_result(None)
                 self.disconnection_result = None
 
-    def on_dm_frame(self, _frame):
-        if self.state == Multiplexer.OPENING:
-            self.change_state(Multiplexer.CONNECTED)
+    def on_dm_frame(self, _frame: RFCOMM_Frame) -> None:
+        if self.state == Multiplexer.State.OPENING:
+            self.change_state(Multiplexer.State.CONNECTED)
             if self.open_result:
                 self.open_result.set_exception(
                     core.ConnectionError(
@@ -678,27 +769,29 @@ class Multiplexer(EventEmitter):
         else:
             logger.warning(f'unexpected state for DM: {self}')
 
-    def on_disc_frame(self, _frame):
-        self.change_state(Multiplexer.DISCONNECTED)
+    def on_disc_frame(self, _frame: RFCOMM_Frame) -> None:
+        self.change_state(Multiplexer.State.DISCONNECTED)
         self.send_frame(
-            RFCOMM_Frame.ua(c_r=0 if self.role == Multiplexer.INITIATOR else 1, dlci=0)
+            RFCOMM_Frame.ua(
+                c_r=0 if self.role == Multiplexer.Role.INITIATOR else 1, dlci=0
+            )
         )
 
-    def on_uih_frame(self, frame):
+    def on_uih_frame(self, frame: RFCOMM_Frame) -> None:
         (mcc_type, c_r, value) = RFCOMM_Frame.parse_mcc(frame.information)
 
-        if mcc_type == RFCOMM_MCC_PN_TYPE:
+        if mcc_type == MccType.PN:
             pn = RFCOMM_MCC_PN.from_bytes(value)
             self.on_mcc_pn(c_r, pn)
-        elif mcc_type == RFCOMM_MCC_MSC_TYPE:
+        elif mcc_type == MccType.MSC:
             mcs = RFCOMM_MCC_MSC.from_bytes(value)
             self.on_mcc_msc(c_r, mcs)
 
-    def on_ui_frame(self, frame):
+    def on_ui_frame(self, frame: RFCOMM_Frame) -> None:
         pass
 
-    def on_mcc_pn(self, c_r, pn):
-        if c_r == 1:
+    def on_mcc_pn(self, c_r: bool, pn: RFCOMM_MCC_PN) -> None:
+        if c_r:
             # Command
             logger.debug(f'<<< PN Command: {pn}')
 
@@ -729,45 +822,50 @@ class Multiplexer(EventEmitter):
         else:
             # Response
             logger.debug(f'>>> PN Response: {pn}')
-            if self.state == Multiplexer.OPENING:
+            if self.state == Multiplexer.State.OPENING:
                 dlc = DLC(self, pn.dlci, pn.max_frame_size, pn.window_size)
                 self.dlcs[pn.dlci] = dlc
                 dlc.connect()
             else:
                 logger.warning('ignoring PN response')
 
-    def on_mcc_msc(self, c_r, msc):
+    def on_mcc_msc(self, c_r: bool, msc: RFCOMM_MCC_MSC) -> None:
         dlc = self.dlcs.get(msc.dlci)
         if dlc is None:
             logger.warning(f'no dlc for DLCI {msc.dlci}')
             return
         dlc.on_mcc_msc(c_r, msc)
 
-    async def connect(self):
-        if self.state != Multiplexer.INIT:
+    async def connect(self) -> None:
+        if self.state != Multiplexer.State.INIT:
             raise InvalidStateError('invalid state')
 
-        self.change_state(Multiplexer.CONNECTING)
+        self.change_state(Multiplexer.State.CONNECTING)
         self.connection_result = asyncio.get_running_loop().create_future()
         self.send_frame(RFCOMM_Frame.sabm(c_r=1, dlci=0))
         return await self.connection_result
 
-    async def disconnect(self):
-        if self.state != Multiplexer.CONNECTED:
+    async def disconnect(self) -> None:
+        if self.state != Multiplexer.State.CONNECTED:
             return
 
         self.disconnection_result = asyncio.get_running_loop().create_future()
-        self.change_state(Multiplexer.DISCONNECTING)
+        self.change_state(Multiplexer.State.DISCONNECTING)
         self.send_frame(
             RFCOMM_Frame.disc(
-                c_r=1 if self.role == Multiplexer.INITIATOR else 0, dlci=0
+                c_r=1 if self.role == Multiplexer.Role.INITIATOR else 0, dlci=0
             )
         )
         await self.disconnection_result
 
-    async def open_dlc(self, channel):
-        if self.state != Multiplexer.CONNECTED:
-            if self.state == Multiplexer.OPENING:
+    async def open_dlc(
+        self,
+        channel: int,
+        max_frame_size: int = RFCOMM_DEFAULT_MAX_FRAME_SIZE,
+        window_size: int = RFCOMM_DEFAULT_WINDOW_SIZE,
+    ) -> DLC:
+        if self.state != Multiplexer.State.CONNECTED:
+            if self.state == Multiplexer.State.OPENING:
                 raise InvalidStateError('open already in progress')
 
             raise InvalidStateError('not connected')
@@ -777,17 +875,17 @@ class Multiplexer(EventEmitter):
             cl=0xF0,
             priority=7,
             ack_timer=0,
-            max_frame_size=RFCOMM_DEFAULT_PREFERRED_MTU,
+            max_frame_size=max_frame_size,
             max_retransmissions=0,
-            window_size=RFCOMM_DEFAULT_INITIAL_RX_CREDITS,
+            window_size=window_size,
         )
-        mcc = RFCOMM_Frame.make_mcc(mcc_type=RFCOMM_MCC_PN_TYPE, c_r=1, data=bytes(pn))
+        mcc = RFCOMM_Frame.make_mcc(mcc_type=MccType.PN, c_r=1, data=bytes(pn))
         logger.debug(f'>>> Sending MCC: {pn}')
         self.open_result = asyncio.get_running_loop().create_future()
-        self.change_state(Multiplexer.OPENING)
+        self.change_state(Multiplexer.State.OPENING)
         self.send_frame(
             RFCOMM_Frame.uih(
-                c_r=1 if self.role == Multiplexer.INITIATOR else 0,
+                c_r=1 if self.role == Multiplexer.Role.INITIATOR else 0,
                 dlci=0,
                 information=mcc,
             )
@@ -796,96 +894,135 @@ class Multiplexer(EventEmitter):
         self.open_result = None
         return result
 
-    def on_dlc_open_complete(self, dlc):
+    def on_dlc_open_complete(self, dlc: DLC) -> None:
         logger.debug(f'DLC [{dlc.dlci}] open complete')
-        self.change_state(Multiplexer.CONNECTED)
+        self.change_state(Multiplexer.State.CONNECTED)
         if self.open_result:
             self.open_result.set_result(dlc)
 
-    def __str__(self):
-        return f'Multiplexer(state={self.state_name(self.state)})'
+    def __str__(self) -> str:
+        return f'Multiplexer(state={self.state.name})'
 
 
 # -----------------------------------------------------------------------------
 class Client:
-    def __init__(self, device, connection):
-        self.device = device
+    multiplexer: Optional[Multiplexer]
+    l2cap_channel: Optional[l2cap.ClassicChannel]
+
+    def __init__(
+        self, connection: Connection, l2cap_mtu: int = RFCOMM_DEFAULT_L2CAP_MTU
+    ) -> None:
         self.connection = connection
+        self.l2cap_mtu = l2cap_mtu
         self.l2cap_channel = None
         self.multiplexer = None
 
-    async def start(self):
+    async def start(self) -> Multiplexer:
         # Create a new L2CAP connection
         try:
-            self.l2cap_channel = await self.device.l2cap_channel_manager.connect(
-                self.connection, RFCOMM_PSM
+            self.l2cap_channel = await self.connection.create_l2cap_channel(
+                spec=l2cap.ClassicChannelSpec(psm=RFCOMM_PSM, mtu=self.l2cap_mtu)
             )
         except ProtocolError as error:
             logger.warning(f'L2CAP connection failed: {error}')
             raise
 
-        # Create a mutliplexer to manage DLCs with the server
-        self.multiplexer = Multiplexer(self.l2cap_channel, Multiplexer.INITIATOR)
+        assert self.l2cap_channel is not None
+        # Create a multiplexer to manage DLCs with the server
+        self.multiplexer = Multiplexer(self.l2cap_channel, Multiplexer.Role.INITIATOR)
 
         # Connect the multiplexer
         await self.multiplexer.connect()
 
         return self.multiplexer
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
+        if self.multiplexer is None:
+            return
         # Disconnect the multiplexer
         await self.multiplexer.disconnect()
         self.multiplexer = None
 
         # Close the L2CAP channel
-        # TODO
+        if self.l2cap_channel:
+            await self.l2cap_channel.disconnect()
+            self.l2cap_channel = None
+
+    async def __aenter__(self) -> Multiplexer:
+        return await self.start()
+
+    async def __aexit__(self, *args) -> None:
+        await self.shutdown()
 
 
 # -----------------------------------------------------------------------------
 class Server(EventEmitter):
-    def __init__(self, device):
+    acceptors: Dict[int, Callable[[DLC], None]]
+
+    def __init__(
+        self, device: Device, l2cap_mtu: int = RFCOMM_DEFAULT_L2CAP_MTU
+    ) -> None:
         super().__init__()
         self.device = device
         self.multiplexer = None
         self.acceptors = {}
 
         # Register ourselves with the L2CAP channel manager
-        device.register_l2cap_server(RFCOMM_PSM, self.on_connection)
+        self.l2cap_server = device.create_l2cap_server(
+            spec=l2cap.ClassicChannelSpec(psm=RFCOMM_PSM, mtu=l2cap_mtu),
+            handler=self.on_connection,
+        )
 
-    def listen(self, acceptor):
-        # Find a free channel number
-        for channel in range(
-            RFCOMM_DYNAMIC_CHANNEL_NUMBER_START, RFCOMM_DYNAMIC_CHANNEL_NUMBER_END + 1
-        ):
-            if channel not in self.acceptors:
-                self.acceptors[channel] = acceptor
-                return channel
+    def listen(self, acceptor: Callable[[DLC], None], channel: int = 0) -> int:
+        if channel:
+            if channel in self.acceptors:
+                # Busy
+                return 0
+        else:
+            # Find a free channel number
+            for candidate in range(
+                RFCOMM_DYNAMIC_CHANNEL_NUMBER_START,
+                RFCOMM_DYNAMIC_CHANNEL_NUMBER_END + 1,
+            ):
+                if candidate not in self.acceptors:
+                    channel = candidate
+                    break
 
-        # All channels used...
-        return 0
+            if channel == 0:
+                # All channels used...
+                return 0
 
-    def on_connection(self, l2cap_channel):
+        self.acceptors[channel] = acceptor
+        return channel
+
+    def on_connection(self, l2cap_channel: l2cap.ClassicChannel) -> None:
         logger.debug(f'+++ new L2CAP connection: {l2cap_channel}')
         l2cap_channel.on('open', lambda: self.on_l2cap_channel_open(l2cap_channel))
 
-    def on_l2cap_channel_open(self, l2cap_channel):
+    def on_l2cap_channel_open(self, l2cap_channel: l2cap.ClassicChannel) -> None:
         logger.debug(f'$$$ L2CAP channel open: {l2cap_channel}')
 
         # Create a new multiplexer for the channel
-        multiplexer = Multiplexer(l2cap_channel, Multiplexer.RESPONDER)
+        multiplexer = Multiplexer(l2cap_channel, Multiplexer.Role.RESPONDER)
         multiplexer.acceptor = self.accept_dlc
         multiplexer.on('dlc', self.on_dlc)
 
         # Notify
         self.emit('start', multiplexer)
 
-    def accept_dlc(self, channel_number):
+    def accept_dlc(self, channel_number: int) -> bool:
         return channel_number in self.acceptors
 
-    def on_dlc(self, dlc):
+    def on_dlc(self, dlc: DLC) -> None:
         logger.debug(f'@@@ new DLC connected: {dlc}')
 
         # Let the acceptor know
         acceptor = self.acceptors.get(dlc.dlci >> 1)
         if acceptor:
             acceptor(dlc)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.l2cap_server.close()

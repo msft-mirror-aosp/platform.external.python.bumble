@@ -24,10 +24,16 @@ from prompt_toolkit.shortcuts import PromptSession
 from bumble.colors import color
 from bumble.device import Device, Peer
 from bumble.transport import open_transport_or_link
-from bumble.smp import PairingDelegate, PairingConfig
+from bumble.pairing import OobData, PairingDelegate, PairingConfig
+from bumble.smp import OobContext, OobLegacyContext
 from bumble.smp import error_name as smp_error_name
 from bumble.keys import JsonKeyStore
-from bumble.core import ProtocolError
+from bumble.core import (
+    AdvertisingData,
+    ProtocolError,
+    BT_LE_TRANSPORT,
+    BT_BR_EDR_TRANSPORT,
+)
 from bumble.gatt import (
     GATT_DEVICE_NAME_CHARACTERISTIC,
     GATT_GENERIC_ACCESS_SERVICE,
@@ -46,11 +52,13 @@ from bumble.att import (
 class Waiter:
     instance = None
 
-    def __init__(self):
+    def __init__(self, linger=False):
         self.done = asyncio.get_running_loop().create_future()
+        self.linger = linger
 
     def terminate(self):
-        self.done.set_result(None)
+        if not self.linger:
+            self.done.set_result(None)
 
     async def wait_until_terminated(self):
         return await self.done
@@ -60,7 +68,7 @@ class Waiter:
 class Delegate(PairingDelegate):
     def __init__(self, mode, connection, capability_string, do_prompt):
         super().__init__(
-            {
+            io_capability={
                 'keyboard': PairingDelegate.KEYBOARD_INPUT_ONLY,
                 'display': PairingDelegate.DISPLAY_OUTPUT_ONLY,
                 'display+keyboard': PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
@@ -157,6 +165,26 @@ class Delegate(PairingDelegate):
         self.print(f'### PIN: {number:0{digits}}')
         self.print('###-----------------------------------')
 
+    async def get_string(self, max_length: int):
+        await self.update_peer_name()
+
+        # Prompt a PIN (for legacy pairing in classic)
+        self.print('###-----------------------------------')
+        self.print(f'### Pairing with {self.peer_name}')
+        self.print('###-----------------------------------')
+        count = 0
+        while True:
+            response = await self.prompt('>>> Enter PIN (1-6 chars):')
+            if len(response) == 0:
+                count += 1
+                if count > 3:
+                    self.print('too many tries, stopping the pairing')
+                    return None
+
+                self.print('no PIN was entered, try again')
+                continue
+            return response
+
 
 # -----------------------------------------------------------------------------
 async def get_peer_name(peer, mode):
@@ -207,7 +235,7 @@ def on_connection(connection, request):
 
     # Listen for pairing events
     connection.on('pairing_start', on_pairing_start)
-    connection.on('pairing', on_pairing)
+    connection.on('pairing', lambda keys: on_pairing(connection.peer_address, keys))
     connection.on('pairing_failure', on_pairing_failure)
 
     # Listen for encryption changes
@@ -242,9 +270,9 @@ def on_pairing_start():
 
 
 # -----------------------------------------------------------------------------
-def on_pairing(keys):
+def on_pairing(address, keys):
     print(color('***-----------------------------------', 'cyan'))
-    print(color('*** Paired!', 'cyan'))
+    print(color(f'*** Paired! (peer identity={address})', 'cyan'))
     keys.print(prefix=color('*** ', 'cyan'))
     print(color('***-----------------------------------', 'cyan'))
     Waiter.instance.terminate()
@@ -264,7 +292,10 @@ async def pair(
     sc,
     mitm,
     bond,
+    ctkd,
+    linger,
     io,
+    oob,
     prompt,
     request,
     print_keys,
@@ -273,7 +304,7 @@ async def pair(
     hci_transport,
     address_or_name,
 ):
-    Waiter.instance = Waiter()
+    Waiter.instance = Waiter(linger=linger)
 
     print('<<< connecting to HCI...')
     async with await open_transport_or_link(hci_transport) as (hci_source, hci_sink):
@@ -282,27 +313,18 @@ async def pair(
         # Create a device to manage the host
         device = Device.from_config_file_with_hci(device_config, hci_source, hci_sink)
 
-        # Set a custom keystore if specified on the command line
-        if keystore_file:
-            device.keystore = JsonKeyStore(namespace=None, filename=keystore_file)
-
-        # Print the existing keys before pairing
-        if print_keys and device.keystore:
-            print(color('@@@-----------------------------------', 'blue'))
-            print(color('@@@ Pairing Keys:', 'blue'))
-            await device.keystore.print(prefix=color('@@@ ', 'blue'))
-            print(color('@@@-----------------------------------', 'blue'))
-
         # Expose a GATT characteristic that can be used to trigger pairing by
         # responding with an authentication error when read
         if mode == 'le':
+            device.le_enabled = True
             device.add_service(
                 Service(
                     '50DB505C-8AC4-4738-8448-3B1D9CC09CC5',
                     [
                         Characteristic(
                             '552957FB-CF1F-4A31-9535-E78847E1A714',
-                            Characteristic.READ | Characteristic.WRITE,
+                            Characteristic.Properties.READ
+                            | Characteristic.Properties.WRITE,
                             Characteristic.READABLE | Characteristic.WRITEABLE,
                             CharacteristicValue(
                                 read=read_with_error, write=write_with_error
@@ -315,21 +337,67 @@ async def pair(
         # Select LE or Classic
         if mode == 'classic':
             device.classic_enabled = True
-            device.le_enabled = False
+            device.classic_smp_enabled = ctkd
 
         # Get things going
         await device.power_on()
 
+        # Set a custom keystore if specified on the command line
+        if keystore_file:
+            device.keystore = JsonKeyStore.from_device(device, filename=keystore_file)
+
+        # Print the existing keys before pairing
+        if print_keys and device.keystore:
+            print(color('@@@-----------------------------------', 'blue'))
+            print(color('@@@ Pairing Keys:', 'blue'))
+            await device.keystore.print(prefix=color('@@@ ', 'blue'))
+            print(color('@@@-----------------------------------', 'blue'))
+
+        # Create an OOB context if needed
+        if oob:
+            our_oob_context = OobContext()
+            shared_data = (
+                None
+                if oob == '-'
+                else OobData.from_ad(AdvertisingData.from_bytes(bytes.fromhex(oob)))
+            )
+            legacy_context = OobLegacyContext()
+            oob_contexts = PairingConfig.OobConfig(
+                our_context=our_oob_context,
+                peer_data=shared_data,
+                legacy_context=legacy_context,
+            )
+            oob_data = OobData(
+                address=device.random_address,
+                shared_data=shared_data,
+                legacy_context=legacy_context,
+            )
+            print(color('@@@-----------------------------------', 'yellow'))
+            print(color('@@@ OOB Data:', 'yellow'))
+            print(color(f'@@@   {our_oob_context.share()}', 'yellow'))
+            print(color(f'@@@   TK={legacy_context.tk.hex()}', 'yellow'))
+            print(color(f'@@@   HEX: ({bytes(oob_data.to_ad()).hex()})', 'yellow'))
+            print(color('@@@-----------------------------------', 'yellow'))
+        else:
+            oob_contexts = None
+
         # Set up a pairing config factory
         device.pairing_config_factory = lambda connection: PairingConfig(
-            sc, mitm, bond, Delegate(mode, connection, io, prompt)
+            sc=sc,
+            mitm=mitm,
+            bonding=bond,
+            oob=oob_contexts,
+            delegate=Delegate(mode, connection, io, prompt),
         )
 
         # Connect to a peer or wait for a connection
         device.on('connection', lambda connection: on_connection(connection, request))
         if address_or_name is not None:
             print(color(f'=== Connecting to {address_or_name}...', 'green'))
-            connection = await device.connect(address_or_name)
+            connection = await device.connect(
+                address_or_name,
+                transport=BT_LE_TRANSPORT if mode == 'le' else BT_BR_EDR_TRANSPORT,
+            )
 
             if not request:
                 try:
@@ -337,13 +405,17 @@ async def pair(
                         await connection.pair()
                     else:
                         await connection.authenticate()
-                    return
                 except ProtocolError as error:
                     print(color(f'Pairing failed: {error}', 'red'))
-                    return
+
         else:
-            # Advertise so that peers can find us and connect
-            await device.start_advertising(auto_restart=True)
+            if mode == 'le':
+                # Advertise so that peers can find us and connect
+                await device.start_advertising(auto_restart=True)
+            else:
+                # Become discoverable and connectable
+                await device.set_discoverable(True)
+                await device.set_connectable(True)
 
         # Run until the user asks to exit
         await Waiter.instance.wait_until_terminated()
@@ -379,12 +451,28 @@ class LogHandler(logging.Handler):
     '--bond', type=bool, default=True, help='Enable bonding', show_default=True
 )
 @click.option(
+    '--ctkd',
+    type=bool,
+    default=True,
+    help='Enable CTKD',
+    show_default=True,
+)
+@click.option('--linger', default=False, is_flag=True, help='Linger after pairing')
+@click.option(
     '--io',
     type=click.Choice(
         ['keyboard', 'display', 'display+keyboard', 'display+yes/no', 'none']
     ),
     default='display+keyboard',
     show_default=True,
+)
+@click.option(
+    '--oob',
+    metavar='<oob-data-hex>',
+    help=(
+        'Use OOB pairing with this data from the peer '
+        '(use "-" to enable OOB without peer data)'
+    ),
 )
 @click.option('--prompt', is_flag=True, help='Prompt to accept/reject pairing request')
 @click.option(
@@ -404,7 +492,10 @@ def main(
     sc,
     mitm,
     bond,
+    ctkd,
+    linger,
     io,
+    oob,
     prompt,
     request,
     print_keys,
@@ -426,7 +517,10 @@ def main(
             sc,
             mitm,
             bond,
+            ctkd,
+            linger,
             io,
+            oob,
             prompt,
             request,
             print_keys,

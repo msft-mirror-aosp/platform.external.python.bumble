@@ -20,14 +20,18 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import asyncio
 import logging
 import os
 import json
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .colors import color
 from .hci import Address
+
+if TYPE_CHECKING:
+    from .device import Device
 
 
 # -----------------------------------------------------------------------------
@@ -135,19 +139,19 @@ class PairingKeys:
 
 # -----------------------------------------------------------------------------
 class KeyStore:
-    async def delete(self, name):
+    async def delete(self, name: str):
         pass
 
-    async def update(self, name, keys):
+    async def update(self, name: str, keys: PairingKeys) -> None:
         pass
 
-    async def get(self, _name):
-        return PairingKeys()
+    async def get(self, _name: str) -> Optional[PairingKeys]:
+        return None
 
-    async def get_all(self):
+    async def get_all(self) -> List[Tuple[str, PairingKeys]]:
         return []
 
-    async def delete_all(self):
+    async def delete_all(self) -> None:
         all_keys = await self.get_all()
         await asyncio.gather(*(self.delete(name) for (name, _) in all_keys))
 
@@ -173,23 +177,57 @@ class KeyStore:
             separator = '\n'
 
     @staticmethod
-    def create_for_device(device_config):
-        if device_config.keystore is None:
-            return None
+    def create_for_device(device: Device) -> KeyStore:
+        if device.config.keystore is None:
+            return MemoryKeyStore()
 
-        keystore_type = device_config.keystore.split(':', 1)[0]
+        keystore_type = device.config.keystore.split(':', 1)[0]
         if keystore_type == 'JsonKeyStore':
-            return JsonKeyStore.from_device_config(device_config)
+            return JsonKeyStore.from_device(device)
 
-        return None
+        return MemoryKeyStore()
 
 
 # -----------------------------------------------------------------------------
 class JsonKeyStore(KeyStore):
+    """
+    KeyStore implementation that is backed by a JSON file.
+
+    This implementation supports storing a hierarchy of key sets in a single file.
+    A key set is a representation of a PairingKeys object. Each key set is stored
+    in a map, with the address of paired peer as the key. Maps are themselves grouped
+    into namespaces, grouping pairing keys by controller addresses.
+    The JSON object model looks like:
+    {
+        "<namespace>": {
+            "peer-address": {
+                "address_type": <n>,
+                "irk" : {
+                    "authenticated": <true/false>,
+                    "value": "hex-encoded-key"
+                },
+                ... other keys ...
+            },
+            ... other peers ...
+        }
+        ... other namespaces ...
+    }
+
+    A namespace is typically the BD_ADDR of a controller, since that is a convenient
+    unique identifier, but it may be something else.
+    A special namespace, called the "default" namespace, is used when instantiating this
+    class without a namespace. With the default namespace, reading from a file will
+    load an existing namespace if there is only one, which may be convenient for reading
+    from a file with a single key set and for which the namespace isn't known. If the
+    file does not include any existing key set, or if there are more than one and none
+    has the default name, a new one will be created with the name "__DEFAULT__".
+    """
+
     APP_NAME = 'Bumble'
     APP_AUTHOR = 'Google'
     KEYS_DIR = 'Pairing'
     DEFAULT_NAMESPACE = '__DEFAULT__'
+    DEFAULT_BASE_NAME = "keys"
 
     def __init__(self, namespace, filename=None):
         self.namespace = namespace if namespace is not None else self.DEFAULT_NAMESPACE
@@ -204,7 +242,10 @@ class JsonKeyStore(KeyStore):
             self.directory_name = os.path.join(
                 appdirs.user_data_dir(self.APP_NAME, self.APP_AUTHOR), self.KEYS_DIR
             )
-            json_filename = f'{self.namespace}.json'.lower().replace(':', '-')
+            base_name = self.DEFAULT_BASE_NAME if namespace is None else self.namespace
+            json_filename = (
+                f'{base_name}.json'.lower().replace(':', '-').replace('/p', '-p')
+            )
             self.filename = os.path.join(self.directory_name, json_filename)
         else:
             self.filename = filename
@@ -213,22 +254,46 @@ class JsonKeyStore(KeyStore):
         logger.debug(f'JSON keystore: {self.filename}')
 
     @staticmethod
-    def from_device_config(device_config):
-        params = device_config.keystore.split(':', 1)[1:]
-        namespace = str(device_config.address)
-        if params:
-            filename = params[0]
+    def from_device(device: Device, filename=None) -> Optional[JsonKeyStore]:
+        if not filename:
+            # Extract the filename from the config if there is one
+            if device.config.keystore is not None:
+                params = device.config.keystore.split(':', 1)[1:]
+                if params:
+                    filename = params[0]
+
+        # Use a namespace based on the device address
+        if device.public_address not in (Address.ANY, Address.ANY_RANDOM):
+            namespace = str(device.public_address)
+        elif device.random_address != Address.ANY_RANDOM:
+            namespace = str(device.random_address)
         else:
-            filename = None
+            namespace = JsonKeyStore.DEFAULT_NAMESPACE
 
         return JsonKeyStore(namespace, filename)
 
     async def load(self):
+        # Try to open the file, without failing. If the file does not exist, it
+        # will be created upon saving.
         try:
             with open(self.filename, 'r', encoding='utf-8') as json_file:
-                return json.load(json_file)
+                db = json.load(json_file)
         except FileNotFoundError:
-            return {}
+            db = {}
+
+        # First, look for a namespace match
+        if self.namespace in db:
+            return (db, db[self.namespace])
+
+        # Then, if the namespace is the default namespace, and there's
+        # only one entry in the db, use that
+        if self.namespace == self.DEFAULT_NAMESPACE and len(db) == 1:
+            return next(iter(db.items()))
+
+        # Finally, just create an empty key map for the namespace
+        key_map = {}
+        db[self.namespace] = key_map
+        return (db, key_map)
 
     async def save(self, db):
         # Create the directory if it doesn't exist
@@ -241,53 +306,51 @@ class JsonKeyStore(KeyStore):
             json.dump(db, output, sort_keys=True, indent=4)
 
         # Atomically replace the previous file
-        os.rename(temp_filename, self.filename)
+        os.replace(temp_filename, self.filename)
 
     async def delete(self, name: str) -> None:
-        db = await self.load()
-
-        namespace = db.get(self.namespace)
-        if namespace is None:
-            raise KeyError(name)
-
-        del namespace[name]
+        db, key_map = await self.load()
+        del key_map[name]
         await self.save(db)
 
     async def update(self, name, keys):
-        db = await self.load()
-
-        namespace = db.setdefault(self.namespace, {})
-        namespace[name] = keys.to_dict()
-
+        db, key_map = await self.load()
+        key_map.setdefault(name, {}).update(keys.to_dict())
         await self.save(db)
 
     async def get_all(self):
-        db = await self.load()
-
-        namespace = db.get(self.namespace)
-        if namespace is None:
-            return []
-
-        return [
-            (name, PairingKeys.from_dict(keys)) for (name, keys) in namespace.items()
-        ]
+        _, key_map = await self.load()
+        return [(name, PairingKeys.from_dict(keys)) for (name, keys) in key_map.items()]
 
     async def delete_all(self):
-        db = await self.load()
-
-        db.pop(self.namespace, None)
-
+        db, key_map = await self.load()
+        key_map.clear()
         await self.save(db)
 
     async def get(self, name: str) -> Optional[PairingKeys]:
-        db = await self.load()
-
-        namespace = db.get(self.namespace)
-        if namespace is None:
+        _, key_map = await self.load()
+        if name not in key_map:
             return None
 
-        keys = namespace.get(name)
-        if keys is None:
-            return None
+        return PairingKeys.from_dict(key_map[name])
 
-        return PairingKeys.from_dict(keys)
+
+# -----------------------------------------------------------------------------
+class MemoryKeyStore(KeyStore):
+    all_keys: Dict[str, PairingKeys]
+
+    def __init__(self) -> None:
+        self.all_keys = {}
+
+    async def delete(self, name: str) -> None:
+        if name in self.all_keys:
+            del self.all_keys[name]
+
+    async def update(self, name: str, keys: PairingKeys) -> None:
+        self.all_keys[name] = keys
+
+    async def get(self, name: str) -> Optional[PairingKeys]:
+        return self.all_keys.get(name)
+
+    async def get_all(self) -> List[Tuple[str, PairingKeys]]:
+        return list(self.all_keys.items())

@@ -15,15 +15,32 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
-from bumble.core import UUID
-from bumble.sdp import DataElement
+import asyncio
+import logging
+import os
+import pytest
+
+from bumble.core import UUID, BT_L2CAP_PROTOCOL_ID, BT_RFCOMM_PROTOCOL_ID
+from bumble.sdp import (
+    DataElement,
+    ServiceAttribute,
+    Client,
+    Server,
+    SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
+    SDP_BROWSE_GROUP_LIST_ATTRIBUTE_ID,
+    SDP_PUBLIC_BROWSE_ROOT,
+    SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+    SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+)
+from .test_utils import TwoDevices
 
 # -----------------------------------------------------------------------------
 # pylint: disable=invalid-name
 # -----------------------------------------------------------------------------
 
+
 # -----------------------------------------------------------------------------
-def basic_check(x):
+def basic_check(x: DataElement) -> None:
     serialized = bytes(x)
     if len(serialized) < 500:
         print('Original:', x)
@@ -41,7 +58,7 @@ def basic_check(x):
 
 
 # -----------------------------------------------------------------------------
-def test_data_elements():
+def test_data_elements() -> None:
     e = DataElement(DataElement.NIL, None)
     basic_check(e)
 
@@ -84,13 +101,13 @@ def test_data_elements():
     e = DataElement(DataElement.UUID, UUID('61A3512C-09BE-4DDC-A6A6-0B03667AAFC6'))
     basic_check(e)
 
-    e = DataElement(DataElement.TEXT_STRING, 'hello')
+    e = DataElement(DataElement.TEXT_STRING, b'hello')
     basic_check(e)
 
-    e = DataElement(DataElement.TEXT_STRING, 'hello' * 60)
+    e = DataElement(DataElement.TEXT_STRING, b'hello' * 60)
     basic_check(e)
 
-    e = DataElement(DataElement.TEXT_STRING, 'hello' * 20000)
+    e = DataElement(DataElement.TEXT_STRING, b'hello' * 20000)
     basic_check(e)
 
     e = DataElement(DataElement.BOOLEAN, True)
@@ -106,7 +123,7 @@ def test_data_elements():
         DataElement.SEQUENCE,
         [
             DataElement(DataElement.BOOLEAN, True),
-            DataElement(DataElement.TEXT_STRING, 'hello'),
+            DataElement(DataElement.TEXT_STRING, b'hello'),
         ],
     )
     basic_check(e)
@@ -118,7 +135,7 @@ def test_data_elements():
         DataElement.ALTERNATIVE,
         [
             DataElement(DataElement.BOOLEAN, True),
-            DataElement(DataElement.TEXT_STRING, 'hello'),
+            DataElement(DataElement.TEXT_STRING, b'hello'),
         ],
     )
     basic_check(e)
@@ -136,19 +153,19 @@ def test_data_elements():
     e = DataElement.uuid(UUID.from_16_bits(1234))
     basic_check(e)
 
-    e = DataElement.text_string('hello')
+    e = DataElement.text_string(b'hello')
     basic_check(e)
 
     e = DataElement.boolean(True)
     basic_check(e)
 
     e = DataElement.sequence(
-        [DataElement.signed_integer(0, 1), DataElement.text_string('hello')]
+        [DataElement.signed_integer(0, 1), DataElement.text_string(b'hello')]
     )
     basic_check(e)
 
     e = DataElement.alternative(
-        [DataElement.signed_integer(0, 1), DataElement.text_string('hello')]
+        [DataElement.signed_integer(0, 1), DataElement.text_string(b'hello')]
     )
     basic_check(e)
 
@@ -157,5 +174,125 @@ def test_data_elements():
 
 
 # -----------------------------------------------------------------------------
-if __name__ == '__main__':
+def sdp_records():
+    return {
+        0x00010001: [
+            ServiceAttribute(
+                SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
+                DataElement.unsigned_integer_32(0x00010001),
+            ),
+            ServiceAttribute(
+                SDP_BROWSE_GROUP_LIST_ATTRIBUTE_ID,
+                DataElement.sequence([DataElement.uuid(SDP_PUBLIC_BROWSE_ROOT)]),
+            ),
+            ServiceAttribute(
+                SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+                DataElement.sequence(
+                    [DataElement.uuid(UUID('E6D55659-C8B4-4B85-96BB-B1143AF6D3AE'))]
+                ),
+            ),
+            ServiceAttribute(
+                SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                DataElement.sequence(
+                    [
+                        DataElement.sequence([DataElement.uuid(BT_L2CAP_PROTOCOL_ID)]),
+                    ]
+                ),
+            ),
+        ]
+    }
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_service_search():
+    # Setup connections
+    devices = TwoDevices()
+    await devices.setup_connection()
+    assert devices.connections[0]
+    assert devices.connections[1]
+
+    # Register SDP service
+    devices.devices[0].sdp_server.service_records.update(sdp_records())
+
+    # Search for service
+    client = Client(devices.connections[1])
+    await client.connect()
+    services = await client.search_services(
+        [UUID('E6D55659-C8B4-4B85-96BB-B1143AF6D3AE')]
+    )
+
+    # Then
+    assert services[0] == 0x00010001
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_service_attribute():
+    # Setup connections
+    devices = TwoDevices()
+    await devices.setup_connection()
+
+    # Register SDP service
+    devices.devices[0].sdp_server.service_records.update(sdp_records())
+
+    # Search for service
+    client = Client(devices.connections[1])
+    await client.connect()
+    attributes = await client.get_attributes(
+        0x00010001, [SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID]
+    )
+
+    # Then
+    assert attributes[0].value.value == sdp_records()[0x00010001][0].value.value
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_service_search_attribute():
+    # Setup connections
+    devices = TwoDevices()
+    await devices.setup_connection()
+
+    # Register SDP service
+    devices.devices[0].sdp_server.service_records.update(sdp_records())
+
+    # Search for service
+    client = Client(devices.connections[1])
+    await client.connect()
+    attributes = await client.search_attributes(
+        [UUID('E6D55659-C8B4-4B85-96BB-B1143AF6D3AE')], [(0x0000FFFF, 8)]
+    )
+
+    # Then
+    for expect, actual in zip(attributes, sdp_records().values()):
+        assert expect.id == actual.id
+        assert expect.value == actual.value
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_client_async_context():
+    devices = TwoDevices()
+    await devices.setup_connection()
+
+    client = Client(devices.connections[1])
+
+    async with client:
+        assert client.channel is not None
+
+    assert client.channel is None
+
+
+# -----------------------------------------------------------------------------
+async def run():
     test_data_elements()
+    await test_service_attribute()
+    await test_service_search()
+    await test_service_search_attribute()
+
+
+# -----------------------------------------------------------------------------
+if __name__ == '__main__':
+    logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'INFO').upper())
+    asyncio.run(run())
