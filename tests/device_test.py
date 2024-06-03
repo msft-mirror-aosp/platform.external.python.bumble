@@ -20,16 +20,23 @@ import logging
 import os
 from types import LambdaType
 import pytest
+from unittest import mock
 
-from bumble.core import BT_BR_EDR_TRANSPORT
-from bumble.device import Connection, Device
-from bumble.host import Host
+from bumble.core import (
+    BT_BR_EDR_TRANSPORT,
+    BT_LE_TRANSPORT,
+    BT_PERIPHERAL_ROLE,
+    ConnectionParameters,
+)
+from bumble.device import AdvertisingParameters, Connection, Device
+from bumble.host import AclPacketQueue, Host
 from bumble.hci import (
     HCI_ACCEPT_CONNECTION_REQUEST_COMMAND,
     HCI_COMMAND_STATUS_PENDING,
     HCI_CREATE_CONNECTION_COMMAND,
     HCI_SUCCESS,
     Address,
+    OwnAddressType,
     HCI_Command_Complete_Event,
     HCI_Command_Status_Event,
     HCI_Connection_Complete_Event,
@@ -42,6 +49,9 @@ from bumble.gatt import (
     GATT_DEVICE_NAME_CHARACTERISTIC,
     GATT_APPEARANCE_CHARACTERISTIC,
 )
+
+from .test_utils import TwoDevices, async_barrier
+
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -65,6 +75,13 @@ async def test_device_connect_parallel():
     d0 = Device(host=Host(None, None))
     d1 = Device(host=Host(None, None))
     d2 = Device(host=Host(None, None))
+
+    def _send(packet):
+        pass
+
+    d0.host.acl_packet_queue = AclPacketQueue(0, 0, _send)
+    d1.host.acl_packet_queue = AclPacketQueue(0, 0, _send)
+    d2.host.acl_packet_queue = AclPacketQueue(0, 0, _send)
 
     # enable classic
     d0.classic_enabled = True
@@ -230,6 +247,190 @@ async def test_flush():
         assert False
     except asyncio.CancelledError:
         pass
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_legacy_advertising():
+    device = Device(host=mock.AsyncMock(Host))
+
+    # Start advertising
+    await device.start_advertising()
+    assert device.is_advertising
+
+    # Stop advertising
+    await device.stop_advertising()
+    assert not device.is_advertising
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    'own_address_type,',
+    (OwnAddressType.PUBLIC, OwnAddressType.RANDOM),
+)
+@pytest.mark.asyncio
+async def test_legacy_advertising_connection(own_address_type):
+    device = Device(host=mock.AsyncMock(Host))
+    peer_address = Address('F0:F1:F2:F3:F4:F5')
+
+    # Start advertising
+    await device.start_advertising()
+    device.on_connection(
+        0x0001,
+        BT_LE_TRANSPORT,
+        peer_address,
+        BT_PERIPHERAL_ROLE,
+        ConnectionParameters(0, 0, 0),
+    )
+
+    if own_address_type == OwnAddressType.PUBLIC:
+        assert device.lookup_connection(0x0001).self_address == device.public_address
+    else:
+        assert device.lookup_connection(0x0001).self_address == device.random_address
+
+    # For unknown reason, read_phy() in on_connection() would be killed at the end of
+    # test, so we force scheduling here to avoid an warning.
+    await asyncio.sleep(0.0001)
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    'auto_restart,',
+    (True, False),
+)
+@pytest.mark.asyncio
+async def test_legacy_advertising_disconnection(auto_restart):
+    device = Device(host=mock.AsyncMock(spec=Host))
+    peer_address = Address('F0:F1:F2:F3:F4:F5')
+    await device.start_advertising(auto_restart=auto_restart)
+    device.on_connection(
+        0x0001,
+        BT_LE_TRANSPORT,
+        peer_address,
+        BT_PERIPHERAL_ROLE,
+        ConnectionParameters(0, 0, 0),
+    )
+
+    device.on_advertising_set_termination(
+        HCI_SUCCESS, device.legacy_advertising_set.advertising_handle, 0x0001, 0
+    )
+
+    device.on_disconnection(0x0001, 0)
+    await async_barrier()
+    await async_barrier()
+
+    if auto_restart:
+        assert device.is_advertising
+    else:
+        assert not device.is_advertising
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_extended_advertising():
+    device = Device(host=mock.AsyncMock(Host))
+
+    # Start advertising
+    advertising_set = await device.create_advertising_set()
+    assert device.extended_advertising_sets
+    assert advertising_set.enabled
+
+    # Stop advertising
+    await advertising_set.stop()
+    assert not advertising_set.enabled
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    'own_address_type,',
+    (OwnAddressType.PUBLIC, OwnAddressType.RANDOM),
+)
+@pytest.mark.asyncio
+async def test_extended_advertising_connection(own_address_type):
+    device = Device(host=mock.AsyncMock(spec=Host))
+    peer_address = Address('F0:F1:F2:F3:F4:F5')
+    advertising_set = await device.create_advertising_set(
+        advertising_parameters=AdvertisingParameters(own_address_type=own_address_type)
+    )
+    device.on_connection(
+        0x0001,
+        BT_LE_TRANSPORT,
+        peer_address,
+        BT_PERIPHERAL_ROLE,
+        ConnectionParameters(0, 0, 0),
+    )
+    device.on_advertising_set_termination(
+        HCI_SUCCESS,
+        advertising_set.advertising_handle,
+        0x0001,
+        0,
+    )
+
+    if own_address_type == OwnAddressType.PUBLIC:
+        assert device.lookup_connection(0x0001).self_address == device.public_address
+    else:
+        assert device.lookup_connection(0x0001).self_address == device.random_address
+
+    # For unknown reason, read_phy() in on_connection() would be killed at the end of
+    # test, so we force scheduling here to avoid an warning.
+    await asyncio.sleep(0.0001)
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_get_remote_le_features():
+    devices = TwoDevices()
+    await devices.setup_connection()
+
+    assert (await devices.connections[0].get_remote_le_features()) is not None
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cis():
+    devices = TwoDevices()
+    await devices.setup_connection()
+
+    peripheral_cis_futures = {}
+
+    def on_cis_request(
+        acl_connection: Connection,
+        cis_handle: int,
+        _cig_id: int,
+        _cis_id: int,
+    ):
+        acl_connection.abort_on(
+            'disconnection', devices[1].accept_cis_request(cis_handle)
+        )
+        peripheral_cis_futures[cis_handle] = asyncio.get_running_loop().create_future()
+
+    devices[1].on('cis_request', on_cis_request)
+    devices[1].on(
+        'cis_establishment',
+        lambda cis_link: peripheral_cis_futures[cis_link.handle].set_result(None),
+    )
+
+    cis_handles = await devices[0].setup_cig(
+        cig_id=1,
+        cis_id=[2, 3],
+        sdu_interval=(0, 0),
+        framing=0,
+        max_sdu=(0, 0),
+        retransmission_number=0,
+        max_transport_latency=(0, 0),
+    )
+    assert len(cis_handles) == 2
+    cis_links = await devices[0].create_cis(
+        [
+            (cis_handles[0], devices.connections[0].handle),
+            (cis_handles[1], devices.connections[0].handle),
+        ]
+    )
+    await asyncio.gather(*peripheral_cis_futures.values())
+    assert len(cis_links) == 2
+
+    await cis_links[0].disconnect()
+    await cis_links[1].disconnect()
 
 
 # -----------------------------------------------------------------------------
