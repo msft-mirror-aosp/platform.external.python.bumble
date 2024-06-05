@@ -24,10 +24,16 @@ from prompt_toolkit.shortcuts import PromptSession
 from bumble.colors import color
 from bumble.device import Device, Peer
 from bumble.transport import open_transport_or_link
-from bumble.pairing import PairingDelegate, PairingConfig
+from bumble.pairing import OobData, PairingDelegate, PairingConfig
+from bumble.smp import OobContext, OobLegacyContext
 from bumble.smp import error_name as smp_error_name
 from bumble.keys import JsonKeyStore
-from bumble.core import ProtocolError
+from bumble.core import (
+    AdvertisingData,
+    ProtocolError,
+    BT_LE_TRANSPORT,
+    BT_BR_EDR_TRANSPORT,
+)
 from bumble.gatt import (
     GATT_DEVICE_NAME_CHARACTERISTIC,
     GATT_GENERIC_ACCESS_SERVICE,
@@ -46,11 +52,13 @@ from bumble.att import (
 class Waiter:
     instance = None
 
-    def __init__(self):
+    def __init__(self, linger=False):
         self.done = asyncio.get_running_loop().create_future()
+        self.linger = linger
 
     def terminate(self):
-        self.done.set_result(None)
+        if not self.linger:
+            self.done.set_result(None)
 
     async def wait_until_terminated(self):
         return await self.done
@@ -60,7 +68,7 @@ class Waiter:
 class Delegate(PairingDelegate):
     def __init__(self, mode, connection, capability_string, do_prompt):
         super().__init__(
-            {
+            io_capability={
                 'keyboard': PairingDelegate.KEYBOARD_INPUT_ONLY,
                 'display': PairingDelegate.DISPLAY_OUTPUT_ONLY,
                 'display+keyboard': PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
@@ -285,7 +293,9 @@ async def pair(
     mitm,
     bond,
     ctkd,
+    linger,
     io,
+    oob,
     prompt,
     request,
     print_keys,
@@ -294,7 +304,7 @@ async def pair(
     hci_transport,
     address_or_name,
 ):
-    Waiter.instance = Waiter()
+    Waiter.instance = Waiter(linger=linger)
 
     print('<<< connecting to HCI...')
     async with await open_transport_or_link(hci_transport) as (hci_source, hci_sink):
@@ -306,6 +316,7 @@ async def pair(
         # Expose a GATT characteristic that can be used to trigger pairing by
         # responding with an authentication error when read
         if mode == 'le':
+            device.le_enabled = True
             device.add_service(
                 Service(
                     '50DB505C-8AC4-4738-8448-3B1D9CC09CC5',
@@ -326,7 +337,6 @@ async def pair(
         # Select LE or Classic
         if mode == 'classic':
             device.classic_enabled = True
-            device.le_enabled = False
             device.classic_smp_enabled = ctkd
 
         # Get things going
@@ -343,16 +353,51 @@ async def pair(
             await device.keystore.print(prefix=color('@@@ ', 'blue'))
             print(color('@@@-----------------------------------', 'blue'))
 
+        # Create an OOB context if needed
+        if oob:
+            our_oob_context = OobContext()
+            shared_data = (
+                None
+                if oob == '-'
+                else OobData.from_ad(AdvertisingData.from_bytes(bytes.fromhex(oob)))
+            )
+            legacy_context = OobLegacyContext()
+            oob_contexts = PairingConfig.OobConfig(
+                our_context=our_oob_context,
+                peer_data=shared_data,
+                legacy_context=legacy_context,
+            )
+            oob_data = OobData(
+                address=device.random_address,
+                shared_data=shared_data,
+                legacy_context=legacy_context,
+            )
+            print(color('@@@-----------------------------------', 'yellow'))
+            print(color('@@@ OOB Data:', 'yellow'))
+            print(color(f'@@@   {our_oob_context.share()}', 'yellow'))
+            print(color(f'@@@   TK={legacy_context.tk.hex()}', 'yellow'))
+            print(color(f'@@@   HEX: ({bytes(oob_data.to_ad()).hex()})', 'yellow'))
+            print(color('@@@-----------------------------------', 'yellow'))
+        else:
+            oob_contexts = None
+
         # Set up a pairing config factory
         device.pairing_config_factory = lambda connection: PairingConfig(
-            sc, mitm, bond, Delegate(mode, connection, io, prompt)
+            sc=sc,
+            mitm=mitm,
+            bonding=bond,
+            oob=oob_contexts,
+            delegate=Delegate(mode, connection, io, prompt),
         )
 
         # Connect to a peer or wait for a connection
         device.on('connection', lambda connection: on_connection(connection, request))
         if address_or_name is not None:
             print(color(f'=== Connecting to {address_or_name}...', 'green'))
-            connection = await device.connect(address_or_name)
+            connection = await device.connect(
+                address_or_name,
+                transport=BT_LE_TRANSPORT if mode == 'le' else BT_BR_EDR_TRANSPORT,
+            )
 
             if not request:
                 try:
@@ -360,10 +405,9 @@ async def pair(
                         await connection.pair()
                     else:
                         await connection.authenticate()
-                    return
                 except ProtocolError as error:
                     print(color(f'Pairing failed: {error}', 'red'))
-                    return
+
         else:
             if mode == 'le':
                 # Advertise so that peers can find us and connect
@@ -413,6 +457,7 @@ class LogHandler(logging.Handler):
     help='Enable CTKD',
     show_default=True,
 )
+@click.option('--linger', default=False, is_flag=True, help='Linger after pairing')
 @click.option(
     '--io',
     type=click.Choice(
@@ -420,6 +465,14 @@ class LogHandler(logging.Handler):
     ),
     default='display+keyboard',
     show_default=True,
+)
+@click.option(
+    '--oob',
+    metavar='<oob-data-hex>',
+    help=(
+        'Use OOB pairing with this data from the peer '
+        '(use "-" to enable OOB without peer data)'
+    ),
 )
 @click.option('--prompt', is_flag=True, help='Prompt to accept/reject pairing request')
 @click.option(
@@ -440,7 +493,9 @@ def main(
     mitm,
     bond,
     ctkd,
+    linger,
     io,
+    oob,
     prompt,
     request,
     print_keys,
@@ -463,7 +518,9 @@ def main(
             mitm,
             bond,
             ctkd,
+            linger,
             io,
+            oob,
             prompt,
             request,
             print_keys,

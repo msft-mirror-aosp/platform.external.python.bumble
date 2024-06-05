@@ -74,7 +74,7 @@ def codec_capabilities():
 # -----------------------------------------------------------------------------
 def on_avdtp_connection(read_function, protocol):
     packet_source = SbcPacketSource(
-        read_function, protocol.l2cap_channel.mtu, codec_capabilities()
+        read_function, protocol.l2cap_channel.peer_mtu, codec_capabilities()
     )
     packet_pump = MediaPacketPump(packet_source.packets)
     protocol.add_source(packet_source.codec_capabilities, packet_pump)
@@ -98,7 +98,7 @@ async def stream_packets(read_function, protocol):
 
     # Stream the packets
     packet_source = SbcPacketSource(
-        read_function, protocol.l2cap_channel.mtu, codec_capabilities()
+        read_function, protocol.l2cap_channel.peer_mtu, codec_capabilities()
     )
     packet_pump = MediaPacketPump(packet_source.packets)
     source = protocol.add_source(packet_source.codec_capabilities, packet_pump)
@@ -165,9 +165,7 @@ async def main():
                 print('*** Encryption on')
 
                 # Look for an A2DP service
-                avdtp_version = await find_avdtp_service_with_connection(
-                    device, connection
-                )
+                avdtp_version = await find_avdtp_service_with_connection(connection)
                 if not avdtp_version:
                     print(color('!!! no A2DP service found'))
                     return
@@ -179,7 +177,7 @@ async def main():
                 await stream_packets(read, protocol)
             else:
                 # Create a listener to wait for AVDTP connections
-                listener = Listener(Listener.create_registrar(device), version=(1, 2))
+                listener = Listener.for_device(device=device, version=(1, 2))
                 listener.on(
                     'connection', lambda protocol: on_avdtp_connection(read, protocol)
                 )

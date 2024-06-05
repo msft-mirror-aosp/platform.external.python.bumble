@@ -14,6 +14,8 @@
 
 //! HCI packet transport
 
+use crate::wrapper::controller::Controller;
+use futures::executor::block_on;
 use pyo3::{intern, types::PyModule, PyObject, PyResult, Python};
 
 /// A source/sink pair for HCI packet I/O.
@@ -57,9 +59,9 @@ impl Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        // can't await in a Drop impl, but we can at least spawn a task to do it
-        let obj = self.0.clone();
-        tokio::spawn(async move { Self(obj).close().await });
+        // don't spawn a thread to handle closing, as it may get dropped at program termination,
+        // resulting in `RuntimeWarning: coroutine ... was never awaited` from Python
+        let _ = block_on(self.close());
     }
 }
 
@@ -67,6 +69,18 @@ impl Drop for Transport {
 #[derive(Clone)]
 pub struct Source(pub(crate) PyObject);
 
+impl From<Controller> for Source {
+    fn from(value: Controller) -> Self {
+        Self(value.0)
+    }
+}
+
 /// The sink side of a [Transport].
 #[derive(Clone)]
 pub struct Sink(pub(crate) PyObject);
+
+impl From<Controller> for Sink {
+    fn from(value: Controller) -> Self {
+        Self(value.0)
+    }
+}

@@ -21,7 +21,7 @@ import struct
 import asyncio
 import logging
 import io
-from typing import ContextManager, Tuple, Optional, Protocol, Dict
+from typing import Any, ContextManager, Tuple, Optional, Protocol, Dict
 
 from bumble import hci
 from bumble.colors import color
@@ -42,6 +42,7 @@ HCI_PACKET_INFO: Dict[int, Tuple[int, int, str]] = {
     hci.HCI_ACL_DATA_PACKET: (2, 2, 'H'),
     hci.HCI_SYNCHRONOUS_DATA_PACKET: (1, 2, 'B'),
     hci.HCI_EVENT_PACKET: (1, 1, 'B'),
+    hci.HCI_ISO_DATA_PACKET: (2, 2, 'H'),
 }
 
 
@@ -150,7 +151,7 @@ class PacketParser:
                         try:
                             self.sink.on_packet(bytes(self.packet))
                         except Exception as error:
-                            logger.warning(
+                            logger.exception(
                                 color(f'!!! Exception in on_packet: {error}', 'red')
                             )
                     self.reset()
@@ -167,11 +168,13 @@ class PacketReader:
 
     def __init__(self, source: io.BufferedReader) -> None:
         self.source = source
+        self.at_end = False
 
     def next_packet(self) -> Optional[bytes]:
         # Get the packet type
         packet_type = self.source.read(1)
         if len(packet_type) != 1:
+            self.at_end = True
             return None
 
         # Get the packet info based on its type

@@ -20,7 +20,10 @@
 use bumble::{
     adv::CommonDataType,
     wrapper::{
-        core::AdvertisementDataUnit, device::Device, hci::AddressType, transport::Transport,
+        core::AdvertisementDataUnit,
+        device::Device,
+        hci::{packets::AddressType, Address},
+        transport::Transport,
     },
 };
 use clap::Parser as _;
@@ -43,12 +46,8 @@ async fn main() -> PyResult<()> {
 
     let transport = Transport::open(cli.transport).await?;
 
-    let mut device = Device::with_hci(
-        "Bumble",
-        "F0:F1:F2:F3:F4:F5",
-        transport.source()?,
-        transport.sink()?,
-    )?;
+    let address = Address::new("F0:F1:F2:F3:F4:F5", AddressType::RandomDeviceAddress)?;
+    let mut device = Device::with_hci("Bumble", address, transport.source()?, transport.sink()?)?;
 
     // in practice, devices can send multiple advertisements from the same address, so we keep
     // track of a timestamp for each set of data
@@ -69,9 +68,7 @@ async fn main() -> PyResult<()> {
             let mut seen_adv_cache = seen_adv_clone.lock().unwrap();
             let expiry_duration = time::Duration::from_secs(cli.dedup_expiry_secs);
 
-            let advs_from_addr = seen_adv_cache
-                .entry(addr_bytes)
-                .or_insert_with(collections::HashMap::new);
+            let advs_from_addr = seen_adv_cache.entry(addr_bytes).or_default();
             // we expect cache hits to be the norm, so we do a separate lookup to avoid cloning
             // on every lookup with entry()
             let show = if let Some(prev) = advs_from_addr.get_mut(&data_units) {
@@ -102,7 +99,9 @@ async fn main() -> PyResult<()> {
         };
 
         let (type_style, qualifier) = match adv.address()?.address_type()? {
-            AddressType::PublicIdentity | AddressType::PublicDevice => (Style::new().cyan(), ""),
+            AddressType::PublicIdentityAddress | AddressType::PublicDeviceAddress => {
+                (Style::new().cyan(), "")
+            }
             _ => {
                 if addr.is_static()? {
                     (Style::new().green(), "(static)")
