@@ -59,15 +59,13 @@ class TransportLostError(Exception):
 # Typing Protocols
 # -----------------------------------------------------------------------------
 class TransportSink(Protocol):
-    def on_packet(self, packet: bytes) -> None:
-        ...
+    def on_packet(self, packet: bytes) -> None: ...
 
 
 class TransportSource(Protocol):
     terminated: asyncio.Future[None]
 
-    def set_packet_sink(self, sink: TransportSink) -> None:
-        ...
+    def set_packet_sink(self, sink: TransportSink) -> None: ...
 
 
 # -----------------------------------------------------------------------------
@@ -426,6 +424,10 @@ class SnoopingTransport(Transport):
 
     class Source:
         sink: TransportSink
+
+        @property
+        def metadata(self) -> dict[str, Any]:
+            return getattr(self.source, 'metadata', {})
 
         def __init__(self, source: TransportSource, snooper: Snooper):
             self.source = source

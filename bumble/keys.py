@@ -25,7 +25,8 @@ import asyncio
 import logging
 import os
 import json
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
+from typing_extensions import Self
 
 from .colors import color
 from .hci import Address
@@ -128,10 +129,10 @@ class PairingKeys:
 
     def print(self, prefix=''):
         keys_dict = self.to_dict()
-        for (container_property, value) in keys_dict.items():
+        for container_property, value in keys_dict.items():
             if isinstance(value, dict):
                 print(f'{prefix}{color(container_property, "cyan")}:')
-                for (key_property, key_value) in value.items():
+                for key_property, key_value in value.items():
                     print(f'{prefix}  {color(key_property, "green")}: {key_value}')
             else:
                 print(f'{prefix}{color(container_property, "cyan")}: {value}')
@@ -158,7 +159,7 @@ class KeyStore:
     async def get_resolving_keys(self):
         all_keys = await self.get_all()
         resolving_keys = []
-        for (name, keys) in all_keys:
+        for name, keys in all_keys:
             if keys.irk is not None:
                 if keys.address_type is None:
                     address_type = Address.RANDOM_DEVICE_ADDRESS
@@ -171,7 +172,7 @@ class KeyStore:
     async def print(self, prefix=''):
         entries = await self.get_all()
         separator = ''
-        for (name, keys) in entries:
+        for name, keys in entries:
             print(separator + prefix + color(name, 'yellow'))
             keys.print(prefix=prefix + '  ')
             separator = '\n'
@@ -253,8 +254,10 @@ class JsonKeyStore(KeyStore):
 
         logger.debug(f'JSON keystore: {self.filename}')
 
-    @staticmethod
-    def from_device(device: Device, filename=None) -> Optional[JsonKeyStore]:
+    @classmethod
+    def from_device(
+        cls: Type[Self], device: Device, filename: Optional[str] = None
+    ) -> Self:
         if not filename:
             # Extract the filename from the config if there is one
             if device.config.keystore is not None:
@@ -270,7 +273,7 @@ class JsonKeyStore(KeyStore):
         else:
             namespace = JsonKeyStore.DEFAULT_NAMESPACE
 
-        return JsonKeyStore(namespace, filename)
+        return cls(namespace, filename)
 
     async def load(self):
         # Try to open the file, without failing. If the file does not exist, it
