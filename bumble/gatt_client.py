@@ -91,6 +91,22 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
+# Utils
+# -----------------------------------------------------------------------------
+
+
+def show_services(services: Iterable[ServiceProxy]) -> None:
+    for service in services:
+        print(color(str(service), 'cyan'))
+
+        for characteristic in service.characteristics:
+            print(color('  ' + str(characteristic), 'magenta'))
+
+            for descriptor in characteristic.descriptors:
+                print(color('    ' + str(descriptor), 'green'))
+
+
+# -----------------------------------------------------------------------------
 # Proxies
 # -----------------------------------------------------------------------------
 class AttributeProxy(EventEmitter):
@@ -352,9 +368,7 @@ class Client:
             if c.uuid == uuid
         ]
 
-    def get_attribute_grouping(
-        self, attribute_handle: int
-    ) -> Optional[
+    def get_attribute_grouping(self, attribute_handle: int) -> Optional[
         Union[
             ServiceProxy,
             Tuple[ServiceProxy, CharacteristicProxy],

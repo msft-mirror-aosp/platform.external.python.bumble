@@ -19,8 +19,8 @@
 import struct
 from typing import Optional, Tuple
 
-from ..gatt_client import ProfileServiceProxy
-from ..gatt import (
+from bumble.gatt_client import ServiceProxy, ProfileServiceProxy, CharacteristicProxy
+from bumble.gatt import (
     GATT_DEVICE_INFORMATION_SERVICE,
     GATT_FIRMWARE_REVISION_STRING_CHARACTERISTIC,
     GATT_HARDWARE_REVISION_STRING_CHARACTERISTIC,
@@ -59,7 +59,7 @@ class DeviceInformationService(TemplateService):
         firmware_revision: Optional[str] = None,
         software_revision: Optional[str] = None,
         system_id: Optional[Tuple[int, int]] = None,  # (OUI, Manufacturer ID)
-        ieee_regulatory_certification_data_list: Optional[bytes] = None
+        ieee_regulatory_certification_data_list: Optional[bytes] = None,
         # TODO: pnp_id
     ):
         characteristics = [
@@ -104,10 +104,19 @@ class DeviceInformationService(TemplateService):
 class DeviceInformationServiceProxy(ProfileServiceProxy):
     SERVICE_CLASS = DeviceInformationService
 
-    def __init__(self, service_proxy):
+    manufacturer_name: Optional[UTF8CharacteristicAdapter]
+    model_number: Optional[UTF8CharacteristicAdapter]
+    serial_number: Optional[UTF8CharacteristicAdapter]
+    hardware_revision: Optional[UTF8CharacteristicAdapter]
+    firmware_revision: Optional[UTF8CharacteristicAdapter]
+    software_revision: Optional[UTF8CharacteristicAdapter]
+    system_id: Optional[DelegatedCharacteristicAdapter]
+    ieee_regulatory_certification_data_list: Optional[CharacteristicProxy]
+
+    def __init__(self, service_proxy: ServiceProxy):
         self.service_proxy = service_proxy
 
-        for (field, uuid) in (
+        for field, uuid in (
             ('manufacturer_name', GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC),
             ('model_number', GATT_MODEL_NUMBER_STRING_CHARACTERISTIC),
             ('serial_number', GATT_SERIAL_NUMBER_STRING_CHARACTERISTIC),

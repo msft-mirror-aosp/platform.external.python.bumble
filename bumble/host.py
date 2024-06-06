@@ -184,7 +184,7 @@ class Host(AbortableEventEmitter):
         self.long_term_key_provider = None
         self.link_key_provider = None
         self.pairing_io_capability_provider = None  # Classic only
-        self.snooper = None
+        self.snooper: Optional[Snooper] = None
 
         # Connect to the source and sink if specified
         if controller_source:
@@ -530,7 +530,9 @@ class Host(AbortableEventEmitter):
 
                 # Check the return parameters if required
                 if check_result:
-                    if isinstance(response.return_parameters, int):
+                    if isinstance(response, hci.HCI_Command_Status_Event):
+                        status = response.status
+                    elif isinstance(response.return_parameters, int):
                         status = response.return_parameters
                     elif isinstance(response.return_parameters, bytes):
                         # return parameters first field is a one byte status code
@@ -719,14 +721,16 @@ class Host(AbortableEventEmitter):
         for connection_handle, num_completed_packets in zip(
             event.connection_handles, event.num_completed_packets
         ):
-            if not (connection := self.connections.get(connection_handle)):
+            if connection := self.connections.get(connection_handle):
+                connection.acl_packet_queue.on_packets_completed(num_completed_packets)
+            elif not (
+                self.cis_links.get(connection_handle)
+                or self.sco_links.get(connection_handle)
+            ):
                 logger.warning(
                     'received packet completion event for unknown handle '
                     f'0x{connection_handle:04X}'
                 )
-                continue
-
-            connection.acl_packet_queue.on_packets_completed(num_completed_packets)
 
     # Classic only
     def on_hci_connection_request_event(self, event):

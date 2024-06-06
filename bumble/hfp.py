@@ -15,6 +15,9 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
+
+import collections
 import collections.abc
 import logging
 import asyncio
@@ -22,15 +25,32 @@ import dataclasses
 import enum
 import traceback
 import pyee
-from typing import Dict, List, Union, Set, Any, Optional, TYPE_CHECKING
+import re
+from typing import (
+    Dict,
+    List,
+    Union,
+    Set,
+    Any,
+    Optional,
+    Type,
+    Tuple,
+    ClassVar,
+    Iterable,
+    TYPE_CHECKING,
+)
+from typing_extensions import Self
 
 from bumble import at
+from bumble import device
 from bumble import rfcomm
+from bumble import sdp
 from bumble.colors import color
 from bumble.core import (
     ProtocolError,
     BT_GENERIC_AUDIO_SERVICE,
     BT_HANDSFREE_SERVICE,
+    BT_HANDSFREE_AUDIO_GATEWAY_SERVICE,
     BT_L2CAP_PROTOCOL_ID,
     BT_RFCOMM_PROTOCOL_ID,
 )
@@ -38,15 +58,6 @@ from bumble.hci import (
     HCI_Enhanced_Setup_Synchronous_Connection_Command,
     CodingFormat,
     CodecID,
-)
-from bumble.sdp import (
-    DataElement,
-    ServiceAttribute,
-    SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
-    SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
-    SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-    SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-    SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID,
 )
 
 
@@ -193,17 +204,22 @@ class HfIndicator(enum.IntEnum):
     BATTERY_LEVEL = 0x02  # Battery level feature
 
 
-class CallHoldOperation(enum.IntEnum):
+class CallHoldOperation(enum.Enum):
     """
     Call Hold supported operations (normative).
 
     AT Commands Reference Guide, 3.5.2.3.12 +CHLD - Call Holding Services.
     """
 
-    RELEASE_ALL_HELD_CALLS = 0  # Release all held calls
-    RELEASE_ALL_ACTIVE_CALLS = 1  # Release all active calls, accept other
-    HOLD_ALL_ACTIVE_CALLS = 2  # Place all active calls on hold, accept other
-    ADD_HELD_CALL = 3  # Adds a held call to conversation
+    RELEASE_ALL_HELD_CALLS = "0"  # Release all held calls
+    RELEASE_ALL_ACTIVE_CALLS = "1"  # Release all active calls, accept other
+    RELEASE_SPECIFIC_CALL = "1x"  # Release a specific call X
+    HOLD_ALL_ACTIVE_CALLS = "2"  # Place all active calls on hold, accept other
+    HOLD_ALL_CALLS_EXCEPT = "2x"  # Place all active calls except call X
+    ADD_HELD_CALL = "3"  # Adds a held call to conversation
+    CONNECT_TWO_CALLS = (
+        "4"  # Connects the two calls and disconnects the subscriber from both calls
+    )
 
 
 class ResponseHoldStatus(enum.IntEnum):
@@ -324,8 +340,95 @@ class CallInfo:
     status: CallInfoStatus
     mode: CallInfoMode
     multi_party: CallInfoMultiParty
-    number: Optional[int] = None
+    number: Optional[str] = None
     type: Optional[int] = None
+
+
+@dataclasses.dataclass
+class CallLineIdentification:
+    """
+    Calling Line Identification notification.
+
+    TS 127 007 - V6.8.0, 7.6 Calling line identification presentation +CLIP, but only
+    number, type and alpha are meaningful in HFP.
+
+    Attributes:
+        number: String type phone number of format specified by `type`.
+        type: Type of address octet in integer format (refer TS 24.008 [8] subclause
+        10.5.4.7).
+        subaddr: String type subaddress of format specified by `satype`.
+        satype: Type of subaddress octet in integer format (refer TS 24.008 [8]
+        subclause 10.5.4.8).
+        alpha: Optional string type alphanumeric representation of number corresponding
+        to the entry found in phonebook; used character set should be the one selected
+        with command Select TE Character Set +CSCS.
+        cli_validity: 0 CLI valid, 1 CLI has been withheld by the originator, 2 CLI is
+        not available due to interworking problems or limitations of originating
+        network.
+    """
+
+    number: str
+    type: int
+    subaddr: Optional[str] = None
+    satype: Optional[int] = None
+    alpha: Optional[str] = None
+    cli_validity: Optional[int] = None
+
+    @classmethod
+    def parse_from(cls: Type[Self], parameters: List[bytes]) -> Self:
+        return cls(
+            number=parameters[0].decode(),
+            type=int(parameters[1]),
+            subaddr=parameters[2].decode() if len(parameters) >= 3 else None,
+            satype=(
+                int(parameters[3]) if len(parameters) >= 4 and parameters[3] else None
+            ),
+            alpha=parameters[4].decode() if len(parameters) >= 5 else None,
+            cli_validity=(
+                int(parameters[5]) if len(parameters) >= 6 and parameters[5] else None
+            ),
+        )
+
+    def to_clip_string(self) -> str:
+        return ','.join(
+            str(arg) if arg else ''
+            for arg in [
+                self.number,
+                self.type,
+                self.subaddr,
+                self.satype,
+                self.alpha,
+                self.cli_validity,
+            ]
+        )
+
+
+class VoiceRecognitionState(enum.IntEnum):
+    """
+    vrec values provided in AT+BVRA command.
+
+    Hands-Free Profile v1.8, 4.34.2, AT Capabilities Re-Used from GSM 07.07 and 3GPP 27.007.
+    """
+
+    DISABLE = 0
+    ENABLE = 1
+    # (Enhanced Voice Recognition Status only) HF is ready to accept audio.
+    ENHANCED_READY = 2
+
+
+class CmeError(enum.IntEnum):
+    """
+    CME ERROR codes (partial listed).
+
+    TS 127 007 - V6.8.0, 9.2.1 General errors
+    """
+
+    PHONE_FAILURE = 0
+    OPERATION_NOT_ALLOWED = 3
+    OPERATION_NOT_SUPPORTED = 4
+    MEMORY_FULL = 20
+    INVALID_INDEX = 21
+    NOT_FOUND = 22
 
 
 # -----------------------------------------------------------------------------
@@ -333,7 +436,7 @@ class CallInfo:
 # -----------------------------------------------------------------------------
 
 # Response codes.
-RESPONSE_CODES = [
+RESPONSE_CODES = {
     "+APLSIRI",
     "+BAC",
     "+BCC",
@@ -364,10 +467,10 @@ RESPONSE_CODES = [
     "+XAPL",
     "A",
     "D",
-]
+}
 
 # Unsolicited responses and statuses.
-UNSOLICITED_CODES = [
+UNSOLICITED_CODES = {
     "+APLSIRI",
     "+BCS",
     "+BIND",
@@ -385,10 +488,10 @@ UNSOLICITED_CODES = [
     "NO ANSWER",
     "NO CARRIER",
     "RING",
-]
+}
 
 # Status codes
-STATUS_CODES = [
+STATUS_CODES = {
     "+CME ERROR",
     "BLACKLISTED",
     "BUSY",
@@ -397,14 +500,23 @@ STATUS_CODES = [
     "NO ANSWER",
     "NO CARRIER",
     "OK",
-]
+}
 
 
 @dataclasses.dataclass
-class Configuration:
+class HfConfiguration:
     supported_hf_features: List[HfFeature]
     supported_hf_indicators: List[HfIndicator]
     supported_audio_codecs: List[AudioCodec]
+
+
+@dataclasses.dataclass
+class AgConfiguration:
+    supported_ag_features: Iterable[AgFeature]
+    supported_ag_indicators: collections.abc.Sequence[AgIndicatorState]
+    supported_hf_indicators: Iterable[HfIndicator]
+    supported_ag_call_hold_operations: Iterable[CallHoldOperation]
+    supported_audio_codecs: Iterable[AudioCodec]
 
 
 class AtResponseType(enum.Enum):
@@ -417,31 +529,165 @@ class AtResponseType(enum.Enum):
     MULTIPLE = 2
 
 
+@dataclasses.dataclass
 class AtResponse:
     code: str
     parameters: list
 
-    def __init__(self, response: bytearray):
-        code_and_parameters = response.split(b':')
+    @classmethod
+    def parse_from(cls: Type[Self], buffer: bytearray) -> Self:
+        code_and_parameters = buffer.split(b':')
         parameters = (
             code_and_parameters[1] if len(code_and_parameters) > 1 else bytearray()
         )
-        self.code = code_and_parameters[0].decode()
-        self.parameters = at.parse_parameters(parameters)
+        return cls(
+            code=code_and_parameters[0].decode(),
+            parameters=at.parse_parameters(parameters),
+        )
+
+
+@dataclasses.dataclass
+class AtCommand:
+    class SubCode(str, enum.Enum):
+        NONE = ''
+        SET = '='
+        TEST = '=?'
+        READ = '?'
+
+    code: str
+    sub_code: SubCode
+    parameters: list
+
+    _PARSE_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'AT\+(?P<code>[A-Z]+)(?P<sub_code>=\?|=|\?)?(?P<parameters>.*)'
+    )
+
+    @classmethod
+    def parse_from(cls: Type[Self], buffer: bytearray) -> Self:
+        if not (match := cls._PARSE_PATTERN.fullmatch(buffer.decode())):
+            if buffer.startswith(b'ATA'):
+                return cls(code='A', sub_code=AtCommand.SubCode.NONE, parameters=[])
+            if buffer.startswith(b'ATD'):
+                return cls(
+                    code='D', sub_code=AtCommand.SubCode.NONE, parameters=[buffer[3:]]
+                )
+            raise HfpProtocolError('Invalid command')
+
+        parameters = []
+        if parameters_text := match.group('parameters'):
+            parameters = at.parse_parameters(parameters_text.encode())
+
+        return cls(
+            code=match.group('code'),
+            sub_code=AtCommand.SubCode(match.group('sub_code') or ''),
+            parameters=parameters,
+        )
 
 
 @dataclasses.dataclass
 class AgIndicatorState:
-    description: str
-    index: int
+    """State wrapper of AG indicator.
+
+    Attributes:
+        indicator: Indicator of this indicator state.
+        supported_values: Supported values of this indicator.
+        current_status: Current status of this indicator.
+        index: (HF only) Index of this indicator.
+        enabled: (AG only) Whether this indicator is enabled to report.
+        on_test_text: Text message reported in AT+CIND=? of this indicator.
+    """
+
+    indicator: AgIndicator
     supported_values: Set[int]
     current_status: int
+    index: Optional[int] = None
+    enabled: bool = True
+
+    @property
+    def on_test_text(self) -> str:
+        min_value = min(self.supported_values)
+        max_value = max(self.supported_values)
+        if len(self.supported_values) == (max_value - min_value + 1):
+            supported_values_text = f'({min_value}-{max_value})'
+        else:
+            supported_values_text = (
+                f'({",".join(str(v) for v in self.supported_values)})'
+            )
+        return f'(\"{self.indicator.value}\",{supported_values_text})'
+
+    @classmethod
+    def call(cls: Type[Self]) -> Self:
+        """Default call indicator state."""
+        return cls(
+            indicator=AgIndicator.CALL, supported_values={0, 1}, current_status=0
+        )
+
+    @classmethod
+    def callsetup(cls: Type[Self]) -> Self:
+        """Default callsetup indicator state."""
+        return cls(
+            indicator=AgIndicator.CALL_SETUP,
+            supported_values={0, 1, 2, 3},
+            current_status=0,
+        )
+
+    @classmethod
+    def callheld(cls: Type[Self]) -> Self:
+        """Default call indicator state."""
+        return cls(
+            indicator=AgIndicator.CALL_HELD,
+            supported_values={0, 1, 2},
+            current_status=0,
+        )
+
+    @classmethod
+    def service(cls: Type[Self]) -> Self:
+        """Default service indicator state."""
+        return cls(
+            indicator=AgIndicator.SERVICE, supported_values={0, 1}, current_status=0
+        )
+
+    @classmethod
+    def signal(cls: Type[Self]) -> Self:
+        """Default signal indicator state."""
+        return cls(
+            indicator=AgIndicator.SIGNAL,
+            supported_values={0, 1, 2, 3, 4, 5},
+            current_status=0,
+        )
+
+    @classmethod
+    def roam(cls: Type[Self]) -> Self:
+        """Default roam indicator state."""
+        return cls(
+            indicator=AgIndicator.CALL, supported_values={0, 1}, current_status=0
+        )
+
+    @classmethod
+    def battchg(cls: Type[Self]) -> Self:
+        """Default battery charge indicator state."""
+        return cls(
+            indicator=AgIndicator.BATTERY_CHARGE,
+            supported_values={0, 1, 2, 3, 4, 5},
+            current_status=0,
+        )
 
 
 @dataclasses.dataclass
 class HfIndicatorState:
+    """State wrapper of HF indicator.
+
+    Attributes:
+        indicator: Indicator of this indicator state.
+        supported: Whether this indicator is supported.
+        enabled: Whether this indicator is enabled.
+        current_status: Current (last-reported) status value of this indicaotr.
+    """
+
+    indicator: HfIndicator
     supported: bool = False
     enabled: bool = False
+    current_status: int = 0
 
 
 class HfProtocol(pyee.EventEmitter):
@@ -457,7 +703,25 @@ class HfProtocol(pyee.EventEmitter):
         ag_indicator: When AG update their indicators, notify the new state.
             Args:
                 ag_indicator: AgIndicator
+        speaker_volume: Emitted when AG update speaker volume autonomously.
+            Args:
+                volume: Int
+        microphone_volume: Emitted when AG update microphone volume autonomously.
+            Args:
+                volume: Int
+        microphone_volume: Emitted when AG sends a ringtone request.
+            Args:
+                None
+        cli_notification: Emitted when notify the call metadata on line.
+            Args:
+                cli_notification: CallLineIdentification
+        voice_recognition: Emitted when AG starts voice recognition autonomously.
+            Args:
+                vrec: VoiceRecognitionState
     """
+
+    class HfLoopTermination(HfpProtocolError):
+        """Termination signal for run() loop."""
 
     supported_hf_features: int
     supported_audio_codecs: List[AudioCodec]
@@ -472,14 +736,18 @@ class HfProtocol(pyee.EventEmitter):
     command_lock: asyncio.Lock
     if TYPE_CHECKING:
         response_queue: asyncio.Queue[AtResponse]
-        unsolicited_queue: asyncio.Queue[AtResponse]
+        unsolicited_queue: asyncio.Queue[Optional[AtResponse]]
     else:
         response_queue: asyncio.Queue
         unsolicited_queue: asyncio.Queue
     read_buffer: bytearray
     active_codec: AudioCodec
 
-    def __init__(self, dlc: rfcomm.DLC, configuration: Configuration) -> None:
+    def __init__(
+        self,
+        dlc: rfcomm.DLC,
+        configuration: HfConfiguration,
+    ) -> None:
         super().__init__()
 
         # Configure internal state.
@@ -489,13 +757,14 @@ class HfProtocol(pyee.EventEmitter):
         self.unsolicited_queue = asyncio.Queue()
         self.read_buffer = bytearray()
         self.active_codec = AudioCodec.CVSD
+        self._slc_initialized = False
 
         # Build local features.
         self.supported_hf_features = sum(configuration.supported_hf_features)
         self.supported_audio_codecs = configuration.supported_audio_codecs
 
         self.hf_indicators = {
-            indicator: HfIndicatorState()
+            indicator: HfIndicatorState(indicator=indicator)
             for indicator in configuration.supported_hf_indicators
         }
 
@@ -506,6 +775,10 @@ class HfProtocol(pyee.EventEmitter):
 
         # Bind the AT reader to the RFCOMM channel.
         self.dlc.sink = self._read_at
+        # Stop the run() loop when L2CAP is closed.
+        self.dlc.multiplexer.l2cap_channel.on(
+            'close', lambda: self.unsolicited_queue.put_nowait(None)
+        )
 
     def supports_hf_feature(self, feature: HfFeature) -> bool:
         return (self.supported_hf_features & feature) != 0
@@ -530,7 +803,7 @@ class HfProtocol(pyee.EventEmitter):
 
         # Isolate the AT response code and parameters.
         raw_response = self.read_buffer[header + 2 : trailer]
-        response = AtResponse(raw_response)
+        response = AtResponse.parse_from(raw_response)
         logger.debug(f"<<< {raw_response.decode()}")
 
         # Consume the response bytes.
@@ -616,7 +889,7 @@ class HfProtocol(pyee.EventEmitter):
             # If both the HF and AG do support the Codec Negotiation feature
             # then the HF shall send the AT+BAC=<HF available codecs> command to
             # the AG to notify the AG of the available codecs in the HF.
-            codecs = [str(c) for c in self.supported_audio_codecs]
+            codecs = [str(c.value) for c in self.supported_audio_codecs]
             await self.execute_command(f"AT+BAC={','.join(codecs)}")
 
         # 4.2.1.3 AG Indicators
@@ -634,7 +907,7 @@ class HfProtocol(pyee.EventEmitter):
 
         self.ag_indicators = []
         for index, indicator in enumerate(response.parameters):
-            description = indicator[0].decode()
+            description = AgIndicator(indicator[0].decode())
             supported_values = []
             for value in indicator[1]:
                 value = value.split(b'-')
@@ -664,7 +937,7 @@ class HfProtocol(pyee.EventEmitter):
 
         if self.supports_hf_feature(
             HfFeature.THREE_WAY_CALLING
-        ) and self.supports_ag_feature(HfFeature.THREE_WAY_CALLING):
+        ) and self.supports_ag_feature(AgFeature.THREE_WAY_CALLING):
             # After the HF has enabled the “Indicators status update” function in
             # the AG, and if the “Call waiting and 3-way calling” bit was set in the
             # supported features bitmap by both the HF and the AG, the HF shall
@@ -677,9 +950,8 @@ class HfProtocol(pyee.EventEmitter):
             )
 
             self.supported_ag_call_hold_operations = [
-                CallHoldOperation(int(operation))
+                CallHoldOperation(operation.decode())
                 for operation in response.parameters[0]
-                if not b'x' in operation
             ]
 
         # 4.2.1.4 HF Indicators
@@ -692,7 +964,7 @@ class HfProtocol(pyee.EventEmitter):
             # shall send the AT+BIND=<HF supported HF indicators> command to the AG
             # to notify the AG of the supported indicators’ assigned numbers in the
             # HF. The AG shall respond with OK
-            indicators = [str(i) for i in self.hf_indicators.keys()]
+            indicators = [str(i.value) for i in self.hf_indicators]
             await self.execute_command(f"AT+BIND={','.join(indicators)}")
 
             # After having provided the AG with the HF indicators it supports,
@@ -728,6 +1000,7 @@ class HfProtocol(pyee.EventEmitter):
                     self.hf_indicators[indicator].enabled = True
 
         logger.info("SLC setup completed")
+        self._slc_initialized = True
 
     async def setup_audio_connection(self):
         """4.11.2 Audio Connection Setup by HF."""
@@ -808,27 +1081,45 @@ class HfProtocol(pyee.EventEmitter):
                 mode=CallInfoMode(int(response.parameters[3])),
                 multi_party=CallInfoMultiParty(int(response.parameters[4])),
             )
+            if len(response.parameters) >= 6:
+                call_info.number = response.parameters[5].decode()
             if len(response.parameters) >= 7:
-                call_info.number = int(response.parameters[5])
                 call_info.type = int(response.parameters[6])
             calls.append(call_info)
         return calls
 
     async def update_ag_indicator(self, index: int, value: int):
-        self.ag_indicators[index].current_status = value
-        self.emit('ag_indicator', self.ag_indicators[index])
-        logger.info(
-            f"AG indicator updated: {self.ag_indicators[index].description}, {value}"
-        )
+        # CIEV is in 1-index, while ag_indicators is in 0-index.
+        ag_indicator = self.ag_indicators[index - 1]
+        ag_indicator.current_status = value
+        self.emit('ag_indicator', ag_indicator)
+        logger.info(f"AG indicator updated: {ag_indicator.indicator}, {value}")
 
     async def handle_unsolicited(self):
         """Handle unsolicited result codes sent by the audio gateway."""
         result = await self.unsolicited_queue.get()
+        if not result:
+            raise HfProtocol.HfLoopTermination()
         if result.code == "+BCS":
             await self.setup_codec_connection(int(result.parameters[0]))
         elif result.code == "+CIEV":
             await self.update_ag_indicator(
                 int(result.parameters[0]), int(result.parameters[1])
+            )
+        elif result.code == "+VGS":
+            self.emit('speaker_volume', int(result.parameters[0]))
+        elif result.code == "+VGM":
+            self.emit('microphone_volume', int(result.parameters[0]))
+        elif result.code == "RING":
+            self.emit('ring')
+        elif result.code == "+CLIP":
+            self.emit(
+                'cli_notification', CallLineIdentification.parse_from(result.parameters)
+            )
+        elif result.code == "+BVRA":
+            # TODO: Support Enhanced Voice Recognition.
+            self.emit(
+                'voice_recognition', VoiceRecognitionState(int(result.parameters[0]))
             )
         else:
             logging.info(f"unhandled unsolicited response {result.code}")
@@ -841,12 +1132,477 @@ class HfProtocol(pyee.EventEmitter):
         """
 
         try:
-            await self.initiate_slc()
+            if not self._slc_initialized:
+                await self.initiate_slc()
             while True:
                 await self.handle_unsolicited()
+        except HfProtocol.HfLoopTermination:
+            logger.info('Loop terminated')
         except Exception:
             logger.error("HFP-HF protocol failed with the following error:")
             logger.error(traceback.format_exc())
+
+
+class AgProtocol(pyee.EventEmitter):
+    """
+    Implementation for the Audio-Gateway side of the Hands-Free profile.
+
+    Reference specification Hands-Free Profile v1.8.
+
+    Emitted events:
+        slc_complete: Emit when SLC procedure is completed.
+        codec_negotiation: When codec is renegotiated, notify the new codec.
+            Args:
+                active_codec: AudioCodec
+        hf_indicator: When HF update their indicators, notify the new state.
+            Args:
+                hf_indicator: HfIndicatorState
+        codec_connection_request: Emit when HF sends AT+BCC to request codec connection.
+        answer: Emit when HF sends ATA to answer phone call.
+        hang_up: Emit when HF sends AT+CHUP to hang up phone call.
+        dial: Emit when HF sends ATD to dial phone call.
+        voice_recognition: Emit when HF requests voice recognition state.
+            Args:
+                vrec: VoiceRecognitionState
+        call_hold: Emit when HF requests call hold operation.
+            Args:
+                operation: CallHoldOperation
+                call_index: Optional[int]
+        speaker_volume: Emitted when AG update speaker volume autonomously.
+            Args:
+                volume: Int
+        microphone_volume: Emitted when AG update microphone volume autonomously.
+            Args:
+                volume: Int
+    """
+
+    supported_hf_features: int
+    supported_hf_indicators: Set[HfIndicator]
+    supported_audio_codecs: List[AudioCodec]
+
+    supported_ag_features: int
+    supported_ag_call_hold_operations: List[CallHoldOperation]
+
+    ag_indicators: List[AgIndicatorState]
+    hf_indicators: collections.OrderedDict[HfIndicator, HfIndicatorState]
+
+    dlc: rfcomm.DLC
+
+    read_buffer: bytearray
+    active_codec: AudioCodec
+    calls: List[CallInfo]
+
+    indicator_report_enabled: bool
+    inband_ringtone_enabled: bool
+    cme_error_enabled: bool
+    cli_notification_enabled: bool
+    call_waiting_enabled: bool
+    _remained_slc_setup_features: Set[HfFeature]
+
+    def __init__(self, dlc: rfcomm.DLC, configuration: AgConfiguration) -> None:
+        super().__init__()
+
+        # Configure internal state.
+        self.dlc = dlc
+        self.read_buffer = bytearray()
+        self.active_codec = AudioCodec.CVSD
+        self.calls = []
+
+        # Build local features.
+        self.supported_ag_features = sum(configuration.supported_ag_features)
+        self.supported_ag_call_hold_operations = list(
+            configuration.supported_ag_call_hold_operations
+        )
+        self.ag_indicators = list(configuration.supported_ag_indicators)
+        self.supported_hf_indicators = set(configuration.supported_hf_indicators)
+        self.inband_ringtone_enabled = True
+        self._remained_slc_setup_features = set()
+
+        # Clear remote features.
+        self.supported_hf_features = 0
+        self.supported_audio_codecs = []
+        self.indicator_report_enabled = False
+        self.cme_error_enabled = False
+        self.cli_notification_enabled = False
+        self.call_waiting_enabled = False
+
+        self.hf_indicators = collections.OrderedDict()
+
+        # Bind the AT reader to the RFCOMM channel.
+        self.dlc.sink = self._read_at
+
+    def supports_hf_feature(self, feature: HfFeature) -> bool:
+        return (self.supported_hf_features & feature) != 0
+
+    def supports_ag_feature(self, feature: AgFeature) -> bool:
+        return (self.supported_ag_features & feature) != 0
+
+    def _read_at(self, data: bytes):
+        """
+        Reads AT messages from the RFCOMM channel.
+        """
+        # Append to the read buffer.
+        self.read_buffer.extend(data)
+
+        # Locate the trailer.
+        trailer = self.read_buffer.find(b'\r')
+        if trailer == -1:
+            return
+
+        # Isolate the AT response code and parameters.
+        raw_command = self.read_buffer[:trailer]
+        command = AtCommand.parse_from(raw_command)
+        logger.debug(f"<<< {raw_command.decode()}")
+
+        # Consume the response bytes.
+        self.read_buffer = self.read_buffer[trailer + 1 :]
+
+        if command.sub_code == AtCommand.SubCode.TEST:
+            handler_name = f'_on_{command.code.lower()}_test'
+        elif command.sub_code == AtCommand.SubCode.READ:
+            handler_name = f'_on_{command.code.lower()}_read'
+        else:
+            handler_name = f'_on_{command.code.lower()}'
+
+        if handler := getattr(self, handler_name, None):
+            handler(*command.parameters)
+        else:
+            logger.warning('Handler %s not found', handler_name)
+            self.send_response('ERROR')
+
+    def send_response(self, response: str) -> None:
+        """Sends an AT response."""
+        self.dlc.write(f'\r\n{response}\r\n')
+
+    def send_cme_error(self, error_code: CmeError) -> None:
+        """Sends an CME ERROR response.
+
+        If CME Error is not enabled by HF, sends ERROR instead.
+        """
+        if self.cme_error_enabled:
+            self.send_response(f'+CME ERROR: {error_code.value}')
+        else:
+            self.send_error()
+
+    def send_ok(self) -> None:
+        """Sends an OK response."""
+        self.send_response('OK')
+
+    def send_error(self) -> None:
+        """Sends an ERROR response."""
+        self.send_response('ERROR')
+
+    def set_inband_ringtone_enabled(self, enabled: bool) -> None:
+        """Enables or disables in-band ringtone."""
+
+        self.inband_ringtone_enabled = enabled
+        self.send_response(f'+BSIR: {1 if enabled else 0}')
+
+    def set_speaker_volume(self, level: int) -> None:
+        """Reports speaker volume."""
+
+        self.send_response(f'+VGS: {level}')
+
+    def set_microphone_volume(self, level: int) -> None:
+        """Reports microphone volume."""
+
+        self.send_response(f'+VGM: {level}')
+
+    def send_ring(self) -> None:
+        """Sends RING command to trigger ringtone on HF."""
+
+        self.send_response('RING')
+
+    def update_ag_indicator(self, indicator: AgIndicator, value: int) -> None:
+        """Updates AG indicator.
+
+        Args:
+            indicator: Name of the indicator.
+            value: new value of the indicator.
+        """
+
+        search_result = next(
+            (
+                (index, state)
+                for index, state in enumerate(self.ag_indicators)
+                if state.indicator == indicator
+            ),
+            None,
+        )
+        if not search_result:
+            raise KeyError(f'{indicator} is not supported.')
+
+        index, indicator_state = search_result
+        if not self.indicator_report_enabled:
+            logger.warning('AG indicator report is disabled')
+        if not indicator_state.enabled:
+            logger.warning(f'AG indicator {indicator} is disabled')
+
+        indicator_state.current_status = value
+        self.send_response(f'+CIEV: {index+1},{value}')
+
+    async def negotiate_codec(self, codec: AudioCodec) -> None:
+        """Starts codec negotiation."""
+
+        if not self.supports_ag_feature(AgFeature.CODEC_NEGOTIATION):
+            logger.warning('Local does not support Codec Negotiation')
+        if not self.supports_hf_feature(HfFeature.CODEC_NEGOTIATION):
+            logger.warning('Peer does not support Codec Negotiation')
+        if codec not in self.supported_audio_codecs:
+            logger.warning(f'{codec} is not supported by peer')
+
+        at_bcs_future = asyncio.get_running_loop().create_future()
+        self.once('codec_negotiation', at_bcs_future.set_result)
+        self.send_response(f'+BCS: {codec.value}')
+        if (new_codec := await at_bcs_future) != codec:
+            raise HfpProtocolError(f'Expect codec: {codec}, but get {new_codec}')
+
+    def send_cli_notification(self, cli: CallLineIdentification) -> None:
+        """Sends +CLIP CLI notification."""
+
+        if not self.cli_notification_enabled:
+            logger.warning('Try to send CLIP while CLI notification is not enabled')
+
+        self.send_response(f'+CLIP: {cli.to_clip_string()}')
+
+    def _check_remained_slc_commands(self) -> None:
+        if not self._remained_slc_setup_features:
+            self.emit('slc_complete')
+
+    def _on_brsf(self, hf_features: bytes) -> None:
+        self.supported_hf_features = int(hf_features)
+        self.send_response(f'+BRSF: {self.supported_ag_features}')
+        self.send_ok()
+
+        if self.supports_hf_feature(
+            HfFeature.HF_INDICATORS
+        ) and self.supports_ag_feature(AgFeature.HF_INDICATORS):
+            self._remained_slc_setup_features.add(HfFeature.HF_INDICATORS)
+
+        if self.supports_hf_feature(
+            HfFeature.THREE_WAY_CALLING
+        ) and self.supports_ag_feature(AgFeature.THREE_WAY_CALLING):
+            self._remained_slc_setup_features.add(HfFeature.THREE_WAY_CALLING)
+
+    def _on_bac(self, *args) -> None:
+        self.supported_audio_codecs = [AudioCodec(int(value)) for value in args]
+        self.send_ok()
+
+    def _on_bcs(self, codec: bytes) -> None:
+        self.active_codec = AudioCodec(int(codec))
+        self.send_ok()
+        self.emit('codec_negotiation', self.active_codec)
+
+    def _on_bvra(self, vrec: bytes) -> None:
+        self.send_ok()
+        self.emit('voice_recognition', VoiceRecognitionState(int(vrec)))
+
+    def _on_chld(self, operation_code: bytes) -> None:
+        call_index: Optional[int] = None
+        if len(operation_code) > 1:
+            call_index = int(operation_code[1:])
+            operation_code = operation_code[:1] + b'x'
+        try:
+            operation = CallHoldOperation(operation_code.decode())
+        except:
+            logger.error(f'Invalid operation: {operation_code.decode()}')
+            self.send_cme_error(CmeError.OPERATION_NOT_SUPPORTED)
+            return
+
+        if operation not in self.supported_ag_call_hold_operations:
+            logger.error(f'Unsupported operation: {operation_code.decode()}')
+            self.send_cme_error(CmeError.OPERATION_NOT_SUPPORTED)
+
+        if call_index is not None and not any(
+            call.index == call_index for call in self.calls
+        ):
+            logger.error(f'No matching call {call_index}')
+            self.send_cme_error(CmeError.INVALID_INDEX)
+
+        # Real three-way calls have more complicated situations, but this is not a popular issue - let users to handle the remaining :)
+
+        self.send_ok()
+        self.emit('call_hold', operation, call_index)
+
+    def _on_chld_test(self) -> None:
+        if not self.supports_ag_feature(AgFeature.THREE_WAY_CALLING):
+            self.send_error()
+            return
+
+        self.send_response(
+            '+CHLD: ({})'.format(
+                ','.join(
+                    operation.value
+                    for operation in self.supported_ag_call_hold_operations
+                )
+            )
+        )
+        self.send_ok()
+        self._remained_slc_setup_features.remove(HfFeature.THREE_WAY_CALLING)
+        self._check_remained_slc_commands()
+
+    def _on_cind_test(self) -> None:
+        if not self.ag_indicators:
+            self.send_cme_error(CmeError.NOT_FOUND)
+            return
+
+        indicator_list_str = ",".join(
+            indicator.on_test_text for indicator in self.ag_indicators
+        )
+        self.send_response(f'+CIND: {indicator_list_str}')
+        self.send_ok()
+
+    def _on_cind_read(self) -> None:
+        if not self.ag_indicators:
+            self.send_cme_error(CmeError.NOT_FOUND)
+            return
+
+        indicator_list_str = ",".join(
+            str(indicator.current_status) for indicator in self.ag_indicators
+        )
+        self.send_response(f'+CIND: {indicator_list_str}')
+        self.send_ok()
+
+        self._check_remained_slc_commands()
+
+    def _on_cmer(
+        self,
+        mode: bytes,
+        keypad: Optional[bytes] = None,
+        display: Optional[bytes] = None,
+        indicator: bytes = b'',
+    ) -> None:
+        if (
+            int(mode) != 3
+            or (keypad and int(keypad))
+            or (display and int(display))
+            or int(indicator) not in (0, 1)
+        ):
+            logger.error(
+                f'Unexpected values: mode={mode!r}, keypad={keypad!r}, '
+                f'display={display!r}, indicator={indicator!r}'
+            )
+            self.send_cme_error(CmeError.INVALID_INDEX)
+
+        self.indicator_report_enabled = bool(int(indicator))
+        self.send_ok()
+
+    def _on_cmee(self, enabled: bytes) -> None:
+        self.cme_error_enabled = bool(int(enabled))
+        self.send_ok()
+
+    def _on_ccwa(self, enabled: bytes) -> None:
+        self.call_waiting_enabled = bool(int(enabled))
+        self.send_ok()
+
+    def _on_bind(self, *args) -> None:
+        if not self.supports_ag_feature(AgFeature.HF_INDICATORS):
+            self.send_error()
+            return
+
+        peer_supported_indicators = set(
+            HfIndicator(int(indicator)) for indicator in args
+        )
+        self.hf_indicators = collections.OrderedDict(
+            {
+                indicator: HfIndicatorState(indicator=indicator)
+                for indicator in self.supported_hf_indicators.intersection(
+                    peer_supported_indicators
+                )
+            }
+        )
+        self.send_ok()
+
+    def _on_bind_test(self) -> None:
+        if not self.supports_ag_feature(AgFeature.HF_INDICATORS):
+            self.send_error()
+            return
+
+        hf_indicator_list_str = ",".join(
+            str(indicator.value) for indicator in self.supported_hf_indicators
+        )
+        self.send_response(f'+BIND: ({hf_indicator_list_str})')
+        self.send_ok()
+
+    def _on_bind_read(self) -> None:
+        if not self.supports_ag_feature(AgFeature.HF_INDICATORS):
+            self.send_error()
+            return
+
+        for indicator in self.hf_indicators:
+            self.send_response(f'+BIND: {indicator.value},1')
+
+        self.send_ok()
+
+        self._remained_slc_setup_features.remove(HfFeature.HF_INDICATORS)
+        self._check_remained_slc_commands()
+
+    def _on_biev(self, index_bytes: bytes, value_bytes: bytes) -> None:
+        if not self.supports_ag_feature(AgFeature.HF_INDICATORS):
+            self.send_error()
+            return
+
+        index = HfIndicator(int(index_bytes))
+        if index not in self.hf_indicators:
+            self.send_error()
+            return
+
+        self.hf_indicators[index].current_status = int(value_bytes)
+        self.emit('hf_indicator', self.hf_indicators[index])
+        self.send_ok()
+
+    def _on_bia(self, *args) -> None:
+        for enabled, state in zip(args, self.ag_indicators):
+            state.enabled = bool(int(enabled))
+        self.send_ok()
+
+    def _on_bcc(self) -> None:
+        self.emit('codec_connection_request')
+        self.send_ok()
+
+    def _on_a(self) -> None:
+        """ATA handler."""
+        self.emit('answer')
+        self.send_ok()
+
+    def _on_d(self, number: bytes) -> None:
+        """ATD handler."""
+        self.emit('dial', number.decode())
+        self.send_ok()
+
+    def _on_chup(self) -> None:
+        self.emit('hang_up')
+        self.send_ok()
+
+    def _on_clcc(self) -> None:
+        for call in self.calls:
+            number_text = f',\"{call.number}\"' if call.number is not None else ''
+            type_text = f',{call.type}' if call.type is not None else ''
+            response = (
+                f'+CLCC: {call.index}'
+                f',{call.direction.value}'
+                f',{call.status.value}'
+                f',{call.mode.value}'
+                f',{call.multi_party.value}'
+                f'{number_text}'
+                f'{type_text}'
+            )
+            self.send_response(response)
+        self.send_ok()
+
+    def _on_clip(self, enabled: bytes) -> None:
+        if not self.supports_hf_feature(HfFeature.CLI_PRESENTATION_CAPABILITY):
+            logger.error('Remote doesn not support CLI but sends AT+CLIP')
+        self.cli_notification_enabled = True if enabled == b'1' else False
+        self.send_ok()
+
+    def _on_vgs(self, level: bytes) -> None:
+        self.emit('speaker_volume', int(level))
+        self.send_ok()
+
+    def _on_vgm(self, level: bytes) -> None:
+        self.emit('microphone_volume', int(level))
+        self.send_ok()
 
 
 # -----------------------------------------------------------------------------
@@ -902,9 +1658,12 @@ class AgSdpFeature(enum.IntFlag):
     VOICE_RECOGNITION_TEST = 0x80
 
 
-def sdp_records(
-    service_record_handle: int, rfcomm_channel: int, configuration: Configuration
-) -> List[ServiceAttribute]:
+def make_hf_sdp_records(
+    service_record_handle: int,
+    rfcomm_channel: int,
+    configuration: HfConfiguration,
+    version: ProfileVersion = ProfileVersion.V1_8,
+) -> List[sdp.ServiceAttribute]:
     """
     Generates the SDP record for HFP Hands-Free support.
 
@@ -936,51 +1695,232 @@ def sdp_records(
         hf_supported_features |= HfSdpFeature.WIDE_BAND
 
     return [
-        ServiceAttribute(
-            SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
-            DataElement.unsigned_integer_32(service_record_handle),
+        sdp.ServiceAttribute(
+            sdp.SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
+            sdp.DataElement.unsigned_integer_32(service_record_handle),
         ),
-        ServiceAttribute(
-            SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
-            DataElement.sequence(
+        sdp.ServiceAttribute(
+            sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
                 [
-                    DataElement.uuid(BT_HANDSFREE_SERVICE),
-                    DataElement.uuid(BT_GENERIC_AUDIO_SERVICE),
+                    sdp.DataElement.uuid(BT_HANDSFREE_SERVICE),
+                    sdp.DataElement.uuid(BT_GENERIC_AUDIO_SERVICE),
                 ]
             ),
         ),
-        ServiceAttribute(
-            SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-            DataElement.sequence(
+        sdp.ServiceAttribute(
+            sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
                 [
-                    DataElement.sequence([DataElement.uuid(BT_L2CAP_PROTOCOL_ID)]),
-                    DataElement.sequence(
+                    sdp.DataElement.sequence(
+                        [sdp.DataElement.uuid(BT_L2CAP_PROTOCOL_ID)]
+                    ),
+                    sdp.DataElement.sequence(
                         [
-                            DataElement.uuid(BT_RFCOMM_PROTOCOL_ID),
-                            DataElement.unsigned_integer_8(rfcomm_channel),
+                            sdp.DataElement.uuid(BT_RFCOMM_PROTOCOL_ID),
+                            sdp.DataElement.unsigned_integer_8(rfcomm_channel),
                         ]
                     ),
                 ]
             ),
         ),
-        ServiceAttribute(
-            SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
-            DataElement.sequence(
+        sdp.ServiceAttribute(
+            sdp.SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
                 [
-                    DataElement.sequence(
+                    sdp.DataElement.sequence(
                         [
-                            DataElement.uuid(BT_HANDSFREE_SERVICE),
-                            DataElement.unsigned_integer_16(ProfileVersion.V1_8),
+                            sdp.DataElement.uuid(BT_HANDSFREE_SERVICE),
+                            sdp.DataElement.unsigned_integer_16(version),
                         ]
                     )
                 ]
             ),
         ),
-        ServiceAttribute(
-            SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID,
-            DataElement.unsigned_integer_16(hf_supported_features),
+        sdp.ServiceAttribute(
+            sdp.SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID,
+            sdp.DataElement.unsigned_integer_16(hf_supported_features),
         ),
     ]
+
+
+def make_ag_sdp_records(
+    service_record_handle: int,
+    rfcomm_channel: int,
+    configuration: AgConfiguration,
+    version: ProfileVersion = ProfileVersion.V1_8,
+) -> List[sdp.ServiceAttribute]:
+    """
+    Generates the SDP record for HFP Audio-Gateway support.
+
+    The record exposes the features supported in the input configuration,
+    and the allocated RFCOMM channel.
+    """
+
+    ag_supported_features = 0
+
+    if AgFeature.EC_NR in configuration.supported_ag_features:
+        ag_supported_features |= AgSdpFeature.EC_NR
+    if AgFeature.THREE_WAY_CALLING in configuration.supported_ag_features:
+        ag_supported_features |= AgSdpFeature.THREE_WAY_CALLING
+    if (
+        AgFeature.ENHANCED_VOICE_RECOGNITION_STATUS
+        in configuration.supported_ag_features
+    ):
+        ag_supported_features |= AgSdpFeature.ENHANCED_VOICE_RECOGNITION_STATUS
+    if AgFeature.VOICE_RECOGNITION_TEST in configuration.supported_ag_features:
+        ag_supported_features |= AgSdpFeature.VOICE_RECOGNITION_TEST
+    if AgFeature.IN_BAND_RING_TONE_CAPABILITY in configuration.supported_ag_features:
+        ag_supported_features |= AgSdpFeature.IN_BAND_RING_TONE_CAPABILITY
+    if AgFeature.VOICE_RECOGNITION_FUNCTION in configuration.supported_ag_features:
+        ag_supported_features |= AgSdpFeature.VOICE_RECOGNITION_FUNCTION
+    if AudioCodec.MSBC in configuration.supported_audio_codecs:
+        ag_supported_features |= AgSdpFeature.WIDE_BAND
+
+    return [
+        sdp.ServiceAttribute(
+            sdp.SDP_SERVICE_RECORD_HANDLE_ATTRIBUTE_ID,
+            sdp.DataElement.unsigned_integer_32(service_record_handle),
+        ),
+        sdp.ServiceAttribute(
+            sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
+                [
+                    sdp.DataElement.uuid(BT_HANDSFREE_AUDIO_GATEWAY_SERVICE),
+                    sdp.DataElement.uuid(BT_GENERIC_AUDIO_SERVICE),
+                ]
+            ),
+        ),
+        sdp.ServiceAttribute(
+            sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
+                [
+                    sdp.DataElement.sequence(
+                        [sdp.DataElement.uuid(BT_L2CAP_PROTOCOL_ID)]
+                    ),
+                    sdp.DataElement.sequence(
+                        [
+                            sdp.DataElement.uuid(BT_RFCOMM_PROTOCOL_ID),
+                            sdp.DataElement.unsigned_integer_8(rfcomm_channel),
+                        ]
+                    ),
+                ]
+            ),
+        ),
+        sdp.ServiceAttribute(
+            sdp.SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+            sdp.DataElement.sequence(
+                [
+                    sdp.DataElement.sequence(
+                        [
+                            sdp.DataElement.uuid(BT_HANDSFREE_AUDIO_GATEWAY_SERVICE),
+                            sdp.DataElement.unsigned_integer_16(version),
+                        ]
+                    )
+                ]
+            ),
+        ),
+        sdp.ServiceAttribute(
+            sdp.SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID,
+            sdp.DataElement.unsigned_integer_16(ag_supported_features),
+        ),
+    ]
+
+
+async def find_hf_sdp_record(
+    connection: device.Connection,
+) -> Optional[Tuple[int, ProfileVersion, HfSdpFeature]]:
+    """Searches a Hands-Free SDP record from remote device.
+
+    Args:
+        connection: ACL connection to make SDP search.
+
+    Returns:
+        Tuple of (<RFCOMM channel>, <Profile Version>, <HF SDP features>)
+    """
+    async with sdp.Client(connection) as sdp_client:
+        search_result = await sdp_client.search_attributes(
+            uuids=[BT_HANDSFREE_SERVICE],
+            attribute_ids=[
+                sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                sdp.SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                sdp.SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID,
+                sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID,
+            ],
+        )
+        for attribute_lists in search_result:
+            channel: Optional[int] = None
+            version: Optional[ProfileVersion] = None
+            features: Optional[HfSdpFeature] = None
+            for attribute in attribute_lists:
+                # The layout is [[L2CAP_PROTOCOL], [RFCOMM_PROTOCOL, RFCOMM_CHANNEL]].
+                if attribute.id == sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID:
+                    protocol_descriptor_list = attribute.value.value
+                    channel = protocol_descriptor_list[1].value[1].value
+                elif (
+                    attribute.id
+                    == sdp.SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID
+                ):
+                    profile_descriptor_list = attribute.value.value
+                    version = ProfileVersion(profile_descriptor_list[0].value[1].value)
+                elif attribute.id == sdp.SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID:
+                    features = HfSdpFeature(attribute.value.value)
+                elif attribute.id == sdp.SDP_SERVICE_CLASS_ID_LIST_ATTRIBUTE_ID:
+                    class_id_list = attribute.value.value
+                    uuid = class_id_list[0].value
+                    # AG record may also contain HF UUID in its profile descriptor list.
+                    # If found, skip this record.
+                    if uuid == BT_HANDSFREE_AUDIO_GATEWAY_SERVICE:
+                        channel, version, features = (None, None, None)
+                        break
+
+            if channel is not None and version is not None and features is not None:
+                return (channel, version, features)
+    return None
+
+
+async def find_ag_sdp_record(
+    connection: device.Connection,
+) -> Optional[Tuple[int, ProfileVersion, AgSdpFeature]]:
+    """Searches an Audio-Gateway SDP record from remote device.
+
+    Args:
+        connection: ACL connection to make SDP search.
+
+    Returns:
+        Tuple of (<RFCOMM channel>, <Profile Version>, <AG SDP features>)
+    """
+    async with sdp.Client(connection) as sdp_client:
+        search_result = await sdp_client.search_attributes(
+            uuids=[BT_HANDSFREE_AUDIO_GATEWAY_SERVICE],
+            attribute_ids=[
+                sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                sdp.SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID,
+                sdp.SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID,
+            ],
+        )
+        for attribute_lists in search_result:
+            channel: Optional[int] = None
+            version: Optional[ProfileVersion] = None
+            features: Optional[AgSdpFeature] = None
+            for attribute in attribute_lists:
+                # The layout is [[L2CAP_PROTOCOL], [RFCOMM_PROTOCOL, RFCOMM_CHANNEL]].
+                if attribute.id == sdp.SDP_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID:
+                    protocol_descriptor_list = attribute.value.value
+                    channel = protocol_descriptor_list[1].value[1].value
+                elif (
+                    attribute.id
+                    == sdp.SDP_BLUETOOTH_PROFILE_DESCRIPTOR_LIST_ATTRIBUTE_ID
+                ):
+                    profile_descriptor_list = attribute.value.value
+                    version = ProfileVersion(profile_descriptor_list[0].value[1].value)
+                elif attribute.id == sdp.SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID:
+                    features = AgSdpFeature(attribute.value.value)
+            if not channel or not version or features is None:
+                logger.warning(f"Bad result {attribute_lists}.")
+                return None
+            return (channel, version, features)
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -1006,7 +1946,9 @@ class EscoParameters:
     transmit_coding_format: CodingFormat
     receive_coding_format: CodingFormat
     packet_type: HCI_Enhanced_Setup_Synchronous_Connection_Command.PacketType
-    retransmission_effort: HCI_Enhanced_Setup_Synchronous_Connection_Command.RetransmissionEffort
+    retransmission_effort: (
+        HCI_Enhanced_Setup_Synchronous_Connection_Command.RetransmissionEffort
+    )
     max_latency: int
 
     # Common
@@ -1014,12 +1956,12 @@ class EscoParameters:
     output_coding_format: CodingFormat = CodingFormat(CodecID.LINEAR_PCM)
     input_coded_data_size: int = 16
     output_coded_data_size: int = 16
-    input_pcm_data_format: HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat = (
-        HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat.TWOS_COMPLEMENT
-    )
-    output_pcm_data_format: HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat = (
-        HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat.TWOS_COMPLEMENT
-    )
+    input_pcm_data_format: (
+        HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat
+    ) = HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat.TWOS_COMPLEMENT
+    output_pcm_data_format: (
+        HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat
+    ) = HCI_Enhanced_Setup_Synchronous_Connection_Command.PcmDataFormat.TWOS_COMPLEMENT
     input_pcm_sample_payload_msb_position: int = 0
     output_pcm_sample_payload_msb_position: int = 0
     input_data_path: HCI_Enhanced_Setup_Synchronous_Connection_Command.DataPath = (
