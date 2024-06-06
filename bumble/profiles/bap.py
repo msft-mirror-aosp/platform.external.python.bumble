@@ -24,8 +24,9 @@ import enum
 import struct
 import functools
 import logging
-from typing import Optional, List, Union, Type, Dict, Any, Tuple, cast
+from typing import Optional, List, Union, Type, Dict, Any, Tuple
 
+from bumble import core
 from bumble import colors
 from bumble import device
 from bumble import hci
@@ -76,6 +77,10 @@ class AudioLocation(enum.IntFlag):
     FRONT_RIGHT_WIDE        = 0x02000000
     LEFT_SURROUND           = 0x04000000
     RIGHT_SURROUND          = 0x08000000
+
+    @property
+    def channel_count(self) -> int:
+        return bin(self.value).count('1')
 
 
 class AudioInputType(enum.IntEnum):
@@ -217,6 +222,13 @@ class FrameDuration(enum.IntEnum):
     DURATION_7500_US  = 0x00
     DURATION_10000_US = 0x01
 
+    @property
+    def us(self) -> int:
+        return {
+            FrameDuration.DURATION_7500_US: 7500,
+            FrameDuration.DURATION_10000_US: 10000,
+        }[self]
+
 
 class SupportedFrameDuration(enum.IntFlag):
     '''Bluetooth Assigned Numbers, Section 6.12.4.2 - Frame Duration'''
@@ -226,6 +238,14 @@ class SupportedFrameDuration(enum.IntFlag):
     DURATION_10000_US_SUPPORTED = 0b0010
     DURATION_7500_US_PREFERRED  = 0b0001
     DURATION_10000_US_PREFERRED = 0b0010
+
+
+class AnnouncementType(enum.IntEnum):
+    '''Basic Audio Profile, 3.5.3. Additional Audio Stream Control Service requirements'''
+
+    # fmt: off
+    GENERAL  = 0x00
+    TARGETED = 0x01
 
 
 # -----------------------------------------------------------------------------
@@ -453,6 +473,34 @@ class AudioRole(enum.IntEnum):
     SOURCE = hci.HCI_LE_Setup_ISO_Data_Path_Command.Direction.HOST_TO_CONTROLLER
 
 
+@dataclasses.dataclass
+class UnicastServerAdvertisingData:
+    """Advertising Data for ASCS."""
+
+    announcement_type: AnnouncementType = AnnouncementType.TARGETED
+    available_audio_contexts: ContextType = ContextType.MEDIA
+    metadata: bytes = b''
+
+    def __bytes__(self) -> bytes:
+        return bytes(
+            core.AdvertisingData(
+                [
+                    (
+                        core.AdvertisingData.SERVICE_DATA_16_BIT_UUID,
+                        struct.pack(
+                            '<2sBIB',
+                            gatt.GATT_AUDIO_STREAM_CONTROL_SERVICE.to_bytes(),
+                            self.announcement_type,
+                            self.available_audio_contexts,
+                            len(self.metadata),
+                        )
+                        + self.metadata,
+                    )
+                ]
+            )
+        )
+
+
 # -----------------------------------------------------------------------------
 # Utils
 # -----------------------------------------------------------------------------
@@ -497,7 +545,7 @@ class CodecSpecificCapabilities:
 
     supported_sampling_frequencies: SupportedSamplingFrequency
     supported_frame_durations: SupportedFrameDuration
-    supported_audio_channel_counts: Sequence[int]
+    supported_audio_channel_count: Sequence[int]
     min_octets_per_codec_frame: int
     max_octets_per_codec_frame: int
     supported_max_codec_frames_per_sdu: int
@@ -506,7 +554,7 @@ class CodecSpecificCapabilities:
     def from_bytes(cls, data: bytes) -> CodecSpecificCapabilities:
         offset = 0
         # Allowed default values.
-        supported_audio_channel_counts = [1]
+        supported_audio_channel_count = [1]
         supported_max_codec_frames_per_sdu = 1
         while offset < len(data):
             length, type = struct.unpack_from('BB', data, offset)
@@ -519,7 +567,7 @@ class CodecSpecificCapabilities:
             elif type == CodecSpecificCapabilities.Type.FRAME_DURATION:
                 supported_frame_durations = SupportedFrameDuration(value)
             elif type == CodecSpecificCapabilities.Type.AUDIO_CHANNEL_COUNT:
-                supported_audio_channel_counts = bits_to_channel_counts(value)
+                supported_audio_channel_count = bits_to_channel_counts(value)
             elif type == CodecSpecificCapabilities.Type.OCTETS_PER_FRAME:
                 min_octets_per_sample = value & 0xFFFF
                 max_octets_per_sample = value >> 16
@@ -530,7 +578,7 @@ class CodecSpecificCapabilities:
         return CodecSpecificCapabilities(
             supported_sampling_frequencies=supported_sampling_frequencies,
             supported_frame_durations=supported_frame_durations,
-            supported_audio_channel_counts=supported_audio_channel_counts,
+            supported_audio_channel_count=supported_audio_channel_count,
             min_octets_per_codec_frame=min_octets_per_sample,
             max_octets_per_codec_frame=max_octets_per_sample,
             supported_max_codec_frames_per_sdu=supported_max_codec_frames_per_sdu,
@@ -547,7 +595,7 @@ class CodecSpecificCapabilities:
             self.supported_frame_durations,
             2,
             CodecSpecificCapabilities.Type.AUDIO_CHANNEL_COUNT,
-            channel_counts_to_bits(self.supported_audio_channel_counts),
+            channel_counts_to_bits(self.supported_audio_channel_count),
             5,
             CodecSpecificCapabilities.Type.OCTETS_PER_FRAME,
             self.min_octets_per_codec_frame,
@@ -833,15 +881,22 @@ class AseStateMachine(gatt.Characteristic):
         cig_id: int,
         cis_id: int,
     ) -> None:
-        if cis_id == self.cis_id and self.state == self.State.ENABLING:
+        if (
+            cig_id == self.cig_id
+            and cis_id == self.cis_id
+            and self.state == self.State.ENABLING
+        ):
             acl_connection.abort_on(
                 'flush', self.service.device.accept_cis_request(cis_handle)
             )
 
     def on_cis_establishment(self, cis_link: device.CisLink) -> None:
-        if cis_link.cis_id == self.cis_id and self.state == self.State.ENABLING:
-            self.state = self.State.STREAMING
-            self.cis_link = cis_link
+        if (
+            cis_link.cig_id == self.cig_id
+            and cis_link.cis_id == self.cis_id
+            and self.state == self.State.ENABLING
+        ):
+            cis_link.on('disconnection', self.on_cis_disconnection)
 
             async def post_cis_established():
                 await self.service.device.send_command(
@@ -854,9 +909,15 @@ class AseStateMachine(gatt.Characteristic):
                         codec_configuration=b'',
                     )
                 )
+                if self.role == AudioRole.SINK:
+                    self.state = self.State.STREAMING
                 await self.service.device.notify_subscribers(self, self.value)
 
             cis_link.acl_connection.abort_on('flush', post_cis_established())
+            self.cis_link = cis_link
+
+    def on_cis_disconnection(self, _reason) -> None:
+        self.cis_link = None
 
     def on_config_codec(
         self,
@@ -954,11 +1015,17 @@ class AseStateMachine(gatt.Characteristic):
                 AseResponseCode.INVALID_ASE_STATE_MACHINE_TRANSITION,
                 AseReasonCode.NONE,
             )
-        self.state = self.State.DISABLING
+        if self.role == AudioRole.SINK:
+            self.state = self.State.QOS_CONFIGURED
+        else:
+            self.state = self.State.DISABLING
         return (AseResponseCode.SUCCESS, AseReasonCode.NONE)
 
     def on_receiver_stop_ready(self) -> Tuple[AseResponseCode, AseReasonCode]:
-        if self.state != AseStateMachine.State.DISABLING:
+        if (
+            self.role != AudioRole.SOURCE
+            or self.state != AseStateMachine.State.DISABLING
+        ):
             return (
                 AseResponseCode.INVALID_ASE_STATE_MACHINE_TRANSITION,
                 AseReasonCode.NONE,
@@ -1009,6 +1076,7 @@ class AseStateMachine(gatt.Characteristic):
     def state(self, new_state: State) -> None:
         logger.debug(f'{self} state change -> {colors.color(new_state.name, "cyan")}')
         self._state = new_state
+        self.emit('state_change')
 
     @property
     def value(self):
@@ -1081,6 +1149,7 @@ class AudioStreamControlService(gatt.TemplateService):
 
     ase_state_machines: Dict[int, AseStateMachine]
     ase_control_point: gatt.Characteristic
+    _active_client: Optional[device.Connection] = None
 
     def __init__(
         self,
@@ -1118,7 +1187,16 @@ class AudioStreamControlService(gatt.TemplateService):
         else:
             return (ase_id, AseResponseCode.INVALID_ASE_ID, AseReasonCode.NONE)
 
+    def _on_client_disconnected(self, _reason: int) -> None:
+        for ase in self.ase_state_machines.values():
+            ase.state = AseStateMachine.State.IDLE
+        self._active_client = None
+
     def on_write_ase_control_point(self, connection, data):
+        if not self._active_client and connection:
+            self._active_client = connection
+            connection.once('disconnection', self._on_client_disconnected)
+
         operation = ASE_Operation.from_bytes(data)
         responses = []
         logger.debug(f'*** ASCS Write {operation} ***')
