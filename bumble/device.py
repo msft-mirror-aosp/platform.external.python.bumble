@@ -17,12 +17,19 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 from enum import IntEnum
+import copy
 import functools
 import json
 import asyncio
 import logging
 import secrets
-from contextlib import asynccontextmanager, AsyncExitStack, closing
+import sys
+from contextlib import (
+    asynccontextmanager,
+    AsyncExitStack,
+    closing,
+    AbstractAsyncContextManager,
+)
 from dataclasses import dataclass, field
 from collections.abc import Iterable
 from typing import (
@@ -40,6 +47,7 @@ from typing import (
     overload,
     TYPE_CHECKING,
 )
+from typing_extensions import Self
 
 from pyee import EventEmitter
 
@@ -276,12 +284,12 @@ class Advertisement:
     data_bytes: bytes = b''
 
     # Constants
-    TX_POWER_NOT_AVAILABLE: ClassVar[
-        int
-    ] = HCI_LE_Extended_Advertising_Report_Event.TX_POWER_INFORMATION_NOT_AVAILABLE
-    RSSI_NOT_AVAILABLE: ClassVar[
-        int
-    ] = HCI_LE_Extended_Advertising_Report_Event.RSSI_NOT_AVAILABLE
+    TX_POWER_NOT_AVAILABLE: ClassVar[int] = (
+        HCI_LE_Extended_Advertising_Report_Event.TX_POWER_INFORMATION_NOT_AVAILABLE
+    )
+    RSSI_NOT_AVAILABLE: ClassVar[int] = (
+        HCI_LE_Extended_Advertising_Report_Event.RSSI_NOT_AVAILABLE
+    )
 
     def __post_init__(self) -> None:
         self.data = AdvertisingData.from_bytes(self.data_bytes)
@@ -558,7 +566,9 @@ class AdvertisingParameters:
     )
     primary_advertising_interval_min: int = DEVICE_DEFAULT_ADVERTISING_INTERVAL
     primary_advertising_interval_max: int = DEVICE_DEFAULT_ADVERTISING_INTERVAL
-    primary_advertising_channel_map: HCI_LE_Set_Extended_Advertising_Parameters_Command.ChannelMap = (
+    primary_advertising_channel_map: (
+        HCI_LE_Set_Extended_Advertising_Parameters_Command.ChannelMap
+    ) = (
         AdvertisingChannelMap.CHANNEL_37
         | AdvertisingChannelMap.CHANNEL_38
         | AdvertisingChannelMap.CHANNEL_39
@@ -957,8 +967,9 @@ class ScoLink(CompositeEventEmitter):
     acl_connection: Connection
     handle: int
     link_type: int
+    sink: Optional[Callable[[HCI_SynchronousDataPacket], Any]] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__init__()
 
     async def disconnect(
@@ -980,8 +991,9 @@ class CisLink(CompositeEventEmitter):
     cis_id: int  # CIS ID assigned by Central device
     cig_id: int  # CIG ID assigned by Central device
     state: State = State.PENDING
+    sink: Optional[Callable[[HCI_IsoDataPacket], Any]] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__init__()
 
     async def disconnect(
@@ -1138,14 +1150,12 @@ class Connection(CompositeEventEmitter):
     @overload
     async def create_l2cap_channel(
         self, spec: l2cap.ClassicChannelSpec
-    ) -> l2cap.ClassicChannel:
-        ...
+    ) -> l2cap.ClassicChannel: ...
 
     @overload
     async def create_l2cap_channel(
         self, spec: l2cap.LeCreditBasedChannelSpec
-    ) -> l2cap.LeCreditBasedChannel:
-        ...
+    ) -> l2cap.LeCreditBasedChannel: ...
 
     async def create_l2cap_channel(
         self, spec: Union[l2cap.ClassicChannelSpec, l2cap.LeCreditBasedChannelSpec]
@@ -1252,75 +1262,47 @@ class Connection(CompositeEventEmitter):
 
 
 # -----------------------------------------------------------------------------
+@dataclass
 class DeviceConfiguration:
-    def __init__(self) -> None:
-        # Setup defaults
-        self.name = DEVICE_DEFAULT_NAME
-        self.address = Address(DEVICE_DEFAULT_ADDRESS)
-        self.class_of_device = DEVICE_DEFAULT_CLASS_OF_DEVICE
-        self.scan_response_data = DEVICE_DEFAULT_SCAN_RESPONSE_DATA
-        self.advertising_interval_min = DEVICE_DEFAULT_ADVERTISING_INTERVAL
-        self.advertising_interval_max = DEVICE_DEFAULT_ADVERTISING_INTERVAL
-        self.le_enabled = True
-        # LE host enable 2nd parameter
-        self.le_simultaneous_enabled = False
-        self.classic_enabled = False
-        self.classic_sc_enabled = True
-        self.classic_ssp_enabled = True
-        self.classic_smp_enabled = True
-        self.classic_accept_any = True
-        self.connectable = True
-        self.discoverable = True
-        self.advertising_data = bytes(
-            AdvertisingData(
-                [(AdvertisingData.COMPLETE_LOCAL_NAME, bytes(self.name, 'utf-8'))]
-            )
+    # Setup defaults
+    name: str = DEVICE_DEFAULT_NAME
+    address: Address = Address(DEVICE_DEFAULT_ADDRESS)
+    class_of_device: int = DEVICE_DEFAULT_CLASS_OF_DEVICE
+    scan_response_data: bytes = DEVICE_DEFAULT_SCAN_RESPONSE_DATA
+    advertising_interval_min: int = DEVICE_DEFAULT_ADVERTISING_INTERVAL
+    advertising_interval_max: int = DEVICE_DEFAULT_ADVERTISING_INTERVAL
+    le_enabled: bool = True
+    # LE host enable 2nd parameter
+    le_simultaneous_enabled: bool = False
+    classic_enabled: bool = False
+    classic_sc_enabled: bool = True
+    classic_ssp_enabled: bool = True
+    classic_smp_enabled: bool = True
+    classic_accept_any: bool = True
+    connectable: bool = True
+    discoverable: bool = True
+    advertising_data: bytes = bytes(
+        AdvertisingData(
+            [(AdvertisingData.COMPLETE_LOCAL_NAME, bytes(DEVICE_DEFAULT_NAME, 'utf-8'))]
         )
-        self.irk = bytes(16)  # This really must be changed for any level of security
-        self.keystore = None
+    )
+    irk: bytes = bytes(16)  # This really must be changed for any level of security
+    keystore: Optional[str] = None
+    address_resolution_offload: bool = False
+    cis_enabled: bool = False
+
+    def __post_init__(self) -> None:
         self.gatt_services: List[Dict[str, Any]] = []
-        self.address_resolution_offload = False
-        self.cis_enabled = False
 
     def load_from_dict(self, config: Dict[str, Any]) -> None:
+        config = copy.deepcopy(config)
+
         # Load simple properties
-        self.name = config.get('name', self.name)
-        if address := config.get('address', None):
+        if address := config.pop('address', None):
             self.address = Address(address)
-        self.class_of_device = config.get('class_of_device', self.class_of_device)
-        self.advertising_interval_min = config.get(
-            'advertising_interval', self.advertising_interval_min
-        )
-        self.advertising_interval_max = self.advertising_interval_min
-        self.keystore = config.get('keystore')
-        self.le_enabled = config.get('le_enabled', self.le_enabled)
-        self.le_simultaneous_enabled = config.get(
-            'le_simultaneous_enabled', self.le_simultaneous_enabled
-        )
-        self.classic_enabled = config.get('classic_enabled', self.classic_enabled)
-        self.classic_sc_enabled = config.get(
-            'classic_sc_enabled', self.classic_sc_enabled
-        )
-        self.classic_ssp_enabled = config.get(
-            'classic_ssp_enabled', self.classic_ssp_enabled
-        )
-        self.classic_smp_enabled = config.get(
-            'classic_smp_enabled', self.classic_smp_enabled
-        )
-        self.classic_accept_any = config.get(
-            'classic_accept_any', self.classic_accept_any
-        )
-        self.connectable = config.get('connectable', self.connectable)
-        self.discoverable = config.get('discoverable', self.discoverable)
-        self.gatt_services = config.get('gatt_services', self.gatt_services)
-        self.address_resolution_offload = config.get(
-            'address_resolution_offload', self.address_resolution_offload
-        )
-        self.cis_enabled = config.get('cis_enabled', self.cis_enabled)
 
         # Load or synthesize an IRK
-        irk = config.get('irk')
-        if irk:
+        if irk := config.pop('irk', None):
             self.irk = bytes.fromhex(irk)
         elif self.address != Address(DEVICE_DEFAULT_ADDRESS):
             # Construct an IRK from the address bytes
@@ -1332,20 +1314,52 @@ class DeviceConfiguration:
             # Fallback - when both IRK and address are not set, randomly generate an IRK.
             self.irk = secrets.token_bytes(16)
 
+        if (name := config.pop('name', None)) is not None:
+            self.name = name
+
         # Load advertising data
-        advertising_data = config.get('advertising_data')
-        if advertising_data:
+        if advertising_data := config.pop('advertising_data', None):
             self.advertising_data = bytes.fromhex(advertising_data)
-        elif config.get('name') is not None:
+        elif name is not None:
             self.advertising_data = bytes(
                 AdvertisingData(
                     [(AdvertisingData.COMPLETE_LOCAL_NAME, bytes(self.name, 'utf-8'))]
                 )
             )
 
-    def load_from_file(self, filename):
+        # Load advertising interval (for backward compatibility)
+        if advertising_interval := config.pop('advertising_interval', None):
+            self.advertising_interval_min = advertising_interval
+            self.advertising_interval_max = advertising_interval
+            if (
+                'advertising_interval_max' in config
+                or 'advertising_interval_min' in config
+            ):
+                logger.warning(
+                    'Trying to set both advertising_interval and '
+                    'advertising_interval_min/max, advertising_interval will be'
+                    'ignored.'
+                )
+
+        # Load data in primitive types.
+        for key, value in config.items():
+            setattr(self, key, value)
+
+    def load_from_file(self, filename: str) -> None:
         with open(filename, 'r', encoding='utf-8') as file:
             self.load_from_dict(json.load(file))
+
+    @classmethod
+    def from_file(cls: Type[Self], filename: str) -> Self:
+        config = cls()
+        config.load_from_file(filename)
+        return config
+
+    @classmethod
+    def from_dict(cls: Type[Self], config: Dict[str, Any]) -> Self:
+        device_config = cls()
+        device_config.load_from_dict(config)
+        return device_config
 
 
 # -----------------------------------------------------------------------------
@@ -1470,8 +1484,7 @@ class Device(CompositeEventEmitter):
 
     @classmethod
     def from_config_file(cls, filename: str) -> Device:
-        config = DeviceConfiguration()
-        config.load_from_file(filename)
+        config = DeviceConfiguration.from_file(filename)
         return cls(config=config)
 
     @classmethod
@@ -1488,8 +1501,7 @@ class Device(CompositeEventEmitter):
     def from_config_file_with_hci(
         cls, filename: str, hci_source: TransportSource, hci_sink: TransportSink
     ) -> Device:
-        config = DeviceConfiguration()
-        config.load_from_file(filename)
+        config = DeviceConfiguration.from_file(filename)
         return cls.from_config_with_hci(config, hci_source, hci_sink)
 
     def __init__(
@@ -1528,6 +1540,12 @@ class Device(CompositeEventEmitter):
         self.classic_pending_accepts = {
             Address.ANY: []
         }  # Futures, by BD address OR [Futures] for Address.ANY
+
+        # In Python <= 3.9 + Rust Runtime, asyncio.Lock cannot be properly initiated.
+        if sys.version_info >= (3, 10):
+            self._cis_lock = asyncio.Lock()
+        else:
+            self._cis_lock = AsyncExitStack()
 
         # Own address type cache
         self.connect_own_address_type = None
@@ -1723,16 +1741,14 @@ class Device(CompositeEventEmitter):
         self,
         connection: Connection,
         spec: l2cap.ClassicChannelSpec,
-    ) -> l2cap.ClassicChannel:
-        ...
+    ) -> l2cap.ClassicChannel: ...
 
     @overload
     async def create_l2cap_channel(
         self,
         connection: Connection,
         spec: l2cap.LeCreditBasedChannelSpec,
-    ) -> l2cap.LeCreditBasedChannel:
-        ...
+    ) -> l2cap.LeCreditBasedChannel: ...
 
     async def create_l2cap_channel(
         self,
@@ -1753,16 +1769,14 @@ class Device(CompositeEventEmitter):
         self,
         spec: l2cap.ClassicChannelSpec,
         handler: Optional[Callable[[l2cap.ClassicChannel], Any]] = None,
-    ) -> l2cap.ClassicChannelServer:
-        ...
+    ) -> l2cap.ClassicChannelServer: ...
 
     @overload
     def create_l2cap_server(
         self,
         spec: l2cap.LeCreditBasedChannelSpec,
         handler: Optional[Callable[[l2cap.LeCreditBasedChannel], Any]] = None,
-    ) -> l2cap.LeCreditBasedChannelServer:
-        ...
+    ) -> l2cap.LeCreditBasedChannelServer: ...
 
     def create_l2cap_server(
         self,
@@ -2188,7 +2202,7 @@ class Device(CompositeEventEmitter):
             # controller.
             await self.send_command(
                 HCI_LE_Remove_Advertising_Set_Command(
-                    advertising_handle=advertising_data
+                    advertising_handle=advertising_handle
                 ),
                 check_result=False,
             )
@@ -3289,17 +3303,19 @@ class Device(CompositeEventEmitter):
 
         handler = self.on(
             'remote_name',
-            lambda address, remote_name: pending_name.set_result(remote_name)
-            if address == peer_address
-            else None,
+            lambda address, remote_name: (
+                pending_name.set_result(remote_name)
+                if address == peer_address
+                else None
+            ),
         )
         failure_handler = self.on(
             'remote_name_failure',
-            lambda address, error_code: pending_name.set_exception(
-                HCI_Error(error_code)
-            )
-            if address == peer_address
-            else None,
+            lambda address, error_code: (
+                pending_name.set_exception(HCI_Error(error_code))
+                if address == peer_address
+                else None
+            ),
         )
 
         try:
@@ -3404,49 +3420,71 @@ class Device(CompositeEventEmitter):
                 for cis_handle, _ in cis_acl_pairs
             }
 
-            @watcher.on(self, 'cis_establishment')
             def on_cis_establishment(cis_link: CisLink) -> None:
                 if pending_future := pending_cis_establishments.get(cis_link.handle):
                     pending_future.set_result(cis_link)
 
-            result = await self.send_command(
+            def on_cis_establishment_failure(cis_handle: int, status: int) -> None:
+                if pending_future := pending_cis_establishments.get(cis_handle):
+                    pending_future.set_exception(HCI_Error(status))
+
+            watcher.on(self, 'cis_establishment', on_cis_establishment)
+            watcher.on(self, 'cis_establishment_failure', on_cis_establishment_failure)
+            await self.send_command(
                 HCI_LE_Create_CIS_Command(
                     cis_connection_handle=[p[0] for p in cis_acl_pairs],
                     acl_connection_handle=[p[1] for p in cis_acl_pairs],
                 ),
+                check_result=True,
             )
-            if result.status != HCI_COMMAND_STATUS_PENDING:
-                logger.warning(
-                    'HCI_LE_Create_CIS_Command failed: '
-                    f'{HCI_Constant.error_name(result.status)}'
-                )
-                raise HCI_StatusError(result)
 
             return await asyncio.gather(*pending_cis_establishments.values())
 
     # [LE only]
     @experimental('Only for testing.')
     async def accept_cis_request(self, handle: int) -> CisLink:
-        result = await self.send_command(
-            HCI_LE_Accept_CIS_Request_Command(connection_handle=handle),
-        )
-        if result.status != HCI_COMMAND_STATUS_PENDING:
-            logger.warning(
-                'HCI_LE_Accept_CIS_Request_Command failed: '
-                f'{HCI_Constant.error_name(result.status)}'
-            )
-            raise HCI_StatusError(result)
+        """[LE Only] Accepts an incoming CIS request.
 
-        pending_cis_establishment = asyncio.get_running_loop().create_future()
+        When the specified CIS handle is already created, this method returns the
+        existed CIS link object immediately.
 
-        with closing(EventWatcher()) as watcher:
+        Args:
+            handle: CIS handle to accept.
 
-            @watcher.on(self, 'cis_establishment')
-            def on_cis_establishment(cis_link: CisLink) -> None:
-                if cis_link.handle == handle:
-                    pending_cis_establishment.set_result(cis_link)
+        Returns:
+            CIS link object on the given handle.
+        """
+        if not (cis_link := self.cis_links.get(handle)):
+            raise InvalidStateError(f'No pending CIS request of handle {handle}')
 
-            return await pending_cis_establishment
+        # There might be multiple ASE sharing a CIS channel.
+        # If one of them has accepted the request, the others should just leverage it.
+        async with self._cis_lock:
+            if cis_link.state == CisLink.State.ESTABLISHED:
+                return cis_link
+
+            with closing(EventWatcher()) as watcher:
+                pending_establishment = asyncio.get_running_loop().create_future()
+
+                def on_establishment() -> None:
+                    pending_establishment.set_result(None)
+
+                def on_establishment_failure(status: int) -> None:
+                    pending_establishment.set_exception(HCI_Error(status))
+
+                watcher.on(cis_link, 'establishment', on_establishment)
+                watcher.on(cis_link, 'establishment_failure', on_establishment_failure)
+
+                await self.send_command(
+                    HCI_LE_Accept_CIS_Request_Command(connection_handle=handle),
+                    check_result=True,
+                )
+
+                await pending_establishment
+                return cis_link
+
+        # Mypy believes this is reachable when context is an ExitStack.
+        raise InvalidStateError('Unreachable')
 
     # [LE only]
     @experimental('Only for testing.')
@@ -3455,15 +3493,10 @@ class Device(CompositeEventEmitter):
         handle: int,
         reason: int = HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR,
     ) -> None:
-        result = await self.send_command(
+        await self.send_command(
             HCI_LE_Reject_CIS_Request_Command(connection_handle=handle, reason=reason),
+            check_result=True,
         )
-        if result.status != HCI_COMMAND_STATUS_PENDING:
-            logger.warning(
-                'HCI_LE_Reject_CIS_Request_Command failed: '
-                f'{HCI_Constant.error_name(result.status)}'
-            )
-            raise HCI_StatusError(result)
 
     async def get_remote_le_features(self, connection: Connection) -> LeFeatureMask:
         """[LE Only] Reads remote LE supported features.
@@ -3475,19 +3508,25 @@ class Device(CompositeEventEmitter):
             LE features supported by the remote device.
         """
         with closing(EventWatcher()) as watcher:
-            read_feature_future: asyncio.Future[
-                LeFeatureMask
-            ] = asyncio.get_running_loop().create_future()
+            read_feature_future: asyncio.Future[LeFeatureMask] = (
+                asyncio.get_running_loop().create_future()
+            )
 
             def on_le_remote_features(handle: int, features: int):
                 if handle == connection.handle:
                     read_feature_future.set_result(LeFeatureMask(features))
 
+            def on_failure(handle: int, status: int):
+                if handle == connection.handle:
+                    read_feature_future.set_exception(HCI_Error(status))
+
             watcher.on(self.host, 'le_remote_features', on_le_remote_features)
+            watcher.on(self.host, 'le_remote_features_failure', on_failure)
             await self.send_command(
                 HCI_LE_Read_Remote_Features_Command(
                     connection_handle=connection.handle
                 ),
+                check_result=True,
             )
             return await read_feature_future
 
@@ -3662,7 +3701,6 @@ class Device(CompositeEventEmitter):
                 # We were connected via a legacy advertisement.
                 if self.legacy_advertiser:
                     own_address_type = self.legacy_advertiser.own_address_type
-                    self.legacy_advertiser = None
                 else:
                     # This should not happen, but just in case, pick a default.
                     logger.warning("connection without an advertiser")
@@ -3693,15 +3731,14 @@ class Device(CompositeEventEmitter):
         )
         self.connections[connection_handle] = connection
 
-        if (
-            role == HCI_PERIPHERAL_ROLE
-            and self.legacy_advertiser
-            and self.legacy_advertiser.auto_restart
-        ):
-            connection.once(
-                'disconnection',
-                lambda _: self.abort_on('flush', self.legacy_advertiser.start()),
-            )
+        if role == HCI_PERIPHERAL_ROLE and self.legacy_advertiser:
+            if self.legacy_advertiser.auto_restart:
+                connection.once(
+                    'disconnection',
+                    lambda _: self.abort_on('flush', self.legacy_advertiser.start()),
+                )
+            else:
+                self.legacy_advertiser = None
 
         if role == HCI_CENTRAL_ROLE or not self.supports_le_extended_advertising:
             # We can emit now, we have all the info we need
@@ -4109,8 +4146,8 @@ class Device(CompositeEventEmitter):
     @host_event_handler
     @experimental('Only for testing')
     def on_sco_packet(self, sco_handle: int, packet: HCI_SynchronousDataPacket) -> None:
-        if sco_link := self.sco_links.get(sco_handle):
-            sco_link.emit('pdu', packet)
+        if (sco_link := self.sco_links.get(sco_handle)) and sco_link.sink:
+            sco_link.sink(packet)
 
     # [LE only]
     @host_event_handler
@@ -4166,15 +4203,15 @@ class Device(CompositeEventEmitter):
     def on_cis_establishment_failure(self, cis_handle: int, status: int) -> None:
         logger.debug(f'*** CIS Establishment Failure: cis=[0x{cis_handle:04X}] ***')
         if cis_link := self.cis_links.pop(cis_handle):
-            cis_link.emit('establishment_failure')
+            cis_link.emit('establishment_failure', status)
         self.emit('cis_establishment_failure', cis_handle, status)
 
     # [LE only]
     @host_event_handler
     @experimental('Only for testing')
     def on_iso_packet(self, handle: int, packet: HCI_IsoDataPacket) -> None:
-        if cis_link := self.cis_links.get(handle):
-            cis_link.emit('pdu', packet)
+        if (cis_link := self.cis_links.get(handle)) and cis_link.sink:
+            cis_link.sink(packet)
 
     @host_event_handler
     @with_connection_from_handle
