@@ -509,9 +509,11 @@ class Ping:
         packet = struct.pack(
             '>bbI',
             PacketType.SEQUENCE,
-            PACKET_FLAG_LAST
-            if self.current_packet_index == self.tx_packet_count - 1
-            else 0,
+            (
+                PACKET_FLAG_LAST
+                if self.current_packet_index == self.tx_packet_count - 1
+                else 0
+            ),
             self.current_packet_index,
         ) + bytes(self.tx_packet_size - 6)
         logging.info(color(f'Sending packet {self.current_packet_index}', 'yellow'))
@@ -897,14 +899,26 @@ class L2capServer(StreamedPacketIO):
 # RfcommClient
 # -----------------------------------------------------------------------------
 class RfcommClient(StreamedPacketIO):
-    def __init__(self, device, channel, uuid, l2cap_mtu, max_frame_size, window_size):
+    def __init__(
+        self,
+        device,
+        channel,
+        uuid,
+        l2cap_mtu,
+        max_frame_size,
+        initial_credits,
+        max_credits,
+        credits_threshold,
+    ):
         super().__init__()
         self.device = device
         self.channel = channel
         self.uuid = uuid
         self.l2cap_mtu = l2cap_mtu
         self.max_frame_size = max_frame_size
-        self.window_size = window_size
+        self.initial_credits = initial_credits
+        self.max_credits = max_credits
+        self.credits_threshold = credits_threshold
         self.rfcomm_session = None
         self.ready = asyncio.Event()
 
@@ -938,12 +952,17 @@ class RfcommClient(StreamedPacketIO):
         logging.info(color(f'### Opening session for channel {channel}...', 'yellow'))
         try:
             dlc_options = {}
-            if self.max_frame_size:
+            if self.max_frame_size is not None:
                 dlc_options['max_frame_size'] = self.max_frame_size
-            if self.window_size:
-                dlc_options['window_size'] = self.window_size
+            if self.initial_credits is not None:
+                dlc_options['initial_credits'] = self.initial_credits
             rfcomm_session = await rfcomm_mux.open_dlc(channel, **dlc_options)
             logging.info(color(f'### Session open: {rfcomm_session}', 'yellow'))
+            if self.max_credits is not None:
+                rfcomm_session.rx_max_credits = self.max_credits
+            if self.credits_threshold is not None:
+                rfcomm_session.rx_credits_threshold = self.credits_threshold
+
         except bumble.core.ConnectionError as error:
             logging.info(color(f'!!! Session open failed: {error}', 'red'))
             await rfcomm_mux.disconnect()
@@ -967,8 +986,19 @@ class RfcommClient(StreamedPacketIO):
 # RfcommServer
 # -----------------------------------------------------------------------------
 class RfcommServer(StreamedPacketIO):
-    def __init__(self, device, channel, l2cap_mtu):
+    def __init__(
+        self,
+        device,
+        channel,
+        l2cap_mtu,
+        max_frame_size,
+        initial_credits,
+        max_credits,
+        credits_threshold,
+    ):
         super().__init__()
+        self.max_credits = max_credits
+        self.credits_threshold = credits_threshold
         self.dlc = None
         self.ready = asyncio.Event()
 
@@ -979,7 +1009,12 @@ class RfcommServer(StreamedPacketIO):
         rfcomm_server = bumble.rfcomm.Server(device, **server_options)
 
         # Listen for incoming DLC connections
-        channel_number = rfcomm_server.listen(self.on_dlc, channel)
+        dlc_options = {}
+        if max_frame_size is not None:
+            dlc_options['max_frame_size'] = max_frame_size
+        if initial_credits is not None:
+            dlc_options['initial_credits'] = initial_credits
+        channel_number = rfcomm_server.listen(self.on_dlc, channel, **dlc_options)
 
         # Setup the SDP to advertise this channel
         device.sdp_service_records = make_sdp_records(channel_number)
@@ -1002,6 +1037,10 @@ class RfcommServer(StreamedPacketIO):
         dlc.sink = self.on_packet
         self.io_sink = dlc.write
         self.dlc = dlc
+        if self.max_credits is not None:
+            dlc.rx_max_credits = self.max_credits
+        if self.credits_threshold is not None:
+            dlc.rx_credits_threshold = self.credits_threshold
 
     async def drain(self):
         assert self.dlc
@@ -1062,9 +1101,9 @@ class Central(Connection.Listener):
 
             if self.phy not in (None, HCI_LE_1M_PHY):
                 # Add an connections parameters entry for this PHY.
-                self.connection_parameter_preferences[
-                    self.phy
-                ] = connection_parameter_preferences
+                self.connection_parameter_preferences[self.phy] = (
+                    connection_parameter_preferences
+                )
         else:
             self.connection_parameter_preferences = None
 
@@ -1232,6 +1271,7 @@ class Peripheral(Device.Listener, Connection.Listener):
                         'cyan',
                     )
                 )
+
             await self.connected.wait()
             logging.info(color('### Connected', 'cyan'))
 
@@ -1318,7 +1358,9 @@ def create_mode_factory(ctx, default_mode):
                 uuid=ctx.obj['rfcomm_uuid'],
                 l2cap_mtu=ctx.obj['rfcomm_l2cap_mtu'],
                 max_frame_size=ctx.obj['rfcomm_max_frame_size'],
-                window_size=ctx.obj['rfcomm_window_size'],
+                initial_credits=ctx.obj['rfcomm_initial_credits'],
+                max_credits=ctx.obj['rfcomm_max_credits'],
+                credits_threshold=ctx.obj['rfcomm_credits_threshold'],
             )
 
         if mode == 'rfcomm-server':
@@ -1326,6 +1368,10 @@ def create_mode_factory(ctx, default_mode):
                 device,
                 channel=ctx.obj['rfcomm_channel'],
                 l2cap_mtu=ctx.obj['rfcomm_l2cap_mtu'],
+                max_frame_size=ctx.obj['rfcomm_max_frame_size'],
+                initial_credits=ctx.obj['rfcomm_initial_credits'],
+                max_credits=ctx.obj['rfcomm_max_credits'],
+                credits_threshold=ctx.obj['rfcomm_credits_threshold'],
             )
 
         raise ValueError('invalid mode')
@@ -1424,9 +1470,19 @@ def create_role_factory(ctx, default_role):
     help='RFComm maximum frame size',
 )
 @click.option(
-    '--rfcomm-window-size',
+    '--rfcomm-initial-credits',
     type=int,
-    help='RFComm window size',
+    help='RFComm initial credits',
+)
+@click.option(
+    '--rfcomm-max-credits',
+    type=int,
+    help='RFComm max credits',
+)
+@click.option(
+    '--rfcomm-credits-threshold',
+    type=int,
+    help='RFComm credits threshold',
 )
 @click.option(
     '--l2cap-psm',
@@ -1527,7 +1583,9 @@ def bench(
     rfcomm_uuid,
     rfcomm_l2cap_mtu,
     rfcomm_max_frame_size,
-    rfcomm_window_size,
+    rfcomm_initial_credits,
+    rfcomm_max_credits,
+    rfcomm_credits_threshold,
     l2cap_psm,
     l2cap_mtu,
     l2cap_mps,
@@ -1542,7 +1600,9 @@ def bench(
     ctx.obj['rfcomm_uuid'] = rfcomm_uuid
     ctx.obj['rfcomm_l2cap_mtu'] = rfcomm_l2cap_mtu
     ctx.obj['rfcomm_max_frame_size'] = rfcomm_max_frame_size
-    ctx.obj['rfcomm_window_size'] = rfcomm_window_size
+    ctx.obj['rfcomm_initial_credits'] = rfcomm_initial_credits
+    ctx.obj['rfcomm_max_credits'] = rfcomm_max_credits
+    ctx.obj['rfcomm_credits_threshold'] = rfcomm_credits_threshold
     ctx.obj['l2cap_psm'] = l2cap_psm
     ctx.obj['l2cap_mtu'] = l2cap_mtu
     ctx.obj['l2cap_mps'] = l2cap_mps
@@ -1591,8 +1651,8 @@ def central(
     mode_factory = create_mode_factory(ctx, 'gatt-client')
     classic = ctx.obj['classic']
 
-    asyncio.run(
-        Central(
+    async def run_central():
+        await Central(
             transport,
             peripheral_address,
             classic,
@@ -1604,7 +1664,8 @@ def central(
             encrypt or authenticate,
             ctx.obj['extended_data_length'],
         ).run()
-    )
+
+    asyncio.run(run_central())
 
 
 @bench.command()
@@ -1615,15 +1676,16 @@ def peripheral(ctx, transport):
     role_factory = create_role_factory(ctx, 'receiver')
     mode_factory = create_mode_factory(ctx, 'gatt-server')
 
-    asyncio.run(
-        Peripheral(
+    async def run_peripheral():
+        await Peripheral(
             transport,
             ctx.obj['classic'],
             ctx.obj['extended_data_length'],
             role_factory,
             mode_factory,
         ).run()
-    )
+
+    asyncio.run(run_peripheral())
 
 
 def main():
