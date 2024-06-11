@@ -25,6 +25,7 @@ from bumble.utils import AsyncRunner
 my_work_queue1 = AsyncRunner.WorkQueue()
 my_work_queue2 = AsyncRunner.WorkQueue(create_task=False)
 
+
 # -----------------------------------------------------------------------------
 @AsyncRunner.run_in_task()
 async def func1(x, y):
@@ -60,7 +61,7 @@ async def func4(x, y):
 
 
 # -----------------------------------------------------------------------------
-async def main():
+async def main() -> None:
     print("MAIN: start, loop=", asyncio.get_running_loop())
     print("MAIN: invoke func1")
     func1(1, 2)
