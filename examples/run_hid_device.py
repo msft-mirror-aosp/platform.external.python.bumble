@@ -229,6 +229,7 @@ HID_REPORT_MAP = bytes(  # Text String, 50 Octet Report Descriptor
 # Default protocol mode set to report protocol
 protocol_mode = Message.ProtocolMode.REPORT_PROTOCOL
 
+
 # -----------------------------------------------------------------------------
 def sdp_records():
     service_record_handle = 0x00010002
@@ -427,6 +428,7 @@ class DeviceData:
 # Device's live data - Mouse and Keyboard will be stored in this
 deviceData = DeviceData()
 
+
 # -----------------------------------------------------------------------------
 async def keyboard_device(hid_device):
 
@@ -487,7 +489,7 @@ async def keyboard_device(hid_device):
 
 
 # -----------------------------------------------------------------------------
-async def main():
+async def main() -> None:
     if len(sys.argv) < 3:
         print(
             'Usage: python run_hid_device.py <device-config> <transport-spec> <command>'
@@ -599,11 +601,13 @@ async def main():
         asyncio.create_task(handle_virtual_cable_unplug())
 
     print('<<< connecting to HCI...')
-    async with await open_transport_or_link(sys.argv[2]) as (hci_source, hci_sink):
+    async with await open_transport_or_link(sys.argv[2]) as hci_transport:
         print('<<< connected')
 
         # Create a device
-        device = Device.from_config_file_with_hci(sys.argv[1], hci_source, hci_sink)
+        device = Device.from_config_file_with_hci(
+            sys.argv[1], hci_transport.source, hci_transport.sink
+        )
         device.classic_enabled = True
 
         # Create and register HID device
@@ -740,7 +744,7 @@ async def main():
             print("Executing in Web mode")
             await keyboard_device(hid_device)
 
-        await hci_source.wait_for_termination()
+        await hci_transport.source.wait_for_termination()
 
 
 # -----------------------------------------------------------------------------
