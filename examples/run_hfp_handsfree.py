@@ -16,6 +16,7 @@
 # Imports
 # -----------------------------------------------------------------------------
 import asyncio
+import contextlib
 import sys
 import os
 import logging
@@ -31,39 +32,16 @@ from bumble.transport import open_transport_or_link
 from bumble import hfp
 from bumble.hfp import HfProtocol
 
-
-# -----------------------------------------------------------------------------
-class UiServer:
-    protocol: Optional[HfProtocol] = None
-
-    async def start(self):
-        """Start a Websocket server to receive events from a web page."""
-
-        async def serve(websocket, _path):
-            while True:
-                try:
-                    message = await websocket.recv()
-                    print('Received: ', str(message))
-
-                    parsed = json.loads(message)
-                    message_type = parsed['type']
-                    if message_type == 'at_command':
-                        if self.protocol is not None:
-                            await self.protocol.execute_command(parsed['command'])
-
-                except websockets.exceptions.ConnectionClosedOK:
-                    pass
-
-        # pylint: disable=no-member
-        await websockets.serve(serve, 'localhost', 8989)
+ws: Optional[websockets.WebSocketServerProtocol] = None
+hf_protocol: Optional[HfProtocol] = None
 
 
 # -----------------------------------------------------------------------------
-def on_dlc(dlc: rfcomm.DLC, configuration: hfp.Configuration):
+def on_dlc(dlc: rfcomm.DLC, configuration: hfp.HfConfiguration):
     print('*** DLC connected', dlc)
-    protocol = HfProtocol(dlc, configuration)
-    UiServer.protocol = protocol
-    asyncio.create_task(protocol.run())
+    global hf_protocol
+    hf_protocol = HfProtocol(dlc, configuration)
+    asyncio.create_task(hf_protocol.run())
 
     def on_sco_request(connection: Connection, link_type: int, protocol: HfProtocol):
         if connection == protocol.dlc.multiplexer.l2cap_channel.connection:
@@ -88,7 +66,7 @@ def on_dlc(dlc: rfcomm.DLC, configuration: hfp.Configuration):
                 ),
             )
 
-    handler = functools.partial(on_sco_request, protocol=protocol)
+    handler = functools.partial(on_sco_request, protocol=hf_protocol)
     dlc.multiplexer.l2cap_channel.connection.device.on('sco_request', handler)
     dlc.multiplexer.l2cap_channel.once(
         'close',
@@ -97,21 +75,28 @@ def on_dlc(dlc: rfcomm.DLC, configuration: hfp.Configuration):
         ),
     )
 
+    def on_ag_indicator(indicator):
+        global ws
+        if ws:
+            asyncio.create_task(ws.send(str(indicator)))
+
+    hf_protocol.on('ag_indicator', on_ag_indicator)
+
 
 # -----------------------------------------------------------------------------
-async def main():
+async def main() -> None:
     if len(sys.argv) < 3:
         print('Usage: run_classic_hfp.py <device-config> <transport-spec>')
         print('example: run_classic_hfp.py classic2.json usb:04b4:f901')
         return
 
     print('<<< connecting to HCI...')
-    async with await open_transport_or_link(sys.argv[2]) as (hci_source, hci_sink):
+    async with await open_transport_or_link(sys.argv[2]) as hci_transport:
         print('<<< connected')
 
         # Hands-Free profile configuration.
         # TODO: load configuration from file.
-        configuration = hfp.Configuration(
+        configuration = hfp.HfConfiguration(
             supported_hf_features=[
                 hfp.HfFeature.THREE_WAY_CALLING,
                 hfp.HfFeature.REMOTE_VOLUME_CONTROL,
@@ -131,7 +116,9 @@ async def main():
         )
 
         # Create a device
-        device = Device.from_config_file_with_hci(sys.argv[1], hci_source, hci_sink)
+        device = Device.from_config_file_with_hci(
+            sys.argv[1], hci_transport.source, hci_transport.sink
+        )
         device.classic_enabled = True
 
         # Create and register a server
@@ -143,7 +130,9 @@ async def main():
 
         # Advertise the HFP RFComm channel in the SDP
         device.sdp_service_records = {
-            0x00010001: hfp.sdp_records(0x00010001, channel_number, configuration)
+            0x00010001: hfp.make_hf_sdp_records(
+                0x00010001, channel_number, configuration
+            )
         }
 
         # Let's go!
@@ -154,10 +143,32 @@ async def main():
         await device.set_connectable(True)
 
         # Start the UI websocket server to offer a few buttons and input boxes
-        ui_server = UiServer()
-        await ui_server.start()
+        async def serve(websocket: websockets.WebSocketServerProtocol, _path):
+            global ws
+            ws = websocket
+            async for message in websocket:
+                with contextlib.suppress(websockets.exceptions.ConnectionClosedOK):
+                    print('Received: ', str(message))
 
-        await hci_source.wait_for_termination()
+                    parsed = json.loads(message)
+                    message_type = parsed['type']
+                    if message_type == 'at_command':
+                        if hf_protocol is not None:
+                            response = str(
+                                await hf_protocol.execute_command(
+                                    parsed['command'],
+                                    response_type=hfp.AtResponseType.MULTIPLE,
+                                )
+                            )
+                            await websocket.send(response)
+                    elif message_type == 'query_call':
+                        if hf_protocol:
+                            response = str(await hf_protocol.query_current_calls())
+                            await websocket.send(response)
+
+        await websockets.serve(serve, 'localhost', 8989)
+
+        await hci_transport.source.wait_for_termination()
 
 
 # -----------------------------------------------------------------------------
