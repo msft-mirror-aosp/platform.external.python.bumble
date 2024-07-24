@@ -70,6 +70,7 @@ L2CAP_LE_SIGNALING_CID = 0x05
 
 L2CAP_MIN_LE_MTU     = 23
 L2CAP_MIN_BR_EDR_MTU = 48
+L2CAP_MAX_BR_EDR_MTU = 65535
 
 L2CAP_DEFAULT_MTU = 2048  # Default value for the MTU we are willing to accept
 
@@ -149,9 +150,10 @@ L2CAP_INVALID_CID_IN_REQUEST_REASON = 0x0002
 
 L2CAP_LE_CREDIT_BASED_CONNECTION_MAX_CREDITS             = 65535
 L2CAP_LE_CREDIT_BASED_CONNECTION_MIN_MTU                 = 23
+L2CAP_LE_CREDIT_BASED_CONNECTION_MAX_MTU                 = 65535
 L2CAP_LE_CREDIT_BASED_CONNECTION_MIN_MPS                 = 23
 L2CAP_LE_CREDIT_BASED_CONNECTION_MAX_MPS                 = 65533
-L2CAP_LE_CREDIT_BASED_CONNECTION_DEFAULT_MTU             = 2046
+L2CAP_LE_CREDIT_BASED_CONNECTION_DEFAULT_MTU             = 2048
 L2CAP_LE_CREDIT_BASED_CONNECTION_DEFAULT_MPS             = 2048
 L2CAP_LE_CREDIT_BASED_CONNECTION_DEFAULT_INITIAL_CREDITS = 256
 
@@ -172,7 +174,7 @@ L2CAP_MTU_CONFIGURATION_PARAMETER_TYPE = 0x01
 @dataclasses.dataclass
 class ClassicChannelSpec:
     psm: Optional[int] = None
-    mtu: int = L2CAP_MIN_BR_EDR_MTU
+    mtu: int = L2CAP_DEFAULT_MTU
 
 
 @dataclasses.dataclass
@@ -188,8 +190,11 @@ class LeCreditBasedChannelSpec:
             or self.max_credits > L2CAP_LE_CREDIT_BASED_CONNECTION_MAX_CREDITS
         ):
             raise ValueError('max credits out of range')
-        if self.mtu < L2CAP_LE_CREDIT_BASED_CONNECTION_MIN_MTU:
-            raise ValueError('MTU too small')
+        if (
+            self.mtu < L2CAP_LE_CREDIT_BASED_CONNECTION_MIN_MTU
+            or self.mtu > L2CAP_LE_CREDIT_BASED_CONNECTION_MAX_MTU
+        ):
+            raise ValueError('MTU out of range')
         if (
             self.mps < L2CAP_LE_CREDIT_BASED_CONNECTION_MIN_MPS
             or self.mps > L2CAP_LE_CREDIT_BASED_CONNECTION_MAX_MPS
@@ -204,7 +209,7 @@ class L2CAP_PDU:
 
     @staticmethod
     def from_bytes(data: bytes) -> L2CAP_PDU:
-        # Sanity check
+        # Check parameters
         if len(data) < 4:
             raise ValueError('not enough data for L2CAP header')
 
@@ -391,6 +396,9 @@ class L2CAP_Connection_Request(L2CAP_Control_Frame):
     See Bluetooth spec @ Vol 3, Part A - 4.2 CONNECTION REQUEST
     '''
 
+    psm: int
+    source_cid: int
+
     @staticmethod
     def parse_psm(data: bytes, offset: int = 0) -> Tuple[int, int]:
         psm_length = 2
@@ -431,6 +439,11 @@ class L2CAP_Connection_Response(L2CAP_Control_Frame):
     '''
     See Bluetooth spec @ Vol 3, Part A - 4.3 CONNECTION RESPONSE
     '''
+
+    source_cid: int
+    destination_cid: int
+    status: int
+    result: int
 
     CONNECTION_SUCCESSFUL = 0x0000
     CONNECTION_PENDING = 0x0001
@@ -737,6 +750,8 @@ class ClassicChannel(EventEmitter):
     sink: Optional[Callable[[bytes], Any]]
     state: State
     connection: Connection
+    mtu: int
+    peer_mtu: int
 
     def __init__(
         self,
@@ -753,6 +768,7 @@ class ClassicChannel(EventEmitter):
         self.signaling_cid = signaling_cid
         self.state = self.State.CLOSED
         self.mtu = mtu
+        self.peer_mtu = L2CAP_MIN_BR_EDR_MTU
         self.psm = psm
         self.source_cid = source_cid
         self.destination_cid = 0
@@ -817,7 +833,9 @@ class ClassicChannel(EventEmitter):
 
         # Wait for the connection to succeed or fail
         try:
-            return await self.connection_result
+            return await self.connection.abort_on(
+                'disconnection', self.connection_result
+            )
         finally:
             self.connection_result = None
 
@@ -849,7 +867,7 @@ class ClassicChannel(EventEmitter):
             [
                 (
                     L2CAP_MAXIMUM_TRANSMISSION_UNIT_CONFIGURATION_OPTION_TYPE,
-                    struct.pack('<H', L2CAP_DEFAULT_MTU),
+                    struct.pack('<H', self.mtu),
                 )
             ]
         )
@@ -914,8 +932,8 @@ class ClassicChannel(EventEmitter):
         options = L2CAP_Control_Frame.decode_configuration_options(request.options)
         for option in options:
             if option[0] == L2CAP_MTU_CONFIGURATION_PARAMETER_TYPE:
-                self.mtu = struct.unpack('<H', option[1])[0]
-                logger.debug(f'MTU = {self.mtu}')
+                self.peer_mtu = struct.unpack('<H', option[1])[0]
+                logger.debug(f'peer MTU = {self.peer_mtu}')
 
         self.send_control_frame(
             L2CAP_Configure_Response(
@@ -1014,7 +1032,7 @@ class ClassicChannel(EventEmitter):
         return (
             f'Channel({self.source_cid}->{self.destination_cid}, '
             f'PSM={self.psm}, '
-            f'MTU={self.mtu}, '
+            f'MTU={self.mtu}/{self.peer_mtu}, '
             f'state={self.state.name})'
         )
 
@@ -1636,12 +1654,13 @@ class ChannelManager:
 
     def send_pdu(self, connection, cid: int, pdu: Union[SupportsBytes, bytes]) -> None:
         pdu_str = pdu.hex() if isinstance(pdu, bytes) else str(pdu)
+        pdu_bytes = bytes(pdu)
         logger.debug(
             f'{color(">>> Sending L2CAP PDU", "blue")} '
             f'on connection [0x{connection.handle:04X}] (CID={cid}) '
-            f'{connection.peer_address}: {pdu_str}'
+            f'{connection.peer_address}: {len(pdu_bytes)} bytes, {pdu_str}'
         )
-        self.host.send_l2cap_pdu(connection.handle, cid, bytes(pdu))
+        self.host.send_l2cap_pdu(connection.handle, cid, pdu_bytes)
 
     def on_pdu(self, connection: Connection, cid: int, pdu: bytes) -> None:
         if cid in (L2CAP_SIGNALING_CID, L2CAP_LE_SIGNALING_CID):
@@ -1918,7 +1937,7 @@ class ChannelManager:
                     supervision_timeout=request.timeout,
                     min_ce_length=0,
                     max_ce_length=0,
-                )  # type: ignore[call-arg]
+                )
             )
         else:
             self.send_control_frame(
@@ -2209,7 +2228,7 @@ class ChannelManager:
         # Connect
         try:
             await channel.connect()
-        except Exception as e:
+        except BaseException as e:
             del connection_channels[source_cid]
             raise e
 

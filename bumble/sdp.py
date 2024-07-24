@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import struct
 from typing import Dict, List, Type, Optional, Tuple, Union, NewType, TYPE_CHECKING
+from typing_extensions import Self
 
 from . import core, l2cap
 from .colors import color
@@ -97,7 +98,8 @@ SDP_CLIENT_EXECUTABLE_URL_ATTRIBUTE_ID               = 0X000B
 SDP_ICON_URL_ATTRIBUTE_ID                            = 0X000C
 SDP_ADDITIONAL_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID = 0X000D
 
-# Attribute Identifier (cf. Assigned Numbers for Service Discovery)
+
+# Profile-specific Attribute Identifiers (cf. Assigned Numbers for Service Discovery)
 # used by AVRCP, HFP and A2DP
 SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID = 0x0311
 
@@ -115,7 +117,8 @@ SDP_ATTRIBUTE_ID_NAMES = {
     SDP_DOCUMENTATION_URL_ATTRIBUTE_ID:                   'SDP_DOCUMENTATION_URL_ATTRIBUTE_ID',
     SDP_CLIENT_EXECUTABLE_URL_ATTRIBUTE_ID:               'SDP_CLIENT_EXECUTABLE_URL_ATTRIBUTE_ID',
     SDP_ICON_URL_ATTRIBUTE_ID:                            'SDP_ICON_URL_ATTRIBUTE_ID',
-    SDP_ADDITIONAL_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID: 'SDP_ADDITIONAL_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID'
+    SDP_ADDITIONAL_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID: 'SDP_ADDITIONAL_PROTOCOL_DESCRIPTOR_LIST_ATTRIBUTE_ID',
+    SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID:                  'SDP_SUPPORTED_FEATURES_ATTRIBUTE_ID',
 }
 
 SDP_PUBLIC_BROWSE_ROOT = core.UUID.from_16_bits(0x1002, 'PublicBrowseRoot')
@@ -760,13 +763,13 @@ class SDP_ServiceSearchAttributeResponse(SDP_PDU):
 class Client:
     channel: Optional[l2cap.ClassicChannel]
 
-    def __init__(self, device: Device) -> None:
-        self.device = device
+    def __init__(self, connection: Connection) -> None:
+        self.connection = connection
         self.pending_request = None
         self.channel = None
 
-    async def connect(self, connection: Connection) -> None:
-        self.channel = await connection.create_l2cap_channel(
+    async def connect(self) -> None:
+        self.channel = await self.connection.create_l2cap_channel(
             spec=l2cap.ClassicChannelSpec(SDP_PSM)
         )
 
@@ -822,11 +825,13 @@ class Client:
         )
         attribute_id_list = DataElement.sequence(
             [
-                DataElement.unsigned_integer(
-                    attribute_id[0], value_size=attribute_id[1]
+                (
+                    DataElement.unsigned_integer(
+                        attribute_id[0], value_size=attribute_id[1]
+                    )
+                    if isinstance(attribute_id, tuple)
+                    else DataElement.unsigned_integer_16(attribute_id)
                 )
-                if isinstance(attribute_id, tuple)
-                else DataElement.unsigned_integer_16(attribute_id)
                 for attribute_id in attribute_ids
             ]
         )
@@ -878,11 +883,13 @@ class Client:
 
         attribute_id_list = DataElement.sequence(
             [
-                DataElement.unsigned_integer(
-                    attribute_id[0], value_size=attribute_id[1]
+                (
+                    DataElement.unsigned_integer(
+                        attribute_id[0], value_size=attribute_id[1]
+                    )
+                    if isinstance(attribute_id, tuple)
+                    else DataElement.unsigned_integer_16(attribute_id)
                 )
-                if isinstance(attribute_id, tuple)
-                else DataElement.unsigned_integer_16(attribute_id)
                 for attribute_id in attribute_ids
             ]
         )
@@ -917,6 +924,13 @@ class Client:
             return []
 
         return ServiceAttribute.list_from_data_elements(attribute_list_sequence.value)
+
+    async def __aenter__(self) -> Self:
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        await self.disconnect()
 
 
 # -----------------------------------------------------------------------------
@@ -983,7 +997,7 @@ class Server:
             try:
                 handler(sdp_pdu)
             except Exception as error:
-                logger.warning(f'{color("!!! Exception in handler:", "red")} {error}')
+                logger.exception(f'{color("!!! Exception in handler:", "red")} {error}')
                 self.send_response(
                     SDP_ErrorResponse(
                         transaction_id=sdp_pdu.transaction_id,

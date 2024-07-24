@@ -74,7 +74,7 @@ def codec_capabilities():
 # -----------------------------------------------------------------------------
 def on_avdtp_connection(read_function, protocol):
     packet_source = SbcPacketSource(
-        read_function, protocol.l2cap_channel.mtu, codec_capabilities()
+        read_function, protocol.l2cap_channel.peer_mtu, codec_capabilities()
     )
     packet_pump = MediaPacketPump(packet_source.packets)
     protocol.add_source(packet_source.codec_capabilities, packet_pump)
@@ -98,7 +98,7 @@ async def stream_packets(read_function, protocol):
 
     # Stream the packets
     packet_source = SbcPacketSource(
-        read_function, protocol.l2cap_channel.mtu, codec_capabilities()
+        read_function, protocol.l2cap_channel.peer_mtu, codec_capabilities()
     )
     packet_pump = MediaPacketPump(packet_source.packets)
     source = protocol.add_source(packet_source.codec_capabilities, packet_pump)
@@ -114,7 +114,7 @@ async def stream_packets(read_function, protocol):
 
 
 # -----------------------------------------------------------------------------
-async def main():
+async def main() -> None:
     if len(sys.argv) < 4:
         print(
             'Usage: run_a2dp_source.py <device-config> <transport-spec> <sbc-file> '
@@ -126,11 +126,13 @@ async def main():
         return
 
     print('<<< connecting to HCI...')
-    async with await open_transport_or_link(sys.argv[2]) as (hci_source, hci_sink):
+    async with await open_transport_or_link(sys.argv[2]) as hci_transport:
         print('<<< connected')
 
         # Create a device
-        device = Device.from_config_file_with_hci(sys.argv[1], hci_source, hci_sink)
+        device = Device.from_config_file_with_hci(
+            sys.argv[1], hci_transport.source, hci_transport.sink
+        )
         device.classic_enabled = True
 
         # Setup the SDP to expose the SRC service
@@ -165,9 +167,7 @@ async def main():
                 print('*** Encryption on')
 
                 # Look for an A2DP service
-                avdtp_version = await find_avdtp_service_with_connection(
-                    device, connection
-                )
+                avdtp_version = await find_avdtp_service_with_connection(connection)
                 if not avdtp_version:
                     print(color('!!! no A2DP service found'))
                     return
@@ -188,7 +188,7 @@ async def main():
                 await device.set_discoverable(True)
                 await device.set_connectable(True)
 
-            await hci_source.wait_for_termination()
+            await hci_transport.source.wait_for_termination()
 
 
 # -----------------------------------------------------------------------------

@@ -29,17 +29,20 @@ from bumble.device import Device
 from bumble.transport import open_transport_or_link
 from bumble.profiles.device_information_service import DeviceInformationService
 from bumble.profiles.heart_rate_service import HeartRateService
+from bumble.utils import AsyncRunner
 
 
 # -----------------------------------------------------------------------------
-async def main():
+async def main() -> None:
     if len(sys.argv) != 3:
         print('Usage: python heart_rate_server.py <device-config> <transport-spec>')
         print('example: python heart_rate_server.py device1.json usb:0')
         return
 
-    async with await open_transport_or_link(sys.argv[2]) as (hci_source, hci_sink):
-        device = Device.from_config_file_with_hci(sys.argv[1], hci_source, hci_sink)
+    async with await open_transport_or_link(sys.argv[2]) as hci_transport:
+        device = Device.from_config_file_with_hci(
+            sys.argv[1], hci_transport.source, hci_transport.sink
+        )
 
         # Keep track of accumulated expended energy
         energy_start_time = time.time()
@@ -97,6 +100,17 @@ async def main():
                 ]
             )
         )
+
+        # Notify subscribers of the current value as soon as they subscribe
+        @heart_rate_service.heart_rate_measurement_characteristic.on('subscription')
+        def on_subscription(connection, notify_enabled, indicate_enabled):
+            if notify_enabled or indicate_enabled:
+                AsyncRunner.spawn(
+                    device.notify_subscriber(
+                        connection,
+                        heart_rate_service.heart_rate_measurement_characteristic,
+                    )
+                )
 
         # Go!
         await device.power_on()

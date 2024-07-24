@@ -241,7 +241,10 @@ async def find_avdtp_service_with_sdp_client(
         )
         if profile_descriptor_list:
             for profile_descriptor in profile_descriptor_list.value:
-                if len(profile_descriptor.value) >= 2:
+                if (
+                    profile_descriptor.type == sdp.DataElement.SEQUENCE
+                    and len(profile_descriptor.value) >= 2
+                ):
                     avdtp_version_major = profile_descriptor.value[1].value >> 8
                     avdtp_version_minor = profile_descriptor.value[1].value & 0xFF
                     return (avdtp_version_major, avdtp_version_minor)
@@ -250,15 +253,15 @@ async def find_avdtp_service_with_sdp_client(
 
 # -----------------------------------------------------------------------------
 async def find_avdtp_service_with_connection(
-    device: device.Device, connection: device.Connection
+    connection: device.Connection,
 ) -> Optional[Tuple[int, int]]:
     '''
     Find an AVDTP service, for a connection, and return its version,
     or None if none is found
     '''
 
-    sdp_client = sdp.Client(device)
-    await sdp_client.connect(connection)
+    sdp_client = sdp.Client(connection)
+    await sdp_client.connect()
     service_version = await find_avdtp_service_with_sdp_client(sdp_client)
     await sdp_client.disconnect()
 
@@ -322,8 +325,8 @@ class MediaPacket:
         self.padding = padding
         self.extension = extension
         self.marker = marker
-        self.sequence_number = sequence_number
-        self.timestamp = timestamp
+        self.sequence_number = sequence_number & 0xFFFF
+        self.timestamp = timestamp & 0xFFFFFFFF
         self.ssrc = ssrc
         self.csrc_list = csrc_list
         self.payload_type = payload_type
@@ -338,7 +341,12 @@ class MediaPacket:
                 | len(self.csrc_list),
                 self.marker << 7 | self.payload_type,
             ]
-        ) + struct.pack('>HII', self.sequence_number, self.timestamp, self.ssrc)
+        ) + struct.pack(
+            '>HII',
+            self.sequence_number,
+            self.timestamp,
+            self.ssrc,
+        )
         for csrc in self.csrc_list:
             header += struct.pack('>I', csrc)
         return header + self.payload
@@ -511,7 +519,8 @@ class MessageAssembler:
         try:
             self.callback(self.transaction_label, message)
         except Exception as error:
-            logger.warning(color(f'!!! exception in callback: {error}'))
+            logger.exception(color(f'!!! exception in callback: {error}', 'red'))
+
         self.reset()
 
 
@@ -1466,10 +1475,10 @@ class Protocol(EventEmitter):
             f'[{transaction_label}] {message}'
         )
         max_fragment_size = (
-            self.l2cap_channel.mtu - 3
+            self.l2cap_channel.peer_mtu - 3
         )  # Enough space for a 3-byte start packet header
         payload = message.payload
-        if len(payload) + 2 <= self.l2cap_channel.mtu:
+        if len(payload) + 2 <= self.l2cap_channel.peer_mtu:
             # Fits in a single packet
             packet_type = self.PacketType.SINGLE_PACKET
         else:
@@ -1541,9 +1550,10 @@ class Protocol(EventEmitter):
 
         assert False  # Should never reach this
 
-    async def get_capabilities(
-        self, seid: int
-    ) -> Union[Get_Capabilities_Response, Get_All_Capabilities_Response,]:
+    async def get_capabilities(self, seid: int) -> Union[
+        Get_Capabilities_Response,
+        Get_All_Capabilities_Response,
+    ]:
         if self.version > (1, 2):
             return await self.send_command(Get_All_Capabilities_Command(seid))
 

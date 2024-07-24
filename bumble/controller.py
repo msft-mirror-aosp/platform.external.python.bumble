@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import dataclasses
 import itertools
 import random
 import struct
@@ -42,6 +43,7 @@ from bumble.hci import (
     HCI_LE_1M_PHY,
     HCI_SUCCESS,
     HCI_UNKNOWN_HCI_COMMAND_ERROR,
+    HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR,
     HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR,
     HCI_VERSION_BLUETOOTH_CORE_5_0,
     Address,
@@ -53,17 +55,21 @@ from bumble.hci import (
     HCI_Connection_Request_Event,
     HCI_Disconnection_Complete_Event,
     HCI_Encryption_Change_Event,
+    HCI_Synchronous_Connection_Complete_Event,
     HCI_LE_Advertising_Report_Event,
+    HCI_LE_CIS_Established_Event,
+    HCI_LE_CIS_Request_Event,
     HCI_LE_Connection_Complete_Event,
     HCI_LE_Read_Remote_Features_Complete_Event,
     HCI_Number_Of_Completed_Packets_Event,
     HCI_Packet,
     HCI_Role_Change_Event,
 )
-from typing import Optional, Union, Dict, TYPE_CHECKING
+from typing import Optional, Union, Dict, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bumble.transport.common import TransportSink, TransportSource
+    from bumble.link import LocalLink
+    from bumble.transport.common import TransportSink
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -79,15 +85,27 @@ class DataObject:
 
 
 # -----------------------------------------------------------------------------
+@dataclasses.dataclass
+class CisLink:
+    handle: int
+    cis_id: int
+    cig_id: int
+    acl_connection: Optional[Connection] = None
+
+
+# -----------------------------------------------------------------------------
+@dataclasses.dataclass
 class Connection:
-    def __init__(self, controller, handle, role, peer_address, link, transport):
-        self.controller = controller
-        self.handle = handle
-        self.role = role
-        self.peer_address = peer_address
-        self.link = link
+    controller: Controller
+    handle: int
+    role: int
+    peer_address: Address
+    link: Any
+    transport: int
+    link_type: int
+
+    def __post_init__(self):
         self.assembler = HCI_AclDataPacketAssembler(self.on_acl_pdu)
-        self.transport = transport
 
     def on_hci_acl_data_packet(self, packet):
         self.assembler.feed_packet(packet)
@@ -106,25 +124,27 @@ class Connection:
 class Controller:
     def __init__(
         self,
-        name,
+        name: str,
         host_source=None,
         host_sink: Optional[TransportSink] = None,
-        link=None,
+        link: Optional[LocalLink] = None,
         public_address: Optional[Union[bytes, str, Address]] = None,
     ):
         self.name = name
         self.hci_sink = None
         self.link = link
 
-        self.central_connections: Dict[
-            Address, Connection
-        ] = {}  # Connections where this controller is the central
-        self.peripheral_connections: Dict[
-            Address, Connection
-        ] = {}  # Connections where this controller is the peripheral
-        self.classic_connections: Dict[
-            Address, Connection
-        ] = {}  # Connections in BR/EDR
+        self.central_connections: Dict[Address, Connection] = (
+            {}
+        )  # Connections where this controller is the central
+        self.peripheral_connections: Dict[Address, Connection] = (
+            {}
+        )  # Connections where this controller is the peripheral
+        self.classic_connections: Dict[Address, Connection] = (
+            {}
+        )  # Connections in BR/EDR
+        self.central_cis_links: Dict[int, CisLink] = {}  # CIS links by handle
+        self.peripheral_cis_links: Dict[int, CisLink] = {}  # CIS links by handle
 
         self.hci_version = HCI_VERSION_BLUETOOTH_CORE_5_0
         self.hci_revision = 0
@@ -134,12 +154,14 @@ class Controller:
             '0000000060000000'
         )  # BR/EDR Not Supported, LE Supported (Controller)
         self.manufacturer_name = 0xFFFF
+        self.hc_data_packet_length = 27
+        self.hc_total_num_data_packets = 64
         self.hc_le_data_packet_length = 27
         self.hc_total_num_le_data_packets = 64
         self.event_mask = 0
         self.event_mask_page_2 = 0
         self.supported_commands = bytes.fromhex(
-            '2000800000c000000000e40000002822000000000000040000f7ffff7f000000'
+            '2000800000c000000000e4000000a822000000000000040000f7ffff7f000000'
             '30f0f9ff01008004000000000000000000000000000000000000000000000000'
         )
         self.le_event_mask = 0
@@ -301,7 +323,7 @@ class Controller:
     ############################################################
     # Link connections
     ############################################################
-    def allocate_connection_handle(self):
+    def allocate_connection_handle(self) -> int:
         handle = 0
         max_handle = 0
         for connection in itertools.chain(
@@ -311,6 +333,13 @@ class Controller:
         ):
             max_handle = max(max_handle, connection.handle)
             if connection.handle == handle:
+                # Already used, continue searching after the current max
+                handle = max_handle + 1
+        for cis_handle in itertools.chain(
+            self.central_cis_links.keys(), self.peripheral_cis_links.keys()
+        ):
+            max_handle = max(max_handle, cis_handle)
+            if cis_handle == handle:
                 # Already used, continue searching after the current max
                 handle = max_handle + 1
         return handle
@@ -357,12 +386,13 @@ class Controller:
         if connection is None:
             connection_handle = self.allocate_connection_handle()
             connection = Connection(
-                self,
-                connection_handle,
-                BT_PERIPHERAL_ROLE,
-                peer_address,
-                self.link,
-                BT_LE_TRANSPORT,
+                controller=self,
+                handle=connection_handle,
+                role=BT_PERIPHERAL_ROLE,
+                peer_address=peer_address,
+                link=self.link,
+                transport=BT_LE_TRANSPORT,
+                link_type=HCI_Connection_Complete_Event.ACL_LINK_TYPE,
             )
             self.peripheral_connections[peer_address] = connection
             logger.debug(f'New PERIPHERAL connection handle: 0x{connection_handle:04X}')
@@ -416,12 +446,13 @@ class Controller:
             if connection is None:
                 connection_handle = self.allocate_connection_handle()
                 connection = Connection(
-                    self,
-                    connection_handle,
-                    BT_CENTRAL_ROLE,
-                    peer_address,
-                    self.link,
-                    BT_LE_TRANSPORT,
+                    controller=self,
+                    handle=connection_handle,
+                    role=BT_CENTRAL_ROLE,
+                    peer_address=peer_address,
+                    link=self.link,
+                    transport=BT_LE_TRANSPORT,
+                    link_type=HCI_Connection_Complete_Event.ACL_LINK_TYPE,
                 )
                 self.central_connections[peer_address] = connection
                 logger.debug(
@@ -538,6 +569,104 @@ class Controller:
         )
         self.send_hci_packet(HCI_LE_Advertising_Report_Event([report]))
 
+    def on_link_cis_request(
+        self, central_address: Address, cig_id: int, cis_id: int
+    ) -> None:
+        '''
+        Called when an incoming CIS request occurs from a central on the link
+        '''
+
+        connection = self.peripheral_connections.get(central_address)
+        assert connection
+
+        pending_cis_link = CisLink(
+            handle=self.allocate_connection_handle(),
+            cis_id=cis_id,
+            cig_id=cig_id,
+            acl_connection=connection,
+        )
+        self.peripheral_cis_links[pending_cis_link.handle] = pending_cis_link
+
+        self.send_hci_packet(
+            HCI_LE_CIS_Request_Event(
+                acl_connection_handle=connection.handle,
+                cis_connection_handle=pending_cis_link.handle,
+                cig_id=cig_id,
+                cis_id=cis_id,
+            )
+        )
+
+    def on_link_cis_established(self, cig_id: int, cis_id: int) -> None:
+        '''
+        Called when an incoming CIS established.
+        '''
+
+        cis_link = next(
+            cis_link
+            for cis_link in itertools.chain(
+                self.central_cis_links.values(), self.peripheral_cis_links.values()
+            )
+            if cis_link.cis_id == cis_id and cis_link.cig_id == cig_id
+        )
+
+        self.send_hci_packet(
+            HCI_LE_CIS_Established_Event(
+                status=HCI_SUCCESS,
+                connection_handle=cis_link.handle,
+                # CIS parameters are ignored.
+                cig_sync_delay=0,
+                cis_sync_delay=0,
+                transport_latency_c_to_p=0,
+                transport_latency_p_to_c=0,
+                phy_c_to_p=0,
+                phy_p_to_c=0,
+                nse=0,
+                bn_c_to_p=0,
+                bn_p_to_c=0,
+                ft_c_to_p=0,
+                ft_p_to_c=0,
+                max_pdu_c_to_p=0,
+                max_pdu_p_to_c=0,
+                iso_interval=0,
+            )
+        )
+
+    def on_link_cis_disconnected(self, cig_id: int, cis_id: int) -> None:
+        '''
+        Called when a CIS disconnected.
+        '''
+
+        if cis_link := next(
+            (
+                cis_link
+                for cis_link in self.peripheral_cis_links.values()
+                if cis_link.cis_id == cis_id and cis_link.cig_id == cig_id
+            ),
+            None,
+        ):
+            # Remove peripheral CIS on disconnection.
+            self.peripheral_cis_links.pop(cis_link.handle)
+        elif cis_link := next(
+            (
+                cis_link
+                for cis_link in self.central_cis_links.values()
+                if cis_link.cis_id == cis_id and cis_link.cig_id == cig_id
+            ),
+            None,
+        ):
+            # Keep central CIS on disconnection. They should be removed by HCI_LE_Remove_CIG_Command.
+            cis_link.acl_connection = None
+        else:
+            return
+
+        self.send_hci_packet(
+            HCI_Disconnection_Complete_Event(
+                status=HCI_SUCCESS,
+                connection_handle=cis_link.handle,
+                reason=HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR,
+            )
+        )
+
     ############################################################
     # Classic link connections
     ############################################################
@@ -566,6 +695,7 @@ class Controller:
                     peer_address=peer_address,
                     link=self.link,
                     transport=BT_BR_EDR_TRANSPORT,
+                    link_type=HCI_Connection_Complete_Event.ACL_LINK_TYPE,
                 )
                 self.classic_connections[peer_address] = connection
                 logger.debug(
@@ -616,6 +746,42 @@ class Controller:
                 status=HCI_SUCCESS,
                 bd_addr=peer_address,
                 new_role=new_role,
+            )
+        )
+
+    def on_classic_sco_connection_complete(
+        self, peer_address: Address, status: int, link_type: int
+    ):
+        if status == HCI_SUCCESS:
+            # Allocate (or reuse) a connection handle
+            connection_handle = self.allocate_connection_handle()
+            connection = Connection(
+                controller=self,
+                handle=connection_handle,
+                # Role doesn't matter in SCO.
+                role=BT_CENTRAL_ROLE,
+                peer_address=peer_address,
+                link=self.link,
+                transport=BT_BR_EDR_TRANSPORT,
+                link_type=link_type,
+            )
+            self.classic_connections[peer_address] = connection
+            logger.debug(f'New SCO connection handle: 0x{connection_handle:04X}')
+        else:
+            connection_handle = 0
+
+        self.send_hci_packet(
+            HCI_Synchronous_Connection_Complete_Event(
+                status=status,
+                connection_handle=connection_handle,
+                bd_addr=peer_address,
+                link_type=link_type,
+                # TODO: Provide SCO connection parameters.
+                transmission_interval=0,
+                retransmission_window=0,
+                rx_packet_length=0,
+                tx_packet_length=0,
+                air_mode=0,
             )
         )
 
@@ -721,6 +887,17 @@ class Controller:
             else:
                 # Remove the connection
                 del self.classic_connections[connection.peer_address]
+        elif cis_link := (
+            self.central_cis_links.get(handle) or self.peripheral_cis_links.get(handle)
+        ):
+            if self.link:
+                self.link.disconnect_cis(
+                    initiator_controller=self,
+                    peer_address=cis_link.acl_connection.peer_address,
+                    cig_id=cis_link.cig_id,
+                    cis_id=cis_link.cis_id,
+                )
+            # Spec requires handle to be kept after disconnection.
 
     def on_hci_accept_connection_request_command(self, command):
         '''
@@ -737,6 +914,68 @@ class Controller:
             )
         )
         self.link.classic_accept_connection(self, command.bd_addr, command.role)
+
+    def on_hci_enhanced_setup_synchronous_connection_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.1.45 Enhanced Setup Synchronous Connection command
+        '''
+
+        if self.link is None:
+            return
+
+        if not (
+            connection := self.find_classic_connection_by_handle(
+                command.connection_handle
+            )
+        ):
+            self.send_hci_packet(
+                HCI_Command_Status_Event(
+                    status=HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR,
+                    num_hci_command_packets=1,
+                    command_opcode=command.op_code,
+                )
+            )
+            return
+
+        self.send_hci_packet(
+            HCI_Command_Status_Event(
+                status=HCI_SUCCESS,
+                num_hci_command_packets=1,
+                command_opcode=command.op_code,
+            )
+        )
+        self.link.classic_sco_connect(
+            self, connection.peer_address, HCI_Connection_Complete_Event.ESCO_LINK_TYPE
+        )
+
+    def on_hci_enhanced_accept_synchronous_connection_request_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.1.46 Enhanced Accept Synchronous Connection Request command
+        '''
+
+        if self.link is None:
+            return
+
+        if not (connection := self.find_classic_connection_by_address(command.bd_addr)):
+            self.send_hci_packet(
+                HCI_Command_Status_Event(
+                    status=HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR,
+                    num_hci_command_packets=1,
+                    command_opcode=command.op_code,
+                )
+            )
+            return
+
+        self.send_hci_packet(
+            HCI_Command_Status_Event(
+                status=HCI_SUCCESS,
+                num_hci_command_packets=1,
+                command_opcode=command.op_code,
+            )
+        )
+        self.link.classic_accept_sco_connection(
+            self, connection.peer_address, HCI_Connection_Complete_Event.ESCO_LINK_TYPE
+        )
 
     def on_hci_switch_role_command(self, command):
         '''
@@ -912,7 +1151,41 @@ class Controller:
         '''
         See Bluetooth spec Vol 4, Part E - 7.4.3 Read Local Supported Features Command
         '''
-        return bytes([HCI_SUCCESS]) + self.lmp_features
+        return bytes([HCI_SUCCESS]) + self.lmp_features[:8]
+
+    def on_hci_read_local_extended_features_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.4.4 Read Local Extended Features Command
+        '''
+        if command.page_number * 8 > len(self.lmp_features):
+            return bytes([HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR])
+        return (
+            bytes(
+                [
+                    # Status
+                    HCI_SUCCESS,
+                    # Page number
+                    command.page_number,
+                    # Max page number
+                    len(self.lmp_features) // 8 - 1,
+                ]
+            )
+            # Features of the current page
+            + self.lmp_features[command.page_number * 8 : (command.page_number + 1) * 8]
+        )
+
+    def on_hci_read_buffer_size_command(self, _command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.4.5 Read Buffer Size Command
+        '''
+        return struct.pack(
+            '<BHBHH',
+            HCI_SUCCESS,
+            self.hc_data_packet_length,
+            0,
+            self.hc_total_num_data_packets,
+            0,
+        )
 
     def on_hci_read_bd_addr_command(self, _command):
         '''
@@ -1000,6 +1273,9 @@ class Controller:
         '''
         See Bluetooth spec Vol 4, Part E - 7.8.10 LE Set Scan Parameters Command
         '''
+        if self.le_scan_enable:
+            return bytes([HCI_COMMAND_DISALLOWED_ERROR])
+
         self.le_scan_type = command.le_scan_type
         self.le_scan_interval = command.le_scan_interval
         self.le_scan_window = command.le_scan_window
@@ -1086,6 +1362,18 @@ class Controller:
         See Bluetooth spec Vol 4, Part E - 7.8.21 LE Read Remote Features Command
         '''
 
+        handle = command.connection_handle
+
+        if not self.find_connection_by_handle(handle):
+            self.send_hci_packet(
+                HCI_Command_Status_Event(
+                    status=HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR,
+                    num_hci_command_packets=1,
+                    command_opcode=command.op_code,
+                )
+            )
+            return
+
         # First, say that the command is pending
         self.send_hci_packet(
             HCI_Command_Status_Event(
@@ -1099,7 +1387,7 @@ class Controller:
         self.send_hci_packet(
             HCI_LE_Read_Remote_Features_Complete_Event(
                 status=HCI_SUCCESS,
-                connection_handle=0,
+                connection_handle=handle,
                 le_features=bytes.fromhex('dd40000000000000'),
             )
         )
@@ -1255,8 +1543,135 @@ class Controller:
         }
         return bytes([HCI_SUCCESS])
 
+    def on_hci_le_read_maximum_advertising_data_length_command(self, _command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.57 LE Read Maximum Advertising Data
+        Length Command
+        '''
+        return struct.pack('<BH', HCI_SUCCESS, 0x0672)
+
+    def on_hci_le_read_number_of_supported_advertising_sets_command(self, _command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.58 LE Read Number of Supported
+        Advertising Set Command
+        '''
+        return struct.pack('<BB', HCI_SUCCESS, 0xF0)
+
     def on_hci_le_read_transmit_power_command(self, _command):
         '''
         See Bluetooth spec Vol 4, Part E - 7.8.74 LE Read Transmit Power Command
         '''
         return struct.pack('<BBB', HCI_SUCCESS, 0, 0)
+
+    def on_hci_le_set_cig_parameters_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.97 LE Set CIG Parameter Command
+        '''
+
+        # Remove old CIG implicitly.
+        for handle, cis_link in self.central_cis_links.items():
+            if cis_link.cig_id == command.cig_id:
+                self.central_cis_links.pop(handle)
+
+        handles = []
+        for cis_id in command.cis_id:
+            handle = self.allocate_connection_handle()
+            handles.append(handle)
+            self.central_cis_links[handle] = CisLink(
+                cis_id=cis_id,
+                cig_id=command.cig_id,
+                handle=handle,
+            )
+        return struct.pack(
+            '<BBB', HCI_SUCCESS, command.cig_id, len(handles)
+        ) + b''.join([struct.pack('<H', handle) for handle in handles])
+
+    def on_hci_le_create_cis_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.99 LE Create CIS Command
+        '''
+        if not self.link:
+            return
+
+        for cis_handle, acl_handle in zip(
+            command.cis_connection_handle, command.acl_connection_handle
+        ):
+            if not (connection := self.find_connection_by_handle(acl_handle)):
+                logger.error(f'Cannot find connection with handle={acl_handle}')
+                return bytes([HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR])
+
+            if not (cis_link := self.central_cis_links.get(cis_handle)):
+                logger.error(f'Cannot find CIS with handle={cis_handle}')
+                return bytes([HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR])
+
+            cis_link.acl_connection = connection
+
+            self.link.create_cis(
+                self,
+                peripheral_address=connection.peer_address,
+                cig_id=cis_link.cig_id,
+                cis_id=cis_link.cis_id,
+            )
+
+        self.send_hci_packet(
+            HCI_Command_Status_Event(
+                status=HCI_COMMAND_STATUS_PENDING,
+                num_hci_command_packets=1,
+                command_opcode=command.op_code,
+            )
+        )
+
+    def on_hci_le_remove_cig_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.100 LE Remove CIG Command
+        '''
+
+        status = HCI_UNKNOWN_CONNECTION_IDENTIFIER_ERROR
+
+        for cis_handle, cis_link in self.central_cis_links.items():
+            if cis_link.cig_id == command.cig_id:
+                self.central_cis_links.pop(cis_handle)
+                status = HCI_SUCCESS
+
+        return struct.pack('<BH', status, command.cig_id)
+
+    def on_hci_le_accept_cis_request_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.101 LE Accept CIS Request Command
+        '''
+        if not self.link:
+            return
+
+        if not (
+            pending_cis_link := self.peripheral_cis_links.get(command.connection_handle)
+        ):
+            logger.error(f'Cannot find CIS with handle={command.connection_handle}')
+            return bytes([HCI_INVALID_HCI_COMMAND_PARAMETERS_ERROR])
+
+        assert pending_cis_link.acl_connection
+        self.link.accept_cis(
+            peripheral_controller=self,
+            central_address=pending_cis_link.acl_connection.peer_address,
+            cig_id=pending_cis_link.cig_id,
+            cis_id=pending_cis_link.cis_id,
+        )
+
+        self.send_hci_packet(
+            HCI_Command_Status_Event(
+                status=HCI_COMMAND_STATUS_PENDING,
+                num_hci_command_packets=1,
+                command_opcode=command.op_code,
+            )
+        )
+
+    def on_hci_le_setup_iso_data_path_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.109 LE Setup ISO Data Path Command
+        '''
+        return struct.pack('<BH', HCI_SUCCESS, command.connection_handle)
+
+    def on_hci_le_remove_iso_data_path_command(self, command):
+        '''
+        See Bluetooth spec Vol 4, Part E - 7.8.110 LE Remove ISO Data Path Command
+        '''
+        return struct.pack('<BH', HCI_SUCCESS, command.connection_handle)

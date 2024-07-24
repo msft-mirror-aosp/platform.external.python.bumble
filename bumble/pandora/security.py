@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
 import asyncio
 import contextlib
 import grpc
@@ -109,7 +110,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(just_works=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
+        answer = await anext(self.service.event_answer)  # type: ignore
         assert answer.event == event
         assert answer.answer_variant() == 'confirm' and answer.confirm is not None
         return answer.confirm
@@ -124,7 +125,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(numeric_comparison=number))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
+        answer = await anext(self.service.event_answer)  # type: ignore
         assert answer.event == event
         assert answer.answer_variant() == 'confirm' and answer.confirm is not None
         return answer.confirm
@@ -139,7 +140,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(passkey_entry_request=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
+        answer = await anext(self.service.event_answer)  # type: ignore
         assert answer.event == event
         if answer.answer_variant() is None:
             return None
@@ -156,7 +157,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(pin_code_request=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
+        answer = await anext(self.service.event_answer)  # type: ignore
         assert answer.event == event
         if answer.answer_variant() is None:
             return None
@@ -382,9 +383,9 @@ class SecurityService(SecurityServicer):
             connection.transport
         ] == request.level_variant()
 
-        wait_for_security: asyncio.Future[
-            str
-        ] = asyncio.get_running_loop().create_future()
+        wait_for_security: asyncio.Future[str] = (
+            asyncio.get_running_loop().create_future()
+        )
         authenticate_task: Optional[asyncio.Future[None]] = None
         pair_task: Optional[asyncio.Future[None]] = None
 

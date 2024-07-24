@@ -21,7 +21,7 @@ import logging
 import os
 import pytest
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from bumble.controller import Controller
 from bumble.core import BT_BR_EDR_TRANSPORT, BT_PERIPHERAL_ROLE, BT_CENTRAL_ROLE
@@ -34,9 +34,10 @@ from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.smp import (
     SMP_PAIRING_NOT_SUPPORTED_ERROR,
     SMP_CONFIRM_VALUE_FAILED_ERROR,
+    OobContext,
+    OobLegacyContext,
 )
 from bumble.core import ProtocolError
-from bumble.hci import HCI_AUTHENTICATED_COMBINATION_KEY_GENERATED_FROM_P_256_TYPE
 from bumble.keys import PairingKeys
 
 
@@ -315,13 +316,13 @@ async def _test_self_smp_with_configs(pairing_config1, pairing_config2):
 
     # Set up the pairing configs
     if pairing_config1:
-        two_devices.devices[
-            0
-        ].pairing_config_factory = lambda connection: pairing_config1
+        two_devices.devices[0].pairing_config_factory = (
+            lambda connection: pairing_config1
+        )
     if pairing_config2:
-        two_devices.devices[
-            1
-        ].pairing_config_factory = lambda connection: pairing_config2
+        two_devices.devices[1].pairing_config_factory = (
+            lambda connection: pairing_config2
+        )
 
     # Pair
     await two_devices.devices[0].pair(connection)
@@ -517,16 +518,8 @@ async def test_self_smp_over_classic():
     # Mock connection
     # TODO: Implement Classic SSP and encryption in link relayer
     LINK_KEY = bytes.fromhex('287ad379dca402530a39f1f43047b835')
-    two_devices.devices[0].on_link_key(
-        two_devices.devices[1].public_address,
-        LINK_KEY,
-        HCI_AUTHENTICATED_COMBINATION_KEY_GENERATED_FROM_P_256_TYPE,
-    )
-    two_devices.devices[1].on_link_key(
-        two_devices.devices[0].public_address,
-        LINK_KEY,
-        HCI_AUTHENTICATED_COMBINATION_KEY_GENERATED_FROM_P_256_TYPE,
-    )
+    two_devices.devices[0].get_link_key = AsyncMock(return_value=LINK_KEY)
+    two_devices.devices[1].get_link_key = AsyncMock(return_value=LINK_KEY)
     two_devices.connections[0].encryption = 1
     two_devices.connections[1].encryption = 1
 
@@ -554,6 +547,13 @@ async def test_self_smp_over_classic():
         MockSmpSession.send_public_key_command.assert_not_called()
         MockSmpSession.send_pairing_random_command.assert_not_called()
 
+    for i in range(2):
+        assert (
+            await two_devices.devices[i].keystore.get(
+                str(two_devices.connections[i].peer_address)
+            )
+        ).link_key
+
 
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -576,6 +576,77 @@ async def test_self_smp_public_address():
 
 
 # -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_oob_sc():
+    oob_context_1 = OobContext()
+    oob_context_2 = OobContext()
+
+    pairing_config_1 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_1, oob_context_2.share(), None),
+    )
+
+    pairing_config_2 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_2, oob_context_1.share(), None),
+    )
+
+    await _test_self_smp_with_configs(pairing_config_1, pairing_config_2)
+
+    pairing_config_3 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_2, None, None),
+    )
+
+    await _test_self_smp_with_configs(pairing_config_1, pairing_config_3)
+    await _test_self_smp_with_configs(pairing_config_3, pairing_config_1)
+
+    pairing_config_4 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(oob_context_2, oob_context_2.share(), None),
+    )
+
+    with pytest.raises(ProtocolError) as error:
+        await _test_self_smp_with_configs(pairing_config_1, pairing_config_4)
+    assert error.value.error_code == SMP_CONFIRM_VALUE_FAILED_ERROR
+
+    with pytest.raises(ProtocolError):
+        await _test_self_smp_with_configs(pairing_config_4, pairing_config_1)
+    assert error.value.error_code == SMP_CONFIRM_VALUE_FAILED_ERROR
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_self_smp_oob_legacy():
+    legacy_context = OobLegacyContext()
+
+    pairing_config_1 = PairingConfig(
+        mitm=True,
+        sc=False,
+        bonding=True,
+        oob=PairingConfig.OobConfig(None, None, legacy_context),
+    )
+
+    pairing_config_2 = PairingConfig(
+        mitm=True,
+        sc=True,
+        bonding=True,
+        oob=PairingConfig.OobConfig(OobContext(), None, legacy_context),
+    )
+
+    await _test_self_smp_with_configs(pairing_config_1, pairing_config_2)
+    await _test_self_smp_with_configs(pairing_config_2, pairing_config_1)
+
+
+# -----------------------------------------------------------------------------
 async def run_test_self():
     await test_self_connection()
     await test_self_gatt()
@@ -585,6 +656,8 @@ async def run_test_self():
     await test_self_smp_wrong_pin()
     await test_self_smp_over_classic()
     await test_self_smp_public_address()
+    await test_self_smp_oob_sc()
+    await test_self_smp_oob_legacy()
 
 
 # -----------------------------------------------------------------------------

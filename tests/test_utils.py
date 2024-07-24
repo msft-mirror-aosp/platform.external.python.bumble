@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
+import asyncio
+from typing import List, Optional, Type
+from typing_extensions import Self
 
 from bumble.controller import Controller
 from bumble.link import LocalLink
@@ -22,6 +27,7 @@ from bumble.transport import AsyncPipeSink
 from bumble.hci import Address
 
 
+# -----------------------------------------------------------------------------
 class TwoDevices:
     connections: List[Optional[Connection]]
 
@@ -29,17 +35,18 @@ class TwoDevices:
         self.connections = [None, None]
 
         self.link = LocalLink()
+        addresses = ['F0:F1:F2:F3:F4:F5', 'F5:F4:F3:F2:F1:F0']
         self.controllers = [
-            Controller('C1', link=self.link),
-            Controller('C2', link=self.link),
+            Controller('C1', link=self.link, public_address=addresses[0]),
+            Controller('C2', link=self.link, public_address=addresses[1]),
         ]
         self.devices = [
             Device(
-                address=Address('F0:F1:F2:F3:F4:F5'),
+                address=Address(addresses[0]),
                 host=Host(self.controllers[0], AsyncPipeSink(self.controllers[0])),
             ),
             Device(
-                address=Address('F5:F4:F3:F2:F1:F0'),
+                address=Address(addresses[1]),
                 host=Host(self.controllers[1], AsyncPipeSink(self.controllers[1])),
             ),
         ]
@@ -71,3 +78,19 @@ class TwoDevices:
         # Check the post conditions
         assert self.connections[0] is not None
         assert self.connections[1] is not None
+
+    def __getitem__(self, index: int) -> Device:
+        return self.devices[index]
+
+    @classmethod
+    async def create_with_connection(cls: Type[Self]) -> Self:
+        devices = cls()
+        await devices.setup_connection()
+        return devices
+
+
+# -----------------------------------------------------------------------------
+async def async_barrier():
+    ready = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_soon(ready.set_result, None)
+    await ready

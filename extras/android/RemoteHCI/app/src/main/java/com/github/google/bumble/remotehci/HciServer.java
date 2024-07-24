@@ -1,5 +1,6 @@
 package com.github.google.bumble.remotehci;
 
+import android.os.Trace;
 import android.util.Log;
 
 import java.io.IOException;
@@ -15,6 +16,7 @@ public class HciServer {
     private final int mPort;
     private final Listener mListener;
     private OutputStream mOutputStream;
+    private final boolean mTracingEnabled = Trace.isEnabled();
 
     public interface Listener extends HciParser.Sink {
         void onHostConnectionState(boolean connected);
@@ -27,6 +29,8 @@ public class HciServer {
     }
 
     public void run() throws IOException {
+        Log.i(TAG, "Tracing enabled: "  + mTracingEnabled);
+
         for (;;) {
             try {
                 loop();
@@ -42,6 +46,7 @@ public class HciServer {
         try (ServerSocket serverSocket = new ServerSocket(mPort)) {
             mListener.onMessage("Waiting for connection on port " + serverSocket.getLocalPort());
             try (Socket clientSocket = serverSocket.accept()) {
+                clientSocket.setTcpNoDelay(true);
                 mListener.onHostConnectionState(true);
                 mListener.onMessage("Connected");
                 HciParser parser = new HciParser(mListener);
@@ -72,6 +77,10 @@ public class HciServer {
     }
 
     public void sendPacket(HciPacket.Type type, byte[] packet) {
+        if (mTracingEnabled) {
+            Trace.beginAsyncSection("SEND_PACKET_FROM_HAL", 2);
+        }
+
         // Create a combined data buffer so we can write it out in a single call.
         byte[] data = new byte[packet.length + 1];
         data[0] = type.value;
@@ -87,6 +96,10 @@ public class HciServer {
             } else {
                 Log.d(TAG, "no client, dropping packet");
             }
+        }
+
+        if (mTracingEnabled) {
+            Trace.endAsyncSection("SEND_PACKET_FROM_HAL", 2);
         }
     }
 }

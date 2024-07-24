@@ -17,9 +17,10 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 import asyncio
-import logging
-import traceback
 import collections
+import enum
+import functools
+import logging
 import sys
 import warnings
 from typing import (
@@ -34,7 +35,7 @@ from typing import (
     Union,
     overload,
 )
-from functools import wraps, partial
+
 from pyee import EventEmitter
 
 from .colors import color
@@ -116,12 +117,12 @@ class EventWatcher:
         self.handlers = []
 
     @overload
-    def on(self, emitter: EventEmitter, event: str) -> Callable[[_Handler], _Handler]:
-        ...
+    def on(
+        self, emitter: EventEmitter, event: str
+    ) -> Callable[[_Handler], _Handler]: ...
 
     @overload
-    def on(self, emitter: EventEmitter, event: str, handler: _Handler) -> _Handler:
-        ...
+    def on(self, emitter: EventEmitter, event: str, handler: _Handler) -> _Handler: ...
 
     def on(
         self, emitter: EventEmitter, event: str, handler: Optional[_Handler] = None
@@ -131,23 +132,26 @@ class EventWatcher:
         Args:
             emitter: EventEmitter to watch
             event: Event name
-            handler: (Optional) Event handler. When nothing is passed, this method works as a decorator.
+            handler: (Optional) Event handler. When nothing is passed, this method
+            works as a decorator.
         '''
 
-        def wrapper(f: _Handler) -> _Handler:
-            self.handlers.append((emitter, event, f))
-            emitter.on(event, f)
-            return f
+        def wrapper(wrapped: _Handler) -> _Handler:
+            self.handlers.append((emitter, event, wrapped))
+            emitter.on(event, wrapped)
+            return wrapped
 
         return wrapper if handler is None else wrapper(handler)
 
     @overload
-    def once(self, emitter: EventEmitter, event: str) -> Callable[[_Handler], _Handler]:
-        ...
+    def once(
+        self, emitter: EventEmitter, event: str
+    ) -> Callable[[_Handler], _Handler]: ...
 
     @overload
-    def once(self, emitter: EventEmitter, event: str, handler: _Handler) -> _Handler:
-        ...
+    def once(
+        self, emitter: EventEmitter, event: str, handler: _Handler
+    ) -> _Handler: ...
 
     def once(
         self, emitter: EventEmitter, event: str, handler: Optional[_Handler] = None
@@ -157,13 +161,14 @@ class EventWatcher:
         Args:
             emitter: EventEmitter to watch
             event: Event name
-            handler: (Optional) Event handler. When nothing passed, this method works as a decorator.
+            handler: (Optional) Event handler. When nothing passed, this method works
+            as a decorator.
         '''
 
-        def wrapper(f: _Handler) -> _Handler:
-            self.handlers.append((emitter, event, f))
-            emitter.once(event, f)
-            return f
+        def wrapper(wrapped: _Handler) -> _Handler:
+            self.handlers.append((emitter, event, wrapped))
+            emitter.once(event, wrapped)
+            return wrapped
 
         return wrapper if handler is None else wrapper(handler)
 
@@ -223,13 +228,13 @@ class CompositeEventEmitter(AbortableEventEmitter):
         if self._listener:
             # Call the deregistration methods for each base class that has them
             for cls in self._listener.__class__.mro():
-                if hasattr(cls, '_bumble_register_composite'):
-                    cls._bumble_deregister_composite(listener, self)
+                if '_bumble_register_composite' in cls.__dict__:
+                    cls._bumble_deregister_composite(self._listener, self)
         self._listener = listener
         if listener:
             # Call the registration methods for each base class that has them
             for cls in listener.__class__.mro():
-                if hasattr(cls, '_bumble_deregister_composite'):
+                if '_bumble_deregister_composite' in cls.__dict__:
                     cls._bumble_register_composite(listener, self)
 
 
@@ -276,21 +281,18 @@ class AsyncRunner:
         """
 
         def decorator(func):
-            @wraps(func)
+            @functools.wraps(func)
             def wrapper(*args, **kwargs):
                 coroutine = func(*args, **kwargs)
                 if queue is None:
-                    # Create a task to run the coroutine
+                    # Spawn the coroutine as a task
                     async def run():
                         try:
                             await coroutine
                         except Exception:
-                            logger.warning(
-                                f'{color("!!! Exception in wrapper:", "red")} '
-                                f'{traceback.format_exc()}'
-                            )
+                            logger.exception(color("!!! Exception in wrapper:", "red"))
 
-                    asyncio.create_task(run())
+                    AsyncRunner.spawn(run())
                 else:
                     # Queue the coroutine to be awaited by the work queue
                     queue.enqueue(coroutine)
@@ -413,30 +415,35 @@ class FlowControlAsyncPipe:
             self.check_pump()
 
 
+# -----------------------------------------------------------------------------
 async def async_call(function, *args, **kwargs):
     """
-    Immediately calls the function with provided args and kwargs, wrapping it in an async function.
-    Rust's `pyo3_asyncio` library needs functions to be marked async to properly inject a running loop.
+    Immediately calls the function with provided args and kwargs, wrapping it in an
+    async function.
+    Rust's `pyo3_asyncio` library needs functions to be marked async to properly inject
+    a running loop.
 
     result = await async_call(some_function, ...)
     """
     return function(*args, **kwargs)
 
 
+# -----------------------------------------------------------------------------
 def wrap_async(function):
     """
     Wraps the provided function in an async function.
     """
-    return partial(async_call, function)
+    return functools.partial(async_call, function)
 
 
+# -----------------------------------------------------------------------------
 def deprecated(msg: str):
     """
-    Throw deprecation warning before execution
+    Throw deprecation warning before execution.
     """
 
     def wrapper(function):
-        @wraps(function)
+        @functools.wraps(function)
         def inner(*args, **kwargs):
             warnings.warn(msg, DeprecationWarning)
             return function(*args, **kwargs)
@@ -444,3 +451,39 @@ def deprecated(msg: str):
         return inner
 
     return wrapper
+
+
+# -----------------------------------------------------------------------------
+def experimental(msg: str):
+    """
+    Throws a future warning before execution.
+    """
+
+    def wrapper(function):
+        @functools.wraps(function)
+        def inner(*args, **kwargs):
+            warnings.warn(msg, FutureWarning)
+            return function(*args, **kwargs)
+
+        return inner
+
+    return wrapper
+
+
+# -----------------------------------------------------------------------------
+class OpenIntEnum(enum.IntEnum):
+    """
+    Subclass of enum.IntEnum that can hold integer values outside the set of
+    predefined values. This is convenient for implementing protocols where some
+    integer constants may be added over time.
+    """
+
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, int):
+            return None
+
+        obj = int.__new__(cls, value)
+        obj._value_ = value
+        obj._name_ = f"{cls.__name__}[{value}]"
+        return obj
