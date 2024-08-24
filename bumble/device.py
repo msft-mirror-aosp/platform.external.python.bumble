@@ -16,22 +16,22 @@
 # Imports
 # -----------------------------------------------------------------------------
 from __future__ import annotations
-from enum import IntEnum
-import copy
-import functools
-import json
 import asyncio
-import logging
-import secrets
-import sys
+from collections.abc import Iterable
 from contextlib import (
     asynccontextmanager,
     AsyncExitStack,
     closing,
-    AbstractAsyncContextManager,
 )
+import copy
 from dataclasses import dataclass, field
-from collections.abc import Iterable
+from enum import Enum, IntEnum
+import functools
+import itertools
+import json
+import logging
+import secrets
+import sys
 from typing import (
     Any,
     Callable,
@@ -51,6 +51,7 @@ from typing_extensions import Self
 
 from pyee import EventEmitter
 
+from bumble import hci
 from .colors import color
 from .att import ATT_CID, ATT_DEFAULT_MTU, ATT_PDU
 from .gatt import Characteristic, Descriptor, Service
@@ -81,6 +82,7 @@ from .hci import (
     HCI_MITM_REQUIRED_GENERAL_BONDING_AUTHENTICATION_REQUIREMENTS,
     HCI_MITM_REQUIRED_NO_BONDING_AUTHENTICATION_REQUIREMENTS,
     HCI_NO_INPUT_NO_OUTPUT_IO_CAPABILITY,
+    HCI_OPERATION_CANCELLED_BY_HOST_ERROR,
     HCI_R2_PAGE_SCAN_REPETITION_MODE,
     HCI_REMOTE_USER_TERMINATED_CONNECTION_ERROR,
     HCI_SUCCESS,
@@ -102,11 +104,17 @@ from .hci import (
     HCI_LE_Accept_CIS_Request_Command,
     HCI_LE_Add_Device_To_Resolving_List_Command,
     HCI_LE_Advertising_Report_Event,
+    HCI_LE_BIGInfo_Advertising_Report_Event,
     HCI_LE_Clear_Resolving_List_Command,
     HCI_LE_Connection_Update_Command,
     HCI_LE_Create_Connection_Cancel_Command,
     HCI_LE_Create_Connection_Command,
     HCI_LE_Create_CIS_Command,
+    HCI_LE_Periodic_Advertising_Create_Sync_Command,
+    HCI_LE_Periodic_Advertising_Create_Sync_Cancel_Command,
+    HCI_LE_Periodic_Advertising_Report_Event,
+    HCI_LE_Periodic_Advertising_Sync_Transfer_Command,
+    HCI_LE_Periodic_Advertising_Terminate_Sync_Command,
     HCI_LE_Enable_Encryption_Command,
     HCI_LE_Extended_Advertising_Report_Event,
     HCI_LE_Extended_Create_Connection_Command,
@@ -162,21 +170,29 @@ from .hci import (
     OwnAddressType,
     LeFeature,
     LeFeatureMask,
+    LmpFeatureMask,
     Phy,
     phy_list_to_bits,
 )
 from .host import Host
-from .gap import GenericAccessService
+from .profiles.gap import GenericAccessService
 from .core import (
     BT_BR_EDR_TRANSPORT,
     BT_CENTRAL_ROLE,
     BT_LE_TRANSPORT,
     BT_PERIPHERAL_ROLE,
     AdvertisingData,
+    BaseBumbleError,
     ConnectionParameterUpdateError,
     CommandTimeoutError,
+    ConnectionParameters,
     ConnectionPHY,
+    InvalidArgumentError,
+    InvalidOperationError,
     InvalidStateError,
+    NotSupportedError,
+    OutOfResourcesError,
+    UnreachableError,
 )
 from .utils import (
     AsyncRunner,
@@ -191,13 +207,13 @@ from .keys import (
     KeyStore,
     PairingKeys,
 )
-from .pairing import PairingConfig
-from . import gatt_client
-from . import gatt_server
-from . import smp
-from . import sdp
-from . import l2cap
-from . import core
+from bumble import pairing
+from bumble import gatt_client
+from bumble import gatt_server
+from bumble import smp
+from bumble import sdp
+from bumble import l2cap
+from bumble import core
 
 if TYPE_CHECKING:
     from .transport.common import TransportSource, TransportSink
@@ -248,6 +264,9 @@ DEVICE_DEFAULT_L2CAP_COC_MAX_CREDITS          = l2cap.L2CAP_LE_CREDIT_BASED_CONN
 DEVICE_DEFAULT_ADVERTISING_TX_POWER           = (
     HCI_LE_Set_Extended_Advertising_Parameters_Command.TX_POWER_NO_PREFERENCE
 )
+DEVICE_DEFAULT_PERIODIC_ADVERTISING_SYNC_SKIP = 0
+DEVICE_DEFAULT_PERIODIC_ADVERTISING_SYNC_TIMEOUT = 5.0
+DEVICE_DEFAULT_LE_RPA_TIMEOUT                 = 15 * 60 # 15 minutes (in seconds)
 
 # fmt: on
 # pylint: enable=line-too-long
@@ -259,6 +278,8 @@ DEVICE_MAX_HIGH_DUTY_CYCLE_CONNECTABLE_DIRECTED_ADVERTISING_DURATION = 1.28
 # -----------------------------------------------------------------------------
 # Classes
 # -----------------------------------------------------------------------------
+class ObjectLookupError(BaseBumbleError):
+    """Error raised when failed to lookup an object."""
 
 
 # -----------------------------------------------------------------------------
@@ -553,6 +574,70 @@ class AdvertisingEventProperties:
 
 
 # -----------------------------------------------------------------------------
+@dataclass
+class PeriodicAdvertisement:
+    address: Address
+    sid: int
+    tx_power: int = (
+        HCI_LE_Periodic_Advertising_Report_Event.TX_POWER_INFORMATION_NOT_AVAILABLE
+    )
+    rssi: int = HCI_LE_Periodic_Advertising_Report_Event.RSSI_NOT_AVAILABLE
+    is_truncated: bool = False
+    data_bytes: bytes = b''
+
+    # Constants
+    TX_POWER_NOT_AVAILABLE: ClassVar[int] = (
+        HCI_LE_Periodic_Advertising_Report_Event.TX_POWER_INFORMATION_NOT_AVAILABLE
+    )
+    RSSI_NOT_AVAILABLE: ClassVar[int] = (
+        HCI_LE_Periodic_Advertising_Report_Event.RSSI_NOT_AVAILABLE
+    )
+
+    def __post_init__(self) -> None:
+        self.data = (
+            None if self.is_truncated else AdvertisingData.from_bytes(self.data_bytes)
+        )
+
+
+# -----------------------------------------------------------------------------
+@dataclass
+class BIGInfoAdvertisement:
+    address: Address
+    sid: int
+    num_bis: int
+    nse: int
+    iso_interval: int
+    bn: int
+    pto: int
+    irc: int
+    max_pdu: int
+    sdu_interval: int
+    max_sdu: int
+    phy: Phy
+    framed: bool
+    encrypted: bool
+
+    @classmethod
+    def from_report(cls, address: Address, sid: int, report) -> Self:
+        return cls(
+            address,
+            sid,
+            report.num_bis,
+            report.nse,
+            report.iso_interval,
+            report.bn,
+            report.pto,
+            report.irc,
+            report.max_pdu,
+            report.sdu_interval,
+            report.max_sdu,
+            Phy(report.phy),
+            report.framing != 0,
+            report.encryption != 0,
+        )
+
+
+# -----------------------------------------------------------------------------
 # TODO: replace with typing.TypeAlias when the code base is all Python >= 3.10
 AdvertisingChannelMap = HCI_LE_Set_Extended_Advertising_Parameters_Command.ChannelMap
 
@@ -796,6 +881,206 @@ class AdvertisingSet(EventEmitter):
 
 
 # -----------------------------------------------------------------------------
+class PeriodicAdvertisingSync(EventEmitter):
+    class State(Enum):
+        INIT = 0
+        PENDING = 1
+        ESTABLISHED = 2
+        CANCELLED = 3
+        ERROR = 4
+        LOST = 5
+        TERMINATED = 6
+
+    _state: State
+    sync_handle: Optional[int]
+    advertiser_address: Address
+    sid: int
+    skip: int
+    sync_timeout: float  # Sync timeout, in seconds
+    filter_duplicates: bool
+    status: int
+    advertiser_phy: int
+    periodic_advertising_interval: int
+    advertiser_clock_accuracy: int
+
+    def __init__(
+        self,
+        device: Device,
+        advertiser_address: Address,
+        sid: int,
+        skip: int,
+        sync_timeout: float,
+        filter_duplicates: bool,
+    ) -> None:
+        super().__init__()
+        self._state = self.State.INIT
+        self.sync_handle = None
+        self.device = device
+        self.advertiser_address = advertiser_address
+        self.sid = sid
+        self.skip = skip
+        self.sync_timeout = sync_timeout
+        self.filter_duplicates = filter_duplicates
+        self.status = HCI_SUCCESS
+        self.advertiser_phy = 0
+        self.periodic_advertising_interval = 0
+        self.advertiser_clock_accuracy = 0
+        self.data_accumulator = b''
+
+    @property
+    def state(self) -> State:
+        return self._state
+
+    @state.setter
+    def state(self, state: State) -> None:
+        logger.debug(f'{self} -> {state.name}')
+        self._state = state
+        self.emit('state_change')
+
+    async def establish(self) -> None:
+        if self.state != self.State.INIT:
+            raise InvalidStateError('sync not in init state')
+
+        options = HCI_LE_Periodic_Advertising_Create_Sync_Command.Options(0)
+        if self.filter_duplicates:
+            options |= (
+                HCI_LE_Periodic_Advertising_Create_Sync_Command.Options.DUPLICATE_FILTERING_INITIALLY_ENABLED
+            )
+
+        response = await self.device.send_command(
+            HCI_LE_Periodic_Advertising_Create_Sync_Command(
+                options=options,
+                advertising_sid=self.sid,
+                advertiser_address_type=self.advertiser_address.address_type,
+                advertiser_address=self.advertiser_address,
+                skip=self.skip,
+                sync_timeout=int(self.sync_timeout * 100),
+                sync_cte_type=0,
+            )
+        )
+        if response.status != HCI_Command_Status_Event.PENDING:
+            raise HCI_StatusError(response)
+
+        self.state = self.State.PENDING
+
+    async def terminate(self) -> None:
+        if self.state in (self.State.INIT, self.State.CANCELLED, self.State.TERMINATED):
+            return
+
+        if self.state == self.State.PENDING:
+            self.state = self.State.CANCELLED
+            response = await self.device.send_command(
+                HCI_LE_Periodic_Advertising_Create_Sync_Cancel_Command(),
+            )
+            if response.return_parameters == HCI_SUCCESS:
+                if self in self.device.periodic_advertising_syncs:
+                    self.device.periodic_advertising_syncs.remove(self)
+            return
+
+        if self.state in (self.State.ESTABLISHED, self.State.ERROR, self.State.LOST):
+            self.state = self.State.TERMINATED
+            if self.sync_handle is not None:
+                await self.device.send_command(
+                    HCI_LE_Periodic_Advertising_Terminate_Sync_Command(
+                        sync_handle=self.sync_handle
+                    )
+                )
+            self.device.periodic_advertising_syncs.remove(self)
+
+    async def transfer(self, connection: Connection, service_data: int = 0) -> None:
+        if self.sync_handle is not None:
+            await connection.transfer_periodic_sync(self.sync_handle, service_data)
+
+    def on_establishment(
+        self,
+        status,
+        sync_handle,
+        advertiser_phy,
+        periodic_advertising_interval,
+        advertiser_clock_accuracy,
+    ) -> None:
+        self.status = status
+
+        if self.state == self.State.CANCELLED:
+            # Somehow, we receive an established event after trying to cancel, most
+            # likely because the cancel command was sent too late, when the sync was
+            # already established, but before the established event was sent.
+            # We need to automatically terminate.
+            logger.debug(
+                "received established event for cancelled sync, will terminate"
+            )
+            self.state = self.State.ESTABLISHED
+            AsyncRunner.spawn(self.terminate())
+            return
+
+        if status == HCI_SUCCESS:
+            self.sync_handle = sync_handle
+            self.advertiser_phy = advertiser_phy
+            self.periodic_advertising_interval = periodic_advertising_interval
+            self.advertiser_clock_accuracy = advertiser_clock_accuracy
+            self.state = self.State.ESTABLISHED
+            self.emit('establishment')
+            return
+
+        # We don't need to keep a reference anymore
+        if self in self.device.periodic_advertising_syncs:
+            self.device.periodic_advertising_syncs.remove(self)
+
+        if status == HCI_OPERATION_CANCELLED_BY_HOST_ERROR:
+            self.state = self.State.CANCELLED
+            self.emit('cancellation')
+            return
+
+        self.state = self.State.ERROR
+        self.emit('error')
+
+    def on_loss(self):
+        self.state = self.State.LOST
+        self.emit('loss')
+
+    def on_periodic_advertising_report(self, report) -> None:
+        self.data_accumulator += report.data
+        if (
+            report.data_status
+            == HCI_LE_Periodic_Advertising_Report_Event.DataStatus.DATA_INCOMPLETE_MORE_TO_COME
+        ):
+            return
+
+        self.emit(
+            'periodic_advertisement',
+            PeriodicAdvertisement(
+                self.advertiser_address,
+                self.sid,
+                report.tx_power,
+                report.rssi,
+                is_truncated=(
+                    report.data_status
+                    == HCI_LE_Periodic_Advertising_Report_Event.DataStatus.DATA_INCOMPLETE_TRUNCATED_NO_MORE_TO_COME
+                ),
+                data_bytes=self.data_accumulator,
+            ),
+        )
+        self.data_accumulator = b''
+
+    def on_biginfo_advertising_report(self, report) -> None:
+        self.emit(
+            'biginfo_advertisement',
+            BIGInfoAdvertisement.from_report(self.advertiser_address, self.sid, report),
+        )
+
+    def __str__(self) -> str:
+        return (
+            'PeriodicAdvertisingSync('
+            f'state={self.state.name}, '
+            f'sync_handle={self.sync_handle}, '
+            f'sid={self.sid}, '
+            f'skip={self.skip}, '
+            f'filter_duplicates={self.filter_duplicates}'
+            ')'
+        )
+
+
+# -----------------------------------------------------------------------------
 class LePhyOptions:
     # Coded PHY preference
     ANY_CODED_PHY = 0
@@ -867,6 +1152,15 @@ class Peer:
     async def discover_attributes(self) -> List[gatt_client.AttributeProxy]:
         return await self.gatt_client.discover_attributes()
 
+    async def discover_all(self):
+        await self.discover_services()
+        for service in self.services:
+            await self.discover_characteristics(service=service)
+
+        for service in self.services:
+            for characteristic in service.characteristics:
+                await self.discover_descriptors(characteristic=characteristic)
+
     async def subscribe(
         self,
         characteristic: gatt_client.CharacteristicProxy,
@@ -906,12 +1200,29 @@ class Peer:
         return self.gatt_client.get_services_by_uuid(uuid)
 
     def get_characteristics_by_uuid(
-        self, uuid: core.UUID, service: Optional[gatt_client.ServiceProxy] = None
+        self,
+        uuid: core.UUID,
+        service: Optional[Union[gatt_client.ServiceProxy, core.UUID]] = None,
     ) -> List[gatt_client.CharacteristicProxy]:
+        if isinstance(service, core.UUID):
+            return list(
+                itertools.chain(
+                    *[
+                        self.get_characteristics_by_uuid(uuid, s)
+                        for s in self.get_services_by_uuid(service)
+                    ]
+                )
+            )
+
         return self.gatt_client.get_characteristics_by_uuid(uuid, service)
 
-    def create_service_proxy(self, proxy_class: Type[_PROXY_CLASS]) -> _PROXY_CLASS:
-        return cast(_PROXY_CLASS, proxy_class.from_client(self.gatt_client))
+    def create_service_proxy(
+        self, proxy_class: Type[_PROXY_CLASS]
+    ) -> Optional[_PROXY_CLASS]:
+        if proxy := proxy_class.from_client(self.gatt_client):
+            return cast(_PROXY_CLASS, proxy)
+
+        return None
 
     async def discover_service_and_create_proxy(
         self, proxy_class: Type[_PROXY_CLASS]
@@ -1008,6 +1319,7 @@ class Connection(CompositeEventEmitter):
     handle: int
     transport: int
     self_address: Address
+    self_resolvable_address: Optional[Address]
     peer_address: Address
     peer_resolvable_address: Optional[Address]
     peer_le_features: Optional[LeFeatureMask]
@@ -1055,6 +1367,7 @@ class Connection(CompositeEventEmitter):
         handle,
         transport,
         self_address,
+        self_resolvable_address,
         peer_address,
         peer_resolvable_address,
         role,
@@ -1066,6 +1379,7 @@ class Connection(CompositeEventEmitter):
         self.handle = handle
         self.transport = transport
         self.self_address = self_address
+        self.self_resolvable_address = self_resolvable_address
         self.peer_address = peer_address
         self.peer_resolvable_address = peer_resolvable_address
         self.peer_name = None  # Classic only
@@ -1099,6 +1413,7 @@ class Connection(CompositeEventEmitter):
             None,
             BT_BR_EDR_TRANSPORT,
             device.public_address,
+            None,
             peer_address,
             None,
             role,
@@ -1192,11 +1507,9 @@ class Connection(CompositeEventEmitter):
 
         try:
             await asyncio.wait_for(self.device.abort_on('flush', abort), timeout)
-        except asyncio.TimeoutError:
-            pass
-
-        self.remove_listener('disconnection', abort.set_result)
-        self.remove_listener('disconnection_failure', abort.set_exception)
+        finally:
+            self.remove_listener('disconnection', abort.set_result)
+            self.remove_listener('disconnection_failure', abort.set_exception)
 
     async def set_data_length(self, tx_octets, tx_time) -> None:
         return await self.device.set_data_length(self, tx_octets, tx_time)
@@ -1226,6 +1539,11 @@ class Connection(CompositeEventEmitter):
 
     async def get_phy(self):
         return await self.device.get_connection_phy(self)
+
+    async def transfer_periodic_sync(
+        self, sync_handle: int, service_data: int = 0
+    ) -> None:
+        await self.device.transfer_periodic_sync(self, sync_handle, service_data)
 
     # [Classic only]
     async def request_remote_name(self):
@@ -1257,7 +1575,9 @@ class Connection(CompositeEventEmitter):
             f'Connection(handle=0x{self.handle:04X}, '
             f'role={self.role_name}, '
             f'self_address={self.self_address}, '
-            f'peer_address={self.peer_address})'
+            f'self_resolvable_address={self.self_resolvable_address}, '
+            f'peer_address={self.peer_address}, '
+            f'peer_resolvable_address={self.peer_resolvable_address})'
         )
 
 
@@ -1272,13 +1592,15 @@ class DeviceConfiguration:
     advertising_interval_min: int = DEVICE_DEFAULT_ADVERTISING_INTERVAL
     advertising_interval_max: int = DEVICE_DEFAULT_ADVERTISING_INTERVAL
     le_enabled: bool = True
-    # LE host enable 2nd parameter
     le_simultaneous_enabled: bool = False
+    le_privacy_enabled: bool = False
+    le_rpa_timeout: int = DEVICE_DEFAULT_LE_RPA_TIMEOUT
     classic_enabled: bool = False
     classic_sc_enabled: bool = True
     classic_ssp_enabled: bool = True
     classic_smp_enabled: bool = True
     classic_accept_any: bool = True
+    classic_interlaced_scan_enabled: bool = True
     connectable: bool = True
     discoverable: bool = True
     advertising_data: bytes = bytes(
@@ -1289,7 +1611,10 @@ class DeviceConfiguration:
     irk: bytes = bytes(16)  # This really must be changed for any level of security
     keystore: Optional[str] = None
     address_resolution_offload: bool = False
+    address_generation_offload: bool = False
     cis_enabled: bool = False
+    identity_address_type: Optional[int] = None
+    io_capability: int = pairing.PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT
 
     def __post_init__(self) -> None:
         self.gatt_services: List[Dict[str, Any]] = []
@@ -1374,7 +1699,9 @@ def with_connection_from_handle(function):
     @functools.wraps(function)
     def wrapper(self, connection_handle, *args, **kwargs):
         if (connection := self.lookup_connection(connection_handle)) is None:
-            raise ValueError(f'no connection for handle: 0x{connection_handle:04x}')
+            raise ObjectLookupError(
+                f'no connection for handle: 0x{connection_handle:04x}'
+            )
         return function(self, connection, *args, **kwargs)
 
     return wrapper
@@ -1389,7 +1716,7 @@ def with_connection_from_address(function):
         for connection in self.connections.values():
             if connection.peer_address == address:
                 return function(self, connection, *args, **kwargs)
-        raise ValueError('no connection for address')
+        raise ObjectLookupError('no connection for address')
 
     return wrapper
 
@@ -1405,6 +1732,20 @@ def try_with_connection_from_address(function):
             if connection.peer_address == address:
                 return function(self, connection, address, *args, **kwargs)
         return function(self, None, address, *args, **kwargs)
+
+    return wrapper
+
+
+# Decorator that converts the first argument from a sync handle to a periodic
+# advertising sync object
+def with_periodic_advertising_sync_from_handle(function):
+    @functools.wraps(function)
+    def wrapper(self, sync_handle, *args, **kwargs):
+        if (sync := self.lookup_periodic_advertising_sync(sync_handle)) is None:
+            raise ValueError(
+                f'no periodic advertising sync for handle: 0x{sync_handle:04x}'
+            )
+        return function(self, sync, *args, **kwargs)
 
     return wrapper
 
@@ -1425,8 +1766,9 @@ device_host_event_handlers: List[str] = []
 # -----------------------------------------------------------------------------
 class Device(CompositeEventEmitter):
     # Incomplete list of fields.
-    random_address: Address
-    public_address: Address
+    random_address: Address  # Random address that may change with RPA
+    public_address: Address  # Public address (obtained from the controller)
+    static_address: Address  # Random address that can be set but does not change
     classic_enabled: bool
     name: str
     class_of_device: int
@@ -1439,6 +1781,7 @@ class Device(CompositeEventEmitter):
         Address, List[asyncio.Future[Union[Connection, Tuple[Address, int, int]]]]
     ]
     advertisement_accumulators: Dict[Address, AdvertisementDataAccumulator]
+    periodic_advertising_syncs: List[PeriodicAdvertisingSync]
     config: DeviceConfiguration
     legacy_advertiser: Optional[LegacyAdvertiser]
     sco_links: Dict[int, ScoLink]
@@ -1524,6 +1867,7 @@ class Device(CompositeEventEmitter):
             [l2cap.L2CAP_Information_Request.EXTENDED_FEATURE_FIXED_CHANNELS]
         )
         self.advertisement_accumulators = {}  # Accumulators, by address
+        self.periodic_advertising_syncs = []
         self.scanning = False
         self.scanning_is_passive = False
         self.discovering = False
@@ -1554,26 +1898,33 @@ class Device(CompositeEventEmitter):
         config = config or DeviceConfiguration()
         self.config = config
 
-        self.public_address = Address('00:00:00:00:00:00')
         self.name = config.name
+        self.public_address = Address.ANY
         self.random_address = config.address
+        self.static_address = config.address
         self.class_of_device = config.class_of_device
         self.keystore = None
         self.irk = config.irk
         self.le_enabled = config.le_enabled
-        self.classic_enabled = config.classic_enabled
         self.le_simultaneous_enabled = config.le_simultaneous_enabled
+        self.le_privacy_enabled = config.le_privacy_enabled
+        self.le_rpa_timeout = config.le_rpa_timeout
+        self.le_rpa_periodic_update_task: Optional[asyncio.Task] = None
+        self.classic_enabled = config.classic_enabled
         self.cis_enabled = config.cis_enabled
         self.classic_sc_enabled = config.classic_sc_enabled
         self.classic_ssp_enabled = config.classic_ssp_enabled
         self.classic_smp_enabled = config.classic_smp_enabled
+        self.classic_interlaced_scan_enabled = config.classic_interlaced_scan_enabled
         self.discoverable = config.discoverable
         self.connectable = config.connectable
         self.classic_accept_any = config.classic_accept_any
         self.address_resolution_offload = config.address_resolution_offload
+        self.address_generation_offload = config.address_generation_offload
 
         # Extended advertising.
         self.extended_advertising_sets: Dict[int, AdvertisingSet] = {}
+        self.connecting_extended_advertising_sets: Dict[int, AdvertisingSet] = {}
 
         # Legacy advertising.
         # The advertising and scan response data, as well as the advertising interval
@@ -1625,10 +1976,23 @@ class Device(CompositeEventEmitter):
             if isinstance(address, str):
                 address = Address(address)
             self.random_address = address
+            self.static_address = address
 
         # Setup SMP
         self.smp_manager = smp.Manager(
-            self, pairing_config_factory=lambda connection: PairingConfig()
+            self,
+            pairing_config_factory=lambda connection: pairing.PairingConfig(
+                identity_address_type=(
+                    pairing.PairingConfig.AddressType(self.config.identity_address_type)
+                    if self.config.identity_address_type
+                    else None
+                ),
+                delegate=pairing.PairingDelegate(
+                    io_capability=pairing.PairingDelegate.IoCapability(
+                        self.config.io_capability
+                    )
+                ),
+            ),
         )
 
         self.l2cap_channel_manager.register_fixed_channel(smp.SMP_CID, self.on_smp_pdu)
@@ -1705,6 +2069,18 @@ class Device(CompositeEventEmitter):
                     return connection
 
         return None
+
+    def lookup_periodic_advertising_sync(
+        self, sync_handle: int
+    ) -> Optional[PeriodicAdvertisingSync]:
+        return next(
+            (
+                sync
+                for sync in self.periodic_advertising_syncs
+                if sync.sync_handle == sync_handle
+            ),
+            None,
+        )
 
     @deprecated("Please use create_l2cap_server()")
     def register_l2cap_server(self, psm, server) -> int:
@@ -1798,7 +2174,7 @@ class Device(CompositeEventEmitter):
                 spec=spec,
             )
         else:
-            raise ValueError(f'Unexpected mode {spec}')
+            raise InvalidArgumentError(f'Unexpected mode {spec}')
 
     def send_l2cap_pdu(self, connection_handle: int, cid: int, pdu: bytes) -> None:
         self.host.send_l2cap_pdu(connection_handle, cid, pdu)
@@ -1840,26 +2216,26 @@ class Device(CompositeEventEmitter):
                 HCI_Write_LE_Host_Support_Command(
                     le_supported_host=int(self.le_enabled),
                     simultaneous_le_host=int(self.le_simultaneous_enabled),
-                )
+                ),
+                check_result=True,
             )
 
         if self.le_enabled:
-            # Set the controller address
-            if self.random_address == Address.ANY_RANDOM:
-                # Try to use an address generated at random by the controller
-                if self.host.supports_command(HCI_LE_RAND_COMMAND):
-                    # Get 8 random bytes
-                    response = await self.send_command(
-                        HCI_LE_Rand_Command(), check_result=True
+            # Generate a random address if not set.
+            if self.static_address == Address.ANY_RANDOM:
+                self.static_address = Address.generate_static_address()
+
+            # If LE Privacy is enabled, generate an RPA
+            if self.le_privacy_enabled:
+                self.random_address = Address.generate_private_address(self.irk)
+                logger.info(f'Initial RPA: {self.random_address}')
+                if self.le_rpa_timeout > 0:
+                    # Start a task to periodically generate a new RPA
+                    self.le_rpa_periodic_update_task = asyncio.create_task(
+                        self._run_rpa_periodic_update()
                     )
-
-                    # Ensure the address bytes can be a static random address
-                    address_bytes = response.return_parameters.random_number[
-                        :5
-                    ] + bytes([response.return_parameters.random_number[5] | 0xC0])
-
-                    # Create a static random address from the random bytes
-                    self.random_address = Address(address_bytes)
+            else:
+                self.random_address = self.static_address
 
             if self.random_address != Address.ANY_RANDOM:
                 logger.debug(
@@ -1884,7 +2260,8 @@ class Device(CompositeEventEmitter):
                 await self.send_command(
                     HCI_LE_Set_Address_Resolution_Enable_Command(
                         address_resolution_enable=1
-                    )
+                    ),
+                    check_result=True,
                 )
 
             if self.cis_enabled:
@@ -1892,7 +2269,8 @@ class Device(CompositeEventEmitter):
                     HCI_LE_Set_Host_Feature_Command(
                         bit_number=LeFeature.CONNECTED_ISOCHRONOUS_STREAM,
                         bit_value=1,
-                    )
+                    ),
+                    check_result=True,
                 )
 
         if self.classic_enabled:
@@ -1915,6 +2293,21 @@ class Device(CompositeEventEmitter):
             await self.set_connectable(self.connectable)
             await self.set_discoverable(self.discoverable)
 
+            if self.classic_interlaced_scan_enabled:
+                if self.host.supports_lmp_features(LmpFeatureMask.INTERLACED_PAGE_SCAN):
+                    await self.send_command(
+                        hci.HCI_Write_Page_Scan_Type_Command(page_scan_type=1),
+                        check_result=True,
+                    )
+
+                if self.host.supports_lmp_features(
+                    LmpFeatureMask.INTERLACED_INQUIRY_SCAN
+                ):
+                    await self.send_command(
+                        hci.HCI_Write_Inquiry_Scan_Type_Command(scan_type=1),
+                        check_result=True,
+                    )
+
         # Done
         self.powered_on = True
 
@@ -1923,8 +2316,44 @@ class Device(CompositeEventEmitter):
 
     async def power_off(self) -> None:
         if self.powered_on:
+            if self.le_rpa_periodic_update_task:
+                self.le_rpa_periodic_update_task.cancel()
+
             await self.host.flush()
+
             self.powered_on = False
+
+    async def update_rpa(self) -> bool:
+        """
+        Try to update the RPA.
+
+        Returns:
+          True if the RPA was updated, False if it could not be updated.
+        """
+
+        # Check if this is a good time to rotate the address
+        if self.is_advertising or self.is_scanning or self.is_le_connecting:
+            logger.debug('skipping RPA update')
+            return False
+
+        random_address = Address.generate_private_address(self.irk)
+        response = await self.send_command(
+            HCI_LE_Set_Random_Address_Command(random_address=self.random_address)
+        )
+        if response.return_parameters == HCI_SUCCESS:
+            logger.info(f'new RPA: {random_address}')
+            self.random_address = random_address
+            return True
+        else:
+            logger.warning(f'failed to set RPA: {response.return_parameters}')
+            return False
+
+    async def _run_rpa_periodic_update(self) -> None:
+        """Update the RPA periodically"""
+        while self.le_rpa_timeout != 0:
+            await asyncio.sleep(self.le_rpa_timeout)
+            if not self.update_rpa():
+                logger.debug("periodic RPA update failed")
 
     async def refresh_resolving_list(self) -> None:
         assert self.keystore is not None
@@ -1933,7 +2362,7 @@ class Device(CompositeEventEmitter):
         # Create a host-side address resolver
         self.address_resolver = smp.AddressResolver(resolving_keys)
 
-        if self.address_resolution_offload:
+        if self.address_resolution_offload or self.address_generation_offload:
             await self.send_command(HCI_LE_Clear_Resolving_List_Command())
 
             # Add an empty entry for non-directed address generation.
@@ -1959,7 +2388,7 @@ class Device(CompositeEventEmitter):
     def supports_le_features(self, feature: LeFeatureMask) -> bool:
         return self.host.supports_le_features(feature)
 
-    def supports_le_phy(self, phy):
+    def supports_le_phy(self, phy: int) -> bool:
         if phy == HCI_LE_1M_PHY:
             return True
 
@@ -1968,13 +2397,17 @@ class Device(CompositeEventEmitter):
             HCI_LE_CODED_PHY: LeFeatureMask.LE_CODED_PHY,
         }
         if phy not in feature_map:
-            raise ValueError('invalid PHY')
+            raise InvalidArgumentError('invalid PHY')
 
         return self.supports_le_features(feature_map[phy])
 
     @property
     def supports_le_extended_advertising(self):
         return self.supports_le_features(LeFeatureMask.LE_EXTENDED_ADVERTISING)
+
+    @property
+    def supports_le_periodic_advertising(self):
+        return self.supports_le_features(LeFeatureMask.LE_PERIODIC_ADVERTISING)
 
     async def start_advertising(
         self,
@@ -2028,7 +2461,7 @@ class Device(CompositeEventEmitter):
         # Decide what peer address to use
         if advertising_type.is_directed:
             if target is None:
-                raise ValueError('directed advertising requires a target')
+                raise InvalidArgumentError('directed advertising requires a target')
             peer_address = target
         else:
             peer_address = Address.ANY
@@ -2135,7 +2568,7 @@ class Device(CompositeEventEmitter):
             and advertising_data
             and scan_response_data
         ):
-            raise ValueError(
+            raise InvalidArgumentError(
                 "Extended advertisements can't have both data and scan \
                               response data"
             )
@@ -2151,7 +2584,9 @@ class Device(CompositeEventEmitter):
                 if handle not in self.extended_advertising_sets
             )
         except StopIteration as exc:
-            raise RuntimeError("all valid advertising handles already in use") from exc
+            raise OutOfResourcesError(
+                "all valid advertising handles already in use"
+            ) from exc
 
         # Use the device's random address if a random address is needed but none was
         # provided.
@@ -2250,14 +2685,14 @@ class Device(CompositeEventEmitter):
     ) -> None:
         # Check that the arguments are legal
         if scan_interval < scan_window:
-            raise ValueError('scan_interval must be >= scan_window')
+            raise InvalidArgumentError('scan_interval must be >= scan_window')
         if (
             scan_interval < DEVICE_MIN_SCAN_INTERVAL
             or scan_interval > DEVICE_MAX_SCAN_INTERVAL
         ):
-            raise ValueError('scan_interval out of range')
+            raise InvalidArgumentError('scan_interval out of range')
         if scan_window < DEVICE_MIN_SCAN_WINDOW or scan_window > DEVICE_MAX_SCAN_WINDOW:
-            raise ValueError('scan_interval out of range')
+            raise InvalidArgumentError('scan_interval out of range')
 
         # Reset the accumulators
         self.advertisement_accumulators = {}
@@ -2285,7 +2720,7 @@ class Device(CompositeEventEmitter):
                     scanning_phy_count += 1
 
             if scanning_phy_count == 0:
-                raise ValueError('at least one scanning PHY must be enabled')
+                raise InvalidArgumentError('at least one scanning PHY must be enabled')
 
             await self.send_command(
                 HCI_LE_Set_Extended_Scan_Parameters_Command(
@@ -2367,6 +2802,120 @@ class Device(CompositeEventEmitter):
             self.advertisement_accumulators[report.address] = accumulator
         if advertisement := accumulator.update(report):
             self.emit('advertisement', advertisement)
+
+    async def create_periodic_advertising_sync(
+        self,
+        advertiser_address: Address,
+        sid: int,
+        skip: int = DEVICE_DEFAULT_PERIODIC_ADVERTISING_SYNC_SKIP,
+        sync_timeout: float = DEVICE_DEFAULT_PERIODIC_ADVERTISING_SYNC_TIMEOUT,
+        filter_duplicates: bool = False,
+    ) -> PeriodicAdvertisingSync:
+        # Check that the controller supports the feature.
+        if not self.supports_le_periodic_advertising:
+            raise NotSupportedError()
+
+        # Check that there isn't already an equivalent entry
+        if any(
+            sync.advertiser_address == advertiser_address and sync.sid == sid
+            for sync in self.periodic_advertising_syncs
+        ):
+            raise ValueError("equivalent entry already created")
+
+        # Create a new entry
+        sync = PeriodicAdvertisingSync(
+            device=self,
+            advertiser_address=advertiser_address,
+            sid=sid,
+            skip=skip,
+            sync_timeout=sync_timeout,
+            filter_duplicates=filter_duplicates,
+        )
+
+        self.periodic_advertising_syncs.append(sync)
+
+        # Check if any sync should be started
+        await self._update_periodic_advertising_syncs()
+
+        return sync
+
+    async def _update_periodic_advertising_syncs(self) -> None:
+        # Check if there's already a pending sync
+        if any(
+            sync.state == PeriodicAdvertisingSync.State.PENDING
+            for sync in self.periodic_advertising_syncs
+        ):
+            logger.debug("at least one sync pending, nothing to update yet")
+            return
+
+        # Start the next sync that's waiting to be started
+        if ready := next(
+            (
+                sync
+                for sync in self.periodic_advertising_syncs
+                if sync.state == PeriodicAdvertisingSync.State.INIT
+            ),
+            None,
+        ):
+            await ready.establish()
+            return
+
+    @host_event_handler
+    def on_periodic_advertising_sync_establishment(
+        self,
+        status: int,
+        sync_handle: int,
+        advertising_sid: int,
+        advertiser_address: Address,
+        advertiser_phy: int,
+        periodic_advertising_interval: int,
+        advertiser_clock_accuracy: int,
+    ) -> None:
+        for periodic_advertising_sync in self.periodic_advertising_syncs:
+            if (
+                periodic_advertising_sync.advertiser_address == advertiser_address
+                and periodic_advertising_sync.sid == advertising_sid
+            ):
+                periodic_advertising_sync.on_establishment(
+                    status,
+                    sync_handle,
+                    advertiser_phy,
+                    periodic_advertising_interval,
+                    advertiser_clock_accuracy,
+                )
+
+                AsyncRunner.spawn(self._update_periodic_advertising_syncs())
+
+                return
+
+        logger.warning(
+            "periodic advertising sync establishment for unknown address/sid"
+        )
+
+    @host_event_handler
+    @with_periodic_advertising_sync_from_handle
+    def on_periodic_advertising_sync_loss(
+        self, periodic_advertising_sync: PeriodicAdvertisingSync
+    ):
+        periodic_advertising_sync.on_loss()
+
+    @host_event_handler
+    @with_periodic_advertising_sync_from_handle
+    def on_periodic_advertising_report(
+        self,
+        periodic_advertising_sync: PeriodicAdvertisingSync,
+        report: HCI_LE_Periodic_Advertising_Report_Event,
+    ):
+        periodic_advertising_sync.on_periodic_advertising_report(report)
+
+    @host_event_handler
+    @with_periodic_advertising_sync_from_handle
+    def on_biginfo_advertising_report(
+        self,
+        periodic_advertising_sync: PeriodicAdvertisingSync,
+        report: HCI_LE_BIGInfo_Advertising_Report_Event,
+    ):
+        periodic_advertising_sync.on_biginfo_advertising_report(report)
 
     async def start_discovery(self, auto_restart: bool = True) -> None:
         await self.send_command(
@@ -2463,23 +3012,52 @@ class Device(CompositeEventEmitter):
         ] = None,
         own_address_type: int = OwnAddressType.RANDOM,
         timeout: Optional[float] = DEVICE_DEFAULT_CONNECT_TIMEOUT,
+        always_resolve: bool = False,
     ) -> Connection:
         '''
         Request a connection to a peer.
-        When transport is BLE, this method cannot be called if there is already a
+
+        When the transport is BLE, this method cannot be called if there is already a
         pending connection.
 
-        connection_parameters_preferences: (BLE only, ignored for BR/EDR)
-          * None: use the 1M PHY with default parameters
-          * map: each entry has a PHY as key and a ConnectionParametersPreferences
-            object as value
+        Args:
+          peer_address:
+            Address or name of the device to connect to.
+            If a string is passed:
+              If the string is an address followed by a `@` suffix, the `always_resolve`
+              argument is implicitly set to True, so the connection is made to the
+              address after resolution.
+              If the string is any other address, the connection is made to that
+              address (with or without address resolution, depending on the
+              `always_resolve` argument).
+              For any other string, a scan for devices using that string as their name
+              is initiated, and a connection to the first matching device's address
+              is made. In that case, `always_resolve` is ignored.
 
-        own_address_type: (BLE only)
+          connection_parameters_preferences:
+            (BLE only, ignored for BR/EDR)
+            * None: use the 1M PHY with default parameters
+            * map: each entry has a PHY as key and a ConnectionParametersPreferences
+              object as value
+
+          own_address_type:
+            (BLE only, ignored for BR/EDR)
+            OwnAddressType.RANDOM to use this device's random address, or
+            OwnAddressType.PUBLIC to use this device's public address.
+
+          timeout:
+            Maximum time to wait for a connection to be established, in seconds.
+            Pass None for an unlimited time.
+
+          always_resolve:
+            (BLE only, ignored for BR/EDR)
+            If True, always initiate a scan, resolving addresses, and connect to the
+            address that resolves to `peer_address`.
         '''
 
         # Check parameters
         if transport not in (BT_LE_TRANSPORT, BT_BR_EDR_TRANSPORT):
-            raise ValueError('invalid transport')
+            raise InvalidArgumentError('invalid transport')
 
         # Adjust the transport automatically if we need to
         if transport == BT_LE_TRANSPORT and not self.le_enabled:
@@ -2493,11 +3071,19 @@ class Device(CompositeEventEmitter):
 
         if isinstance(peer_address, str):
             try:
-                peer_address = Address.from_string_for_transport(
-                    peer_address, transport
-                )
-            except ValueError:
+                if transport == BT_LE_TRANSPORT and peer_address.endswith('@'):
+                    peer_address = Address.from_string_for_transport(
+                        peer_address[:-1], transport
+                    )
+                    always_resolve = True
+                    logger.debug('forcing address resolution')
+                else:
+                    peer_address = Address.from_string_for_transport(
+                        peer_address, transport
+                    )
+            except (InvalidArgumentError, ValueError):
                 # If the address is not parsable, assume it is a name instead
+                always_resolve = False
                 logger.debug('looking for peer by name')
                 peer_address = await self.find_peer_by_name(
                     peer_address, transport
@@ -2508,9 +3094,15 @@ class Device(CompositeEventEmitter):
                 transport == BT_BR_EDR_TRANSPORT
                 and peer_address.address_type != Address.PUBLIC_DEVICE_ADDRESS
             ):
-                raise ValueError('BR/EDR addresses must be PUBLIC')
+                raise InvalidArgumentError('BR/EDR addresses must be PUBLIC')
 
         assert isinstance(peer_address, Address)
+
+        if transport == BT_LE_TRANSPORT and always_resolve:
+            logger.debug('resolving address')
+            peer_address = await self.find_peer_by_identity_address(
+                peer_address
+            )  # TODO: timeout
 
         def on_connection(connection):
             if transport == BT_LE_TRANSPORT or (
@@ -2559,7 +3151,7 @@ class Device(CompositeEventEmitter):
                         )
                     )
                     if not phys:
-                        raise ValueError('at least one supported PHY needed')
+                        raise InvalidArgumentError('at least one supported PHY needed')
 
                     phy_count = len(phys)
                     initiating_phys = phy_list_to_bits(phys)
@@ -2631,7 +3223,7 @@ class Device(CompositeEventEmitter):
                     )
                 else:
                     if HCI_LE_1M_PHY not in connection_parameters_preferences:
-                        raise ValueError('1M PHY preferences required')
+                        raise InvalidArgumentError('1M PHY preferences required')
 
                     prefs = connection_parameters_preferences[HCI_LE_1M_PHY]
                     result = await self.send_command(
@@ -2731,7 +3323,7 @@ class Device(CompositeEventEmitter):
         if isinstance(peer_address, str):
             try:
                 peer_address = Address(peer_address)
-            except ValueError:
+            except InvalidArgumentError:
                 # If the address is not parsable, assume it is a name instead
                 logger.debug('looking for peer by name')
                 peer_address = await self.find_peer_by_name(
@@ -2741,7 +3333,7 @@ class Device(CompositeEventEmitter):
         assert isinstance(peer_address, Address)
 
         if peer_address == Address.NIL:
-            raise ValueError('accept on nil address')
+            raise InvalidArgumentError('accept on nil address')
 
         # Create a future so that we can wait for the request
         pending_request_fut = asyncio.get_running_loop().create_future()
@@ -2854,7 +3446,7 @@ class Device(CompositeEventEmitter):
             if isinstance(peer_address, str):
                 try:
                     peer_address = Address(peer_address)
-                except ValueError:
+                except InvalidArgumentError:
                     # If the address is not parsable, assume it is a name instead
                     logger.debug('looking for peer by name')
                     peer_address = await self.find_peer_by_name(
@@ -2897,10 +3489,10 @@ class Device(CompositeEventEmitter):
 
     async def set_data_length(self, connection, tx_octets, tx_time) -> None:
         if tx_octets < 0x001B or tx_octets > 0x00FB:
-            raise ValueError('tx_octets must be between 0x001B and 0x00FB')
+            raise InvalidArgumentError('tx_octets must be between 0x001B and 0x00FB')
 
         if tx_time < 0x0148 or tx_time > 0x4290:
-            raise ValueError('tx_time must be between 0x0148 and 0x4290')
+            raise InvalidArgumentError('tx_time must be between 0x0148 and 0x4290')
 
         return await self.send_command(
             HCI_LE_Set_Data_Length_Command(
@@ -3013,15 +3605,26 @@ class Device(CompositeEventEmitter):
             check_result=True,
         )
 
+    async def transfer_periodic_sync(
+        self, connection: Connection, sync_handle: int, service_data: int = 0
+    ) -> None:
+        return await self.send_command(
+            HCI_LE_Periodic_Advertising_Sync_Transfer_Command(
+                connection_handle=connection.handle,
+                service_data=service_data,
+                sync_handle=sync_handle,
+            ),
+            check_result=True,
+        )
+
     async def find_peer_by_name(self, name, transport=BT_LE_TRANSPORT):
         """
-        Scan for a peer with a give name and return its address and transport
+        Scan for a peer with a given name and return its address.
         """
 
         # Create a future to wait for an address to be found
         peer_address = asyncio.get_running_loop().create_future()
 
-        # Scan/inquire with event handlers to handle scan/inquiry results
         def on_peer_found(address, ad_data):
             local_name = ad_data.get(AdvertisingData.COMPLETE_LOCAL_NAME, raw=True)
             if local_name is None:
@@ -3030,13 +3633,13 @@ class Device(CompositeEventEmitter):
                 if local_name.decode('utf-8') == name:
                     peer_address.set_result(address)
 
-        handler = None
+        listener = None
         was_scanning = self.scanning
         was_discovering = self.discovering
         try:
             if transport == BT_LE_TRANSPORT:
                 event_name = 'advertisement'
-                handler = self.on(
+                listener = self.on(
                     event_name,
                     lambda advertisement: on_peer_found(
                         advertisement.address, advertisement.data
@@ -3048,7 +3651,7 @@ class Device(CompositeEventEmitter):
 
             elif transport == BT_BR_EDR_TRANSPORT:
                 event_name = 'inquiry_result'
-                handler = self.on(
+                listener = self.on(
                     event_name,
                     lambda address, class_of_device, eir_data, rssi: on_peer_found(
                         address, eir_data
@@ -3062,21 +3665,67 @@ class Device(CompositeEventEmitter):
 
             return await self.abort_on('flush', peer_address)
         finally:
-            if handler is not None:
-                self.remove_listener(event_name, handler)
+            if listener is not None:
+                self.remove_listener(event_name, listener)
 
             if transport == BT_LE_TRANSPORT and not was_scanning:
                 await self.stop_scanning()
             elif transport == BT_BR_EDR_TRANSPORT and not was_discovering:
                 await self.stop_discovery()
 
+    async def find_peer_by_identity_address(self, identity_address: Address) -> Address:
+        """
+        Scan for a peer with a resolvable address that can be resolved to a given
+        identity address.
+        """
+
+        # Create a future to wait for an address to be found
+        peer_address = asyncio.get_running_loop().create_future()
+
+        def on_peer_found(address, _):
+            if address == identity_address:
+                if not peer_address.done():
+                    logger.debug(f'*** Matching public address found for {address}')
+                    peer_address.set_result(address)
+                return
+
+            if address.is_resolvable:
+                resolved_address = self.address_resolver.resolve(address)
+                if resolved_address == identity_address:
+                    if not peer_address.done():
+                        logger.debug(f'*** Matching identity found for {address}')
+                        peer_address.set_result(address)
+                return
+
+        was_scanning = self.scanning
+        event_name = 'advertisement'
+        listener = None
+        try:
+            listener = self.on(
+                event_name,
+                lambda advertisement: on_peer_found(
+                    advertisement.address, advertisement.data
+                ),
+            )
+
+            if not self.scanning:
+                await self.start_scanning(filter_duplicates=True)
+
+            return await self.abort_on('flush', peer_address)
+        finally:
+            if listener is not None:
+                self.remove_listener(event_name, listener)
+
+            if not was_scanning:
+                await self.stop_scanning()
+
     @property
-    def pairing_config_factory(self) -> Callable[[Connection], PairingConfig]:
+    def pairing_config_factory(self) -> Callable[[Connection], pairing.PairingConfig]:
         return self.smp_manager.pairing_config_factory
 
     @pairing_config_factory.setter
     def pairing_config_factory(
-        self, pairing_config_factory: Callable[[Connection], PairingConfig]
+        self, pairing_config_factory: Callable[[Connection], pairing.PairingConfig]
     ) -> None:
         self.smp_manager.pairing_config_factory = pairing_config_factory
 
@@ -3175,7 +3824,7 @@ class Device(CompositeEventEmitter):
 
     async def encrypt(self, connection, enable=True):
         if not enable and connection.transport == BT_LE_TRANSPORT:
-            raise ValueError('`enable` parameter is classic only.')
+            raise InvalidArgumentError('`enable` parameter is classic only.')
 
         # Set up event handlers
         pending_encryption = asyncio.get_running_loop().create_future()
@@ -3194,11 +3843,12 @@ class Device(CompositeEventEmitter):
             if connection.transport == BT_LE_TRANSPORT:
                 # Look for a key in the key store
                 if self.keystore is None:
-                    raise RuntimeError('no key store')
+                    raise InvalidOperationError('no key store')
 
+                logger.debug(f'Looking up key for {connection.peer_address}')
                 keys = await self.keystore.get(str(connection.peer_address))
                 if keys is None:
-                    raise RuntimeError('keys not found in key store')
+                    raise InvalidOperationError('keys not found in key store')
 
                 if keys.ltk is not None:
                     ltk = keys.ltk.value
@@ -3209,7 +3859,7 @@ class Device(CompositeEventEmitter):
                     rand = keys.ltk_central.rand
                     ediv = keys.ltk_central.ediv
                 else:
-                    raise RuntimeError('no LTK found for peer')
+                    raise InvalidOperationError('no LTK found for peer')
 
                 if connection.role != HCI_CENTRAL_ROLE:
                     raise InvalidStateError('only centrals can start encryption')
@@ -3484,7 +4134,7 @@ class Device(CompositeEventEmitter):
                 return cis_link
 
         # Mypy believes this is reachable when context is an ExitStack.
-        raise InvalidStateError('Unreachable')
+        raise UnreachableError()
 
     # [LE only]
     @experimental('Only for testing.')
@@ -3605,17 +4255,37 @@ class Device(CompositeEventEmitter):
             )
             return
 
-        if not (connection := self.lookup_connection(connection_handle)):
-            logger.warning(f'no connection for handle 0x{connection_handle:04x}')
+        if connection := self.lookup_connection(connection_handle):
+            # We have already received the connection complete event.
+            self._complete_le_extended_advertising_connection(
+                connection, advertising_set
+            )
             return
 
+        # Associate the connection handle with the advertising set, the connection
+        # will complete later.
+        logger.debug(
+            f'the connection with handle {connection_handle:04X} will complete later'
+        )
+        self.connecting_extended_advertising_sets[connection_handle] = advertising_set
+
+    def _complete_le_extended_advertising_connection(
+        self, connection: Connection, advertising_set: AdvertisingSet
+    ) -> None:
         # Update the connection address.
         connection.self_address = (
             advertising_set.random_address
-            if advertising_set.advertising_parameters.own_address_type
+            if advertising_set.random_address is not None
+            and advertising_set.advertising_parameters.own_address_type
             in (OwnAddressType.RANDOM, OwnAddressType.RESOLVABLE_OR_RANDOM)
             else self.public_address
         )
+
+        if advertising_set.advertising_parameters.own_address_type in (
+            OwnAddressType.RANDOM,
+            OwnAddressType.PUBLIC,
+        ):
+            connection.self_resolvable_address = None
 
         # Setup auto-restart of the advertising set if needed.
         if advertising_set.auto_restart:
@@ -3652,12 +4322,23 @@ class Device(CompositeEventEmitter):
     @host_event_handler
     def on_connection(
         self,
-        connection_handle,
-        transport,
-        peer_address,
-        role,
-        connection_parameters,
-    ):
+        connection_handle: int,
+        transport: int,
+        peer_address: Address,
+        self_resolvable_address: Optional[Address],
+        peer_resolvable_address: Optional[Address],
+        role: int,
+        connection_parameters: ConnectionParameters,
+    ) -> None:
+        # Convert all-zeros addresses into None.
+        if self_resolvable_address == Address.ANY_RANDOM:
+            self_resolvable_address = None
+        if (
+            peer_resolvable_address == Address.ANY_RANDOM
+            or not peer_address.is_resolved
+        ):
+            peer_resolvable_address = None
+
         logger.debug(
             f'*** Connection: [0x{connection_handle:04X}] '
             f'{peer_address} {"" if role is None else HCI_Constant.role_name(role)}'
@@ -3678,17 +4359,18 @@ class Device(CompositeEventEmitter):
 
             return
 
-        # Resolve the peer address if we can
-        peer_resolvable_address = None
-        if self.address_resolver:
-            if peer_address.is_resolvable:
-                resolved_address = self.address_resolver.resolve(peer_address)
-                if resolved_address is not None:
-                    logger.debug(f'*** Address resolved as {resolved_address}')
-                    peer_resolvable_address = peer_address
-                    peer_address = resolved_address
+        if peer_resolvable_address is None:
+            # Resolve the peer address if we can
+            if self.address_resolver:
+                if peer_address.is_resolvable:
+                    resolved_address = self.address_resolver.resolve(peer_address)
+                    if resolved_address is not None:
+                        logger.debug(f'*** Address resolved as {resolved_address}')
+                        peer_resolvable_address = peer_address
+                        peer_address = resolved_address
 
         self_address = None
+        own_address_type: Optional[int] = None
         if role == HCI_CENTRAL_ROLE:
             own_address_type = self.connect_own_address_type
             assert own_address_type is not None
@@ -3717,12 +4399,18 @@ class Device(CompositeEventEmitter):
                 else self.random_address
             )
 
+        # Some controllers may return local resolvable address even not using address
+        # generation offloading. Ignore the value to prevent SMP failure.
+        if own_address_type in (OwnAddressType.RANDOM, OwnAddressType.PUBLIC):
+            self_resolvable_address = None
+
         # Create a connection.
         connection = Connection(
             self,
             connection_handle,
             transport,
             self_address,
+            self_resolvable_address,
             peer_address,
             peer_resolvable_address,
             role,
@@ -3733,9 +4421,10 @@ class Device(CompositeEventEmitter):
 
         if role == HCI_PERIPHERAL_ROLE and self.legacy_advertiser:
             if self.legacy_advertiser.auto_restart:
+                advertiser = self.legacy_advertiser
                 connection.once(
                     'disconnection',
-                    lambda _: self.abort_on('flush', self.legacy_advertiser.start()),
+                    lambda _: self.abort_on('flush', advertiser.start()),
                 )
             else:
                 self.legacy_advertiser = None
@@ -3743,6 +4432,16 @@ class Device(CompositeEventEmitter):
         if role == HCI_CENTRAL_ROLE or not self.supports_le_extended_advertising:
             # We can emit now, we have all the info we need
             self._emit_le_connection(connection)
+            return
+
+        if role == HCI_PERIPHERAL_ROLE and self.supports_le_extended_advertising:
+            if advertising_set := self.connecting_extended_advertising_sets.pop(
+                connection_handle, None
+            ):
+                # We have already received the advertising set termination event.
+                self._complete_le_extended_advertising_connection(
+                    connection, advertising_set
+                )
 
     @host_event_handler
     def on_connection_failure(self, transport, peer_address, error_code):
@@ -3948,7 +4647,7 @@ class Device(CompositeEventEmitter):
             return await pairing_config.delegate.confirm(auto=True)
 
         async def na() -> bool:
-            assert False, "N/A: unreachable"
+            raise UnreachableError()
 
         # See Bluetooth spec @ Vol 3, Part C 5.2.2.6
         methods = {
@@ -4409,5 +5108,6 @@ class Device(CompositeEventEmitter):
         return (
             f'Device(name="{self.name}", '
             f'random_address="{self.random_address}", '
-            f'public_address="{self.public_address}")'
+            f'public_address="{self.public_address}", '
+            f'static_address="{self.static_address}")'
         )
