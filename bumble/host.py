@@ -772,6 +772,8 @@ class Host(AbortableEventEmitter):
                 event.connection_handle,
                 BT_LE_TRANSPORT,
                 event.peer_address,
+                getattr(event, 'local_resolvable_private_address', None),
+                getattr(event, 'peer_resolvable_private_address', None),
                 event.role,
                 connection_parameters,
             )
@@ -786,6 +788,10 @@ class Host(AbortableEventEmitter):
     def on_hci_le_enhanced_connection_complete_event(self, event):
         # Just use the same implementation as for the non-enhanced event for now
         self.on_hci_le_connection_complete_event(event)
+
+    def on_hci_le_enhanced_connection_complete_v2_event(self, event):
+        # Just use the same implementation as for the v1 event for now
+        self.on_hci_le_enhanced_connection_complete_event(event)
 
     def on_hci_connection_complete_event(self, event):
         if event.status == hci.HCI_SUCCESS:
@@ -811,6 +817,8 @@ class Host(AbortableEventEmitter):
                 event.connection_handle,
                 BT_BR_EDR_TRANSPORT,
                 event.bd_addr,
+                None,
+                None,
                 None,
                 None,
             )
@@ -904,6 +912,27 @@ class Host(AbortableEventEmitter):
             event.connection_handle,
             event.num_completed_extended_advertising_events,
         )
+
+    def on_hci_le_periodic_advertising_sync_established_event(self, event):
+        self.emit(
+            'periodic_advertising_sync_establishment',
+            event.status,
+            event.sync_handle,
+            event.advertising_sid,
+            event.advertiser_address,
+            event.advertiser_phy,
+            event.periodic_advertising_interval,
+            event.advertiser_clock_accuracy,
+        )
+
+    def on_hci_le_periodic_advertising_sync_lost_event(self, event):
+        self.emit('periodic_advertising_sync_loss', event.sync_handle)
+
+    def on_hci_le_periodic_advertising_report_event(self, event):
+        self.emit('periodic_advertising_report', event.sync_handle, event)
+
+    def on_hci_le_biginfo_advertising_report_event(self, event):
+        self.emit('biginfo_advertising_report', event.sync_handle, event)
 
     def on_hci_le_cis_request_event(self, event):
         self.emit(
