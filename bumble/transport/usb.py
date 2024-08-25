@@ -15,19 +15,18 @@
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
+from __future__ import annotations
 import asyncio
 import logging
 import threading
-import collections
 import ctypes
 import platform
 
 import usb1
 
-from bumble.transport.common import Transport, ParserSource
+from bumble.transport.common import Transport, BaseSource, TransportInitError
 from bumble import hci
 from bumble.colors import color
-from bumble.utils import AsyncRunner
 
 
 # -----------------------------------------------------------------------------
@@ -115,13 +114,17 @@ async def open_usb_transport(spec: str) -> Transport:
             self.device = device
             self.acl_out = acl_out
             self.acl_out_transfer = device.getTransfer()
-            self.packets = collections.deque()  # Queue of packets waiting to be sent
+            self.acl_out_transfer_ready = asyncio.Semaphore(1)
+            self.packets: asyncio.Queue[bytes] = (
+                asyncio.Queue()
+            )  # Queue of packets waiting to be sent
             self.loop = asyncio.get_running_loop()
+            self.queue_task = None
             self.cancel_done = self.loop.create_future()
             self.closed = False
 
         def start(self):
-            pass
+            self.queue_task = asyncio.create_task(self.process_queue())
 
         def on_packet(self, packet):
             # Ignore packets if we're closed
@@ -133,62 +136,64 @@ async def open_usb_transport(spec: str) -> Transport:
                 return
 
             # Queue the packet
-            self.packets.append(packet)
-            if len(self.packets) == 1:
-                # The queue was previously empty, re-prime the pump
-                self.process_queue()
+            self.packets.put_nowait(packet)
 
         def transfer_callback(self, transfer):
+            self.loop.call_soon_threadsafe(self.acl_out_transfer_ready.release)
             status = transfer.getStatus()
 
             # pylint: disable=no-member
-            if status == usb1.TRANSFER_COMPLETED:
-                self.loop.call_soon_threadsafe(self.on_packet_sent)
-            elif status == usb1.TRANSFER_CANCELLED:
+            if status == usb1.TRANSFER_CANCELLED:
                 self.loop.call_soon_threadsafe(self.cancel_done.set_result, None)
-            else:
+                return
+
+            if status != usb1.TRANSFER_COMPLETED:
                 logger.warning(
                     color(f'!!! OUT transfer not completed: status={status}', 'red')
                 )
 
-        def on_packet_sent(self):
-            if self.packets:
-                self.packets.popleft()
-                self.process_queue()
+        async def process_queue(self):
+            while True:
+                # Wait for a packet to transfer.
+                packet = await self.packets.get()
 
-        def process_queue(self):
-            if len(self.packets) == 0:
-                return  # Nothing to do
+                # Wait until we can start a transfer.
+                await self.acl_out_transfer_ready.acquire()
 
-            packet = self.packets[0]
-            packet_type = packet[0]
-            if packet_type == hci.HCI_ACL_DATA_PACKET:
-                self.acl_out_transfer.setBulk(
-                    self.acl_out, packet[1:], callback=self.transfer_callback
-                )
-                self.acl_out_transfer.submit()
-            elif packet_type == hci.HCI_COMMAND_PACKET:
-                self.acl_out_transfer.setControl(
-                    USB_RECIPIENT_DEVICE | USB_REQUEST_TYPE_CLASS,
-                    0,
-                    0,
-                    0,
-                    packet[1:],
-                    callback=self.transfer_callback,
-                )
-                self.acl_out_transfer.submit()
-            else:
-                logger.warning(color(f'unsupported packet type {packet_type}', 'red'))
+                # Transfer the packet.
+                packet_type = packet[0]
+                if packet_type == hci.HCI_ACL_DATA_PACKET:
+                    self.acl_out_transfer.setBulk(
+                        self.acl_out, packet[1:], callback=self.transfer_callback
+                    )
+                    self.acl_out_transfer.submit()
+                elif packet_type == hci.HCI_COMMAND_PACKET:
+                    self.acl_out_transfer.setControl(
+                        USB_RECIPIENT_DEVICE | USB_REQUEST_TYPE_CLASS,
+                        0,
+                        0,
+                        0,
+                        packet[1:],
+                        callback=self.transfer_callback,
+                    )
+                    self.acl_out_transfer.submit()
+                else:
+                    logger.warning(
+                        color(f'unsupported packet type {packet_type}', 'red')
+                    )
 
         def close(self):
             self.closed = True
+            if self.queue_task:
+                self.queue_task.cancel()
 
         async def terminate(self):
             if not self.closed:
                 self.close()
 
             # Empty the packet queue so that we don't send any more data
-            self.packets.clear()
+            while not self.packets.empty():
+                self.packets.get_nowait()
 
             # If we have a transfer in flight, cancel it
             if self.acl_out_transfer.isSubmitted():
@@ -203,7 +208,7 @@ async def open_usb_transport(spec: str) -> Transport:
                 except usb1.USBError:
                     logger.debug('OUT transfer likely already completed')
 
-    class UsbPacketSource(asyncio.Protocol, ParserSource):
+    class UsbPacketSource(asyncio.Protocol, BaseSource):
         def __init__(self, device, metadata, acl_in, events_in):
             super().__init__()
             self.device = device
@@ -280,7 +285,13 @@ async def open_usb_transport(spec: str) -> Transport:
                     packet = await self.queue.get()
                 except asyncio.CancelledError:
                     return
-                self.parser.feed_data(packet)
+                if self.sink:
+                    try:
+                        self.sink.on_packet(packet)
+                    except Exception as error:
+                        logger.exception(
+                            color(f'!!! Exception in sink.on_packet: {error}', 'red')
+                        )
 
         def close(self):
             self.closed = True
@@ -442,7 +453,7 @@ async def open_usb_transport(spec: str) -> Transport:
 
         if found is None:
             context.close()
-            raise ValueError('device not found')
+            raise TransportInitError('device not found')
 
         logger.debug(f'USB Device: {found}')
 
@@ -507,7 +518,7 @@ async def open_usb_transport(spec: str) -> Transport:
 
         endpoints = find_endpoints(found)
         if endpoints is None:
-            raise ValueError('no compatible interface found for device')
+            raise TransportInitError('no compatible interface found for device')
         (configuration, interface, setting, acl_in, acl_out, events_in) = endpoints
         logger.debug(
             f'selected endpoints: configuration={configuration}, '
