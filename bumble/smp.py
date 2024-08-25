@@ -55,6 +55,7 @@ from .core import (
     BT_CENTRAL_ROLE,
     BT_LE_TRANSPORT,
     AdvertisingData,
+    InvalidArgumentError,
     ProtocolError,
     name_or_number,
 )
@@ -766,8 +767,11 @@ class Session:
         self.oob_data_flag = 0 if pairing_config.oob is None else 1
 
         # Set up addresses
-        self_address = connection.self_address
+        self_address = connection.self_resolvable_address or connection.self_address
         peer_address = connection.peer_resolvable_address or connection.peer_address
+        logger.debug(
+            f"pairing with self_address={self_address}, peer_address={peer_address}"
+        )
         if self.is_initiator:
             self.ia = bytes(self_address)
             self.iat = 1 if self_address.is_random else 0
@@ -784,7 +788,7 @@ class Session:
             self.peer_oob_data = pairing_config.oob.peer_data
             if pairing_config.sc:
                 if pairing_config.oob.our_context is None:
-                    raise ValueError(
+                    raise InvalidArgumentError(
                         "oob pairing config requires a context when sc is True"
                     )
                 self.r = pairing_config.oob.our_context.r
@@ -793,7 +797,7 @@ class Session:
                     self.tk = pairing_config.oob.legacy_context.tk
             else:
                 if pairing_config.oob.legacy_context is None:
-                    raise ValueError(
+                    raise InvalidArgumentError(
                         "oob pairing config requires a legacy context when sc is False"
                     )
                 self.r = bytes(16)
@@ -1074,11 +1078,19 @@ class Session:
         )
 
     def send_identity_address_command(self) -> None:
-        identity_address = {
-            None: self.connection.self_address,
-            Address.PUBLIC_DEVICE_ADDRESS: self.manager.device.public_address,
-            Address.RANDOM_DEVICE_ADDRESS: self.manager.device.random_address,
-        }[self.pairing_config.identity_address_type]
+        if self.pairing_config.identity_address_type == Address.PUBLIC_DEVICE_ADDRESS:
+            identity_address = self.manager.device.public_address
+        elif self.pairing_config.identity_address_type == Address.RANDOM_DEVICE_ADDRESS:
+            identity_address = self.manager.device.static_address
+        else:
+            # No identity address type set. If the controller has a public address, it
+            # will be more responsible to be the identity address.
+            if self.manager.device.public_address != Address.ANY:
+                logger.debug("No identity address type set, using PUBLIC")
+                identity_address = self.manager.device.public_address
+            else:
+                logger.debug("No identity address type set, using RANDOM")
+                identity_address = self.manager.device.static_address
         self.send_command(
             SMP_Identity_Address_Information_Command(
                 addr_type=identity_address.address_type,
