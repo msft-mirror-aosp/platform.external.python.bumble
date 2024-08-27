@@ -43,6 +43,7 @@ from .core import (
     BT_ADVANCED_AUDIO_DISTRIBUTION_SERVICE,
     InvalidStateError,
     ProtocolError,
+    InvalidArgumentError,
     name_or_number,
 )
 from .a2dp import (
@@ -700,7 +701,7 @@ class Message:  # pylint:disable=attribute-defined-outside-init
             signal_identifier_str = name[:-7]
             message_type = Message.MessageType.RESPONSE_REJECT
         else:
-            raise ValueError('invalid class name')
+            raise InvalidArgumentError('invalid class name')
 
         subclass.message_type = message_type
 
@@ -2161,6 +2162,9 @@ class LocalStreamEndPoint(StreamEndPoint, EventEmitter):
 
     def on_abort_command(self):
         self.emit('abort')
+
+    def on_delayreport_command(self, delay: int):
+        self.emit('delay_report', delay)
 
     def on_rtp_channel_open(self):
         self.emit('rtp_channel_open')
