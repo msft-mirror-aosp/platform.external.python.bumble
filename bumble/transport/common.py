@@ -23,6 +23,7 @@ import logging
 import io
 from typing import Any, ContextManager, Tuple, Optional, Protocol, Dict
 
+from bumble import core
 from bumble import hci
 from bumble.colors import color
 from bumble.snoop import Snooper
@@ -49,10 +50,16 @@ HCI_PACKET_INFO: Dict[int, Tuple[int, int, str]] = {
 # -----------------------------------------------------------------------------
 # Errors
 # -----------------------------------------------------------------------------
-class TransportLostError(Exception):
-    """
-    The Transport has been lost/disconnected.
-    """
+class TransportLostError(core.BaseBumbleError, RuntimeError):
+    """The Transport has been lost/disconnected."""
+
+
+class TransportInitError(core.BaseBumbleError, RuntimeError):
+    """Error raised when the transport cannot be initialized."""
+
+
+class TransportSpecError(core.BaseBumbleError, ValueError):
+    """Error raised when the transport spec is invalid."""
 
 
 # -----------------------------------------------------------------------------
@@ -132,7 +139,9 @@ class PacketParser:
                         packet_type
                     ) or self.extended_packet_info.get(packet_type)
                     if self.packet_info is None:
-                        raise ValueError(f'invalid packet type {packet_type}')
+                        raise core.InvalidPacketError(
+                            f'invalid packet type {packet_type}'
+                        )
                     self.state = PacketParser.NEED_LENGTH
                     self.bytes_needed = self.packet_info[0] + self.packet_info[1]
                 elif self.state == PacketParser.NEED_LENGTH:
@@ -178,19 +187,19 @@ class PacketReader:
         # Get the packet info based on its type
         packet_info = HCI_PACKET_INFO.get(packet_type[0])
         if packet_info is None:
-            raise ValueError(f'invalid packet type {packet_type[0]} found')
+            raise core.InvalidPacketError(f'invalid packet type {packet_type[0]} found')
 
         # Read the header (that includes the length)
         header_size = packet_info[0] + packet_info[1]
         header = self.source.read(header_size)
         if len(header) != header_size:
-            raise ValueError('packet too short')
+            raise core.InvalidPacketError('packet too short')
 
         # Read the body
         body_length = struct.unpack_from(packet_info[2], header, packet_info[1])[0]
         body = self.source.read(body_length)
         if len(body) != body_length:
-            raise ValueError('packet too short')
+            raise core.InvalidPacketError('packet too short')
 
         return packet_type + header + body
 
@@ -211,7 +220,7 @@ class AsyncPacketReader:
         # Get the packet info based on its type
         packet_info = HCI_PACKET_INFO.get(packet_type[0])
         if packet_info is None:
-            raise ValueError(f'invalid packet type {packet_type[0]} found')
+            raise core.InvalidPacketError(f'invalid packet type {packet_type[0]} found')
 
         # Read the header (that includes the length)
         header_size = packet_info[0] + packet_info[1]
@@ -239,26 +248,28 @@ class AsyncPipeSink:
 
 
 # -----------------------------------------------------------------------------
-class ParserSource:
+class BaseSource:
     """
     Base class designed to be subclassed by transport-specific source classes
     """
 
     terminated: asyncio.Future[None]
-    parser: PacketParser
+    sink: Optional[TransportSink]
 
     def __init__(self) -> None:
-        self.parser = PacketParser()
         self.terminated = asyncio.get_running_loop().create_future()
+        self.sink = None
 
     def set_packet_sink(self, sink: TransportSink) -> None:
-        self.parser.set_packet_sink(sink)
+        self.sink = sink
 
     def on_transport_lost(self) -> None:
-        self.terminated.set_result(None)
-        if self.parser.sink:
-            if hasattr(self.parser.sink, 'on_transport_lost'):
-                self.parser.sink.on_transport_lost()
+        if not self.terminated.done():
+            self.terminated.set_result(None)
+
+        if self.sink:
+            if hasattr(self.sink, 'on_transport_lost'):
+                self.sink.on_transport_lost()
 
     async def wait_for_termination(self) -> None:
         """
@@ -269,6 +280,23 @@ class ParserSource:
 
     def close(self) -> None:
         pass
+
+
+# -----------------------------------------------------------------------------
+class ParserSource(BaseSource):
+    """
+    Base class for sources that use an HCI parser.
+    """
+
+    parser: PacketParser
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parser = PacketParser()
+
+    def set_packet_sink(self, sink: TransportSink) -> None:
+        super().set_packet_sink(sink)
+        self.parser.set_packet_sink(sink)
 
 
 # -----------------------------------------------------------------------------
@@ -420,7 +448,7 @@ class SnoopingTransport(Transport):
             return SnoopingTransport(
                 transport, exit_stack.enter_context(snooper), exit_stack.pop_all().close
             )
-        raise RuntimeError('unexpected code path')  # Satisfy the type checker
+        raise core.UnreachableError()  # Satisfy the type checker
 
     class Source:
         sink: TransportSink
