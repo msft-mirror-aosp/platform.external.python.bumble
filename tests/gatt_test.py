@@ -47,8 +47,10 @@ from bumble.att import (
     ATT_EXCHANGE_MTU_REQUEST,
     ATT_ATTRIBUTE_NOT_FOUND_ERROR,
     ATT_PDU,
+    ATT_Error,
     ATT_Error_Response,
     ATT_Read_By_Group_Type_Request,
+    ErrorCode,
 )
 from .test_utils import async_barrier
 
@@ -881,6 +883,57 @@ async def test_unsubscribe():
 
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
+async def test_discover_all():
+    [client, server] = LinkedDevices().devices[:2]
+
+    characteristic1 = Characteristic(
+        'FDB159DB-036C-49E3-B3DB-6325AC750806',
+        Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
+        Characteristic.READABLE,
+        bytes([1, 2, 3]),
+    )
+
+    descriptor1 = Descriptor('2902', 'READABLE,WRITEABLE')
+    descriptor2 = Descriptor('AAAA', 'READABLE,WRITEABLE')
+    characteristic2 = Characteristic(
+        '3234C4F4-3F34-4616-8935-45A50EE05DEB',
+        Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
+        Characteristic.READABLE,
+        bytes([1, 2, 3]),
+        descriptors=[descriptor1, descriptor2],
+    )
+
+    service1 = Service(
+        '3A657F47-D34F-46B3-B1EC-698E29B6B829',
+        [characteristic1, characteristic2],
+    )
+    service2 = Service('1111', [])
+    server.add_services([service1, service2])
+
+    await client.power_on()
+    await server.power_on()
+    connection = await client.connect(server.random_address)
+    peer = Peer(connection)
+
+    await peer.discover_all()
+    assert len(peer.gatt_client.services) == 3
+    # service 1800 gets added automatically
+    assert peer.gatt_client.services[0].uuid == UUID('1800')
+    assert peer.gatt_client.services[1].uuid == service1.uuid
+    assert peer.gatt_client.services[2].uuid == service2.uuid
+    s = peer.get_services_by_uuid(service1.uuid)
+    assert len(s) == 1
+    assert len(s[0].characteristics) == 2
+    c = peer.get_characteristics_by_uuid(uuid=characteristic2.uuid, service=s[0])
+    assert len(c) == 1
+    assert len(c[0].descriptors) == 2
+    s = peer.get_services_by_uuid(service2.uuid)
+    assert len(s) == 1
+    assert len(s[0].characteristics) == 0
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
 async def test_mtu_exchange():
     [d1, d2, d3] = LinkedDevices().devices[:3]
 
@@ -1144,6 +1197,82 @@ def test_get_attribute_group():
             descriptor2.handle, Characteristic
         ).uuid
     )
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_get_characteristics_by_uuid():
+    [client, server] = LinkedDevices().devices[:2]
+
+    characteristic1 = Characteristic(
+        '1234',
+        Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
+        Characteristic.READABLE,
+        bytes([1, 2, 3]),
+    )
+    characteristic2 = Characteristic(
+        '5678',
+        Characteristic.Properties.READ | Characteristic.Properties.NOTIFY,
+        Characteristic.READABLE,
+        bytes([1, 2, 3]),
+    )
+    service1 = Service(
+        'ABCD',
+        [characteristic1, characteristic2],
+    )
+    service2 = Service(
+        'FFFF',
+        [characteristic1],
+    )
+
+    server.add_services([service1, service2])
+
+    await client.power_on()
+    await server.power_on()
+    connection = await client.connect(server.random_address)
+    peer = Peer(connection)
+
+    await peer.discover_services()
+    await peer.discover_characteristics()
+    c = peer.get_characteristics_by_uuid(uuid=UUID('1234'))
+    assert len(c) == 2
+    assert isinstance(c[0], CharacteristicProxy)
+    c = peer.get_characteristics_by_uuid(uuid=UUID('1234'), service=UUID('ABCD'))
+    assert len(c) == 1
+    assert isinstance(c[0], CharacteristicProxy)
+    c = peer.get_characteristics_by_uuid(uuid=UUID('1234'), service=UUID('AAAA'))
+    assert len(c) == 0
+
+    s = peer.get_services_by_uuid(uuid=UUID('ABCD'))
+    assert len(s) == 1
+    c = peer.get_characteristics_by_uuid(uuid=UUID('1234'), service=s[0])
+    assert len(s) == 1
+
+
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_write_return_error():
+    [client, server] = LinkedDevices().devices[:2]
+
+    on_write = Mock(side_effect=ATT_Error(error_code=ErrorCode.VALUE_NOT_ALLOWED))
+    characteristic = Characteristic(
+        '1234',
+        Characteristic.Properties.WRITE,
+        Characteristic.Permissions.WRITEABLE,
+        CharacteristicValue(write=on_write),
+    )
+    service = Service('ABCD', [characteristic])
+    server.add_service(service)
+
+    await client.power_on()
+    await server.power_on()
+    connection = await client.connect(server.random_address)
+
+    async with Peer(connection) as peer:
+        c = peer.get_characteristics_by_uuid(uuid=UUID('1234'))[0]
+        with pytest.raises(ATT_Error) as e:
+            await c.write_value(b'', with_response=True)
+        assert e.value.error_code == ErrorCode.VALUE_NOT_ALLOWED
 
 
 # -----------------------------------------------------------------------------
