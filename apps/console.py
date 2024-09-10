@@ -63,6 +63,7 @@ from bumble.transport import open_transport_or_link
 from bumble.gatt import Characteristic, Service, CharacteristicDeclaration, Descriptor
 from bumble.gatt_client import CharacteristicProxy
 from bumble.hci import (
+    Address,
     HCI_Constant,
     HCI_LE_1M_PHY,
     HCI_LE_2M_PHY,
@@ -289,11 +290,7 @@ class ConsoleApp:
                     device_config, hci_source, hci_sink
                 )
             else:
-                random_address = (
-                    f"{random.randint(192,255):02X}"  # address is static random
-                )
-                for random_byte in random.sample(range(255), 5):
-                    random_address += f":{random_byte:02X}"
+                random_address = Address.generate_static_address()
                 self.append_to_log(f"Setting random address: {random_address}")
                 self.device = Device.with_hci(
                     'Bumble', random_address, hci_source, hci_sink
@@ -503,21 +500,9 @@ class ConsoleApp:
             self.show_error('not connected')
             return
 
-        # Discover all services, characteristics and descriptors
-        self.append_to_output('discovering services...')
-        await self.connected_peer.discover_services()
-        self.append_to_output(
-            f'found {len(self.connected_peer.services)} services,'
-            ' discovering characteristics...'
-        )
-        await self.connected_peer.discover_characteristics()
-        self.append_to_output('found characteristics, discovering descriptors...')
-        for service in self.connected_peer.services:
-            for characteristic in service.characteristics:
-                await self.connected_peer.discover_descriptors(characteristic)
-        self.append_to_output('discovery completed')
-
-        self.show_remote_services(self.connected_peer.services)
+        self.append_to_output('Service Discovery starting...')
+        await self.connected_peer.discover_all()
+        self.append_to_output('Service Discovery done!')
 
     async def discover_attributes(self):
         if not self.connected_peer:
