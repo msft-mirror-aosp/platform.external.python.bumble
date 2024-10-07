@@ -23,8 +23,9 @@ import logging
 
 from bumble import device
 from bumble.hci import CodecID, CodingFormat
-from bumble.profiles.bap import (
-    AudioLocation,
+from bumble.profiles.ascs import (
+    AudioStreamControlService,
+    AudioStreamControlServiceProxy,
     AseStateMachine,
     ASE_Operation,
     ASE_Config_Codec,
@@ -35,6 +36,9 @@ from bumble.profiles.bap import (
     ASE_Receiver_Stop_Ready,
     ASE_Release,
     ASE_Update_Metadata,
+)
+from bumble.profiles.bap import (
+    AudioLocation,
     SupportedFrameDuration,
     SupportedSamplingFrequency,
     SamplingFrequency,
@@ -42,12 +46,13 @@ from bumble.profiles.bap import (
     CodecSpecificCapabilities,
     CodecSpecificConfiguration,
     ContextType,
+)
+from bumble.profiles.pacs import (
     PacRecord,
-    AudioStreamControlService,
-    AudioStreamControlServiceProxy,
     PublishedAudioCapabilitiesService,
     PublishedAudioCapabilitiesServiceProxy,
 )
+from bumble.profiles.le_audio import Metadata
 from tests.test_utils import TwoDevices
 
 
@@ -97,7 +102,7 @@ def test_pac_record() -> None:
     pac_record = PacRecord(
         coding_format=CodingFormat(CodecID.LC3),
         codec_specific_capabilities=cap,
-        metadata=b'',
+        metadata=Metadata([Metadata.Entry(tag=Metadata.Tag.VENDOR_SPECIFIC, data=b'')]),
     )
     assert PacRecord.from_bytes(bytes(pac_record)) == pac_record
 
@@ -142,7 +147,7 @@ def test_ASE_Config_QOS() -> None:
 def test_ASE_Enable() -> None:
     operation = ASE_Enable(
         ase_id=[1, 2],
-        metadata=[b'foo', b'bar'],
+        metadata=[b'', b''],
     )
     basic_check(operation)
 
@@ -151,7 +156,7 @@ def test_ASE_Enable() -> None:
 def test_ASE_Update_Metadata() -> None:
     operation = ASE_Update_Metadata(
         ase_id=[1, 2],
-        metadata=[b'foo', b'bar'],
+        metadata=[b'', b''],
     )
     basic_check(operation)
 
