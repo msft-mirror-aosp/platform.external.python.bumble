@@ -19,14 +19,13 @@ from __future__ import annotations
 import asyncio
 import functools
 from bumble import att, gatt, gatt_client
-from bumble.att import CommonErrorCode
 from bumble.core import InvalidArgumentError, InvalidStateError
 from bumble.device import Device, Connection
 from bumble.utils import AsyncRunner, OpenIntEnum
 from bumble.hci import Address
 from dataclasses import dataclass, field
 import logging
-from typing import Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 
 # -----------------------------------------------------------------------------
@@ -272,24 +271,12 @@ class HearingAccessService(gatt.TemplateService):
             def on_disconnection(_reason) -> None:
                 self.currently_connected_clients.remove(connection)
 
-            # TODO Should we filter on device bonded && device is HAP ?
-            self.currently_connected_clients.add(connection)
-            if (
-                connection.peer_address
-                not in self.preset_changed_operations_history_per_device
-            ):
-                self.preset_changed_operations_history_per_device[
-                    connection.peer_address
-                ] = []
-                return
+            @connection.on('pairing')  # type: ignore
+            def on_pairing(*_: Any) -> None:
+                self.on_incoming_paired_connection(connection)
 
-            async def on_connection_async() -> None:
-                # Send all the PresetChangedOperation that occur when not connected
-                await self._preset_changed_operation(connection)
-                # Update the active preset index if needed
-                await self.notify_active_preset_for_connection(connection)
-
-            connection.abort_on('disconnection', on_connection_async())
+            if connection.peer_resolvable_address:
+                self.on_incoming_paired_connection(connection)
 
         self.hearing_aid_features_characteristic = gatt.Characteristic(
             uuid=gatt.GATT_HEARING_AID_FEATURES_CHARACTERISTIC,
@@ -326,6 +313,27 @@ class HearingAccessService(gatt.TemplateService):
             ]
         )
 
+    def on_incoming_paired_connection(self, connection: Connection):
+        '''Setup initial operations to handle a remote bonded HAP device'''
+        # TODO Should we filter on HAP device only ?
+        self.currently_connected_clients.add(connection)
+        if (
+            connection.peer_address
+            not in self.preset_changed_operations_history_per_device
+        ):
+            self.preset_changed_operations_history_per_device[
+                connection.peer_address
+            ] = []
+            return
+
+        async def on_connection_async() -> None:
+            # Send all the PresetChangedOperation that occur when not connected
+            await self._preset_changed_operation(connection)
+            # Update the active preset index if needed
+            await self.notify_active_preset_for_connection(connection)
+
+        connection.abort_on('disconnection', on_connection_async())
+
     def _on_read_active_preset_index(
         self, __connection__: Optional[Connection]
     ) -> bytes:
@@ -352,16 +360,16 @@ class HearingAccessService(gatt.TemplateService):
             logging.warning(f'HAS require MTU >= 49: {connection}')
 
         if self.read_presets_request_in_progress:
-            raise att.ATT_Error(CommonErrorCode.PROCEDURE_ALREADY_IN_PROGRESS)
+            raise att.ATT_Error(att.ErrorCode.PROCEDURE_ALREADY_IN_PROGRESS)
         self.read_presets_request_in_progress = True
 
         start_index = value[1]
         if start_index == 0x00:
-            raise att.ATT_Error(CommonErrorCode.OUT_OF_RANGE)
+            raise att.ATT_Error(att.ErrorCode.OUT_OF_RANGE)
 
         num_presets = value[2]
         if num_presets == 0x00:
-            raise att.ATT_Error(CommonErrorCode.OUT_OF_RANGE)
+            raise att.ATT_Error(att.ErrorCode.OUT_OF_RANGE)
 
         # Sending `num_presets` presets ordered by increasing index field, starting from start_index
         presets = [
@@ -371,7 +379,7 @@ class HearingAccessService(gatt.TemplateService):
         ]
         del presets[num_presets:]
         if len(presets) == 0:
-            raise att.ATT_Error(CommonErrorCode.OUT_OF_RANGE)
+            raise att.ATT_Error(att.ErrorCode.OUT_OF_RANGE)
 
         AsyncRunner.spawn(self._read_preset_response(connection, presets))
 
@@ -468,7 +476,7 @@ class HearingAccessService(gatt.TemplateService):
         assert connection
 
         if self.read_presets_request_in_progress:
-            raise att.ATT_Error(CommonErrorCode.PROCEDURE_ALREADY_IN_PROGRESS)
+            raise att.ATT_Error(att.ErrorCode.PROCEDURE_ALREADY_IN_PROGRESS)
 
         index = value[1]
         preset = self.preset_records.get(index, None)
