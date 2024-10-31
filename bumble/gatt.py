@@ -275,6 +275,11 @@ GATT_SOURCE_AUDIO_LOCATION_CHARACTERISTIC       = UUID.from_16_bits(0x2BCC, 'Sou
 GATT_AVAILABLE_AUDIO_CONTEXTS_CHARACTERISTIC    = UUID.from_16_bits(0x2BCD, 'Available Audio Contexts')
 GATT_SUPPORTED_AUDIO_CONTEXTS_CHARACTERISTIC    = UUID.from_16_bits(0x2BCE, 'Supported Audio Contexts')
 
+# Hearing Access Service
+GATT_HEARING_AID_FEATURES_CHARACTERISTIC             = UUID.from_16_bits(0x2BDA, 'Hearing Aid Features')
+GATT_HEARING_AID_PRESET_CONTROL_POINT_CHARACTERISTIC = UUID.from_16_bits(0x2BDB, 'Hearing Aid Preset Control Point')
+GATT_ACTIVE_PRESET_INDEX_CHARACTERISTIC              = UUID.from_16_bits(0x2BDC, 'Active Preset Index')
+
 # ASHA Service
 GATT_ASHA_SERVICE                             = UUID.from_16_bits(0xFDF0, 'Audio Streaming for Hearing Aid')
 GATT_ASHA_READ_ONLY_PROPERTIES_CHARACTERISTIC = UUID('6333651e-c481-4a3e-9169-7c902aad37bb', 'ReadOnlyProperties')
@@ -340,7 +345,7 @@ class Service(Attribute):
         uuid: Union[str, UUID],
         characteristics: List[Characteristic],
         primary=True,
-        included_services: List[Service] = [],
+        included_services: Iterable[Service] = (),
     ) -> None:
         # Convert the uuid to a UUID object if it isn't already
         if isinstance(uuid, str):
@@ -356,7 +361,7 @@ class Service(Attribute):
             uuid.to_pdu_bytes(),
         )
         self.uuid = uuid
-        self.included_services = included_services[:]
+        self.included_services = list(included_services)
         self.characteristics = characteristics[:]
         self.primary = primary
 
@@ -390,7 +395,7 @@ class TemplateService(Service):
         self,
         characteristics: List[Characteristic],
         primary: bool = True,
-        included_services: List[Service] = [],
+        included_services: Iterable[Service] = (),
     ) -> None:
         super().__init__(self.UUID, characteristics, primary, included_services)
 
