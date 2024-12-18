@@ -11,7 +11,7 @@ third_party {
     type: GIT
     value: "https://github.com/google/bumble"
   }
-  version: "7b34bb405073f4f4b9af5937149f2ad677ed6232"
-  last_upgrade_date { year: 2024 month: 9 day: 05 }
+  version: "737abdc481b226b16d85174d9ae0ebd9346b0fb4"
+  last_upgrade_date { year: 2024 month: 9 day: 17 }
   license_type: NOTICE
 }
